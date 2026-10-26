@@ -8,14 +8,12 @@
 // read and write of Linear runs under one lock, so a poll can never resurrect
 // a block that an answer just closed, and two answers to one issue cannot
 // both post.
-import { posix } from "node:path";
 import {
   PluginCliError,
   cliCommand,
   defineCli,
   experimental_PluginRpcRefusal,
   type BbPluginApi,
-  type PluginCliContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, postComment, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
@@ -59,6 +57,7 @@ import {
   type RecordView,
   type Snapshot,
 } from "./lib/contract.ts";
+import { readHostFile } from "./lib/host-file.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
@@ -690,42 +689,6 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
     });
 
-    /** The machine the CLI was called from: the thread's, `--machine`, or the server's. */
-    async function invokingHost(ctx: PluginCliContext, machine: string | undefined): Promise<string | undefined> {
-      if (machine !== undefined) {
-        const hosts = await bb.sdk.hosts.list();
-        const matches = hosts.filter((host) => host.id === machine || host.name === machine);
-        if (matches.length === 1) return matches[0]!.id;
-        throw new PluginCliError(
-          matches.length === 0 ? `No machine is named ${machine}.` : `${matches.length} machines are named ${machine}; use an id.`,
-          { code: "unknown_machine", hint: "Run `bb machine list` for names and ids." },
-        );
-      }
-      if (ctx.threadId === undefined) return undefined;
-      const thread = await bb.sdk.threads.get({ threadId: ctx.threadId });
-      if (thread.environmentId === null) return undefined;
-      return (await bb.sdk.environments.get({ environmentId: thread.environmentId })).hostId;
-    }
-
-    async function readHostFile(path: string, ctx: PluginCliContext, machine: string | undefined, flag: string): Promise<string> {
-      let absolute = path;
-      if (!posix.isAbsolute(path)) {
-        if (ctx.cwd === undefined) {
-          throw new PluginCliError(`${path} is relative and this command has no working directory.`, {
-            code: "relative_path",
-            hint: `Pass an absolute path to ${flag}.`,
-          });
-        }
-        absolute = posix.resolve(ctx.cwd, path);
-      }
-      const hostId = await invokingHost(ctx, machine);
-      const file = await bb.sdk.files.read({ path: absolute, ...(hostId === undefined ? {} : { hostId }) });
-      if (file.sizeBytes > MAX_ANSWER_BYTES) {
-        throw new PluginCliError(`${absolute} is over ${MAX_ANSWER_BYTES} bytes.`, { code: "file_too_large" });
-      }
-      return file.contentEncoding === "base64" ? Buffer.from(file.content, "base64").toString("utf8") : file.content;
-    }
-
     const json = { type: "boolean", description: "Print machine-readable JSON" } as const;
     bb.cli.register(
       defineCli({
@@ -782,7 +745,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               const raw =
                 input.options["question-file"] === undefined
                   ? (input.options.question ?? "")
-                  : await readHostFile(input.options["question-file"], ctx, input.options.machine, "--question-file");
+                  : await readHostFile(bb.sdk, input.options["question-file"], ctx, input.options.machine, "--question-file", MAX_ANSWER_BYTES);
               let question: string;
               let options: ReturnType<typeof askOptions>;
               let issue: string | null;
@@ -915,7 +878,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             },
             async run(input, ctx) {
               const refs = input.options.block.map(parseBlockOption);
-              const text = (await readHostFile(input.options["text-file"], ctx, input.options.machine, "--text-file")).trim();
+              const text = (await readHostFile(bb.sdk, input.options["text-file"], ctx, input.options.machine, "--text-file", MAX_ANSWER_BYTES)).trim();
               if (commentRole({ body: text, author: "user" }) !== "answer") {
                 throw new PluginCliError("The answer text starts with [agent:, an agent's signature.", {
                   code: "invalid",
