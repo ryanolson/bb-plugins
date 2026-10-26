@@ -401,7 +401,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return snapshot;
     }
 
-    const poll = (force: boolean, signal?: AbortSignal) => locked(() => pollNow(force, signal));
+    /** Bumped by every answer. A poll queued before an answer skips itself, so the answer goes first. */
+    let answerEpoch = 0;
+    const poll = (force: boolean, signal?: AbortSignal) => {
+      const epoch = answerEpoch;
+      return locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
+    };
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
     const pollForCaller = async (force: boolean) => (await poll(force)) ?? (await poll(force));
 
@@ -461,12 +466,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
      * question nobody read or on an option whose text changed.
      */
     function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
-      // An answer never waits behind a poll: stop it, and poll again after.
-      if (runningPoll !== null) {
-        runningPoll.abort();
-        pollAgain = true;
-        wake?.();
-      }
+      // An answer never waits behind a poll: stop the running one, make the
+      // queued ones skip, and poll again after.
+      answerEpoch += 1;
+      runningPoll?.abort();
+      pollAgain = true;
+      wake?.();
       return locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
         if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
