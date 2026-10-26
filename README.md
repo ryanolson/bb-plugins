@@ -17,7 +17,12 @@ git clone git@github.com:ishandhanani/bb-plugins.git
 cd bb-plugins
 bb plugin install ./roundtable
 bb plugin install ./review-desk
-bb plugin install ./sgc-steward
+```
+
+`sgc-steward` is in the `ryanolson/bb-plugins` fork:
+
+```
+bb plugin install git:https://github.com/ryanolson/bb-plugins.git --subdirectory sgc-steward
 ```
 
 Iterate with `bb plugin reload <id>`; type-check a plugin with `npx tsc -p .` inside its directory.
