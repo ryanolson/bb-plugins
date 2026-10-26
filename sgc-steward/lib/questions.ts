@@ -307,6 +307,45 @@ export function answerCommentId(issueId: string, body: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Whether an answer's block references name exactly the open blocks, at their revisions. */
+export function sameBlocks(sent: readonly BlockRef[], open: readonly QuestionBlock[]): boolean {
+  const key = (id: string, revision: string) => `${id}@${revision}`;
+  const a = sent.map((ref) => key(ref.blockId, ref.revision)).sort();
+  const b = open.map((block) => key(block.commentId, block.revision)).sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+/**
+ * The answer an earlier try already posted: the comment with the id this
+ * same answer derives, when it is on the issue. Its reply was lost, so
+ * the answer is finished instead of refused.
+ */
+export function postedBefore(
+  issueId: string,
+  comments: readonly LinearComment[],
+  expected: readonly BlockRef[],
+  compose: (blocks: QuestionBlock[]) => string,
+): { commentId: string; body: string; blocks: QuestionBlock[] } | null {
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const blocks: QuestionBlock[] = [];
+  for (const ref of expected) {
+    const comment = byId.get(ref.blockId);
+    // The id and revision pin the block, so any signed comment may be read as one.
+    const block = comment === undefined ? null : parseQuestionBlock(comment, "needs-decision");
+    if (block === null || block.revision !== ref.revision) return null;
+    blocks.push(block);
+  }
+  blocks.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.commentId.localeCompare(b.commentId));
+  let body: string;
+  try {
+    body = compose(blocks);
+  } catch {
+    return null;
+  }
+  const commentId = answerCommentId(issueId, body);
+  return byId.has(commentId) ? { commentId, body, blocks } : null;
+}
+
 /**
  * A typed answer, as `bb sgc answer` posts it: one header line per block it
  * answers, then the text as written.

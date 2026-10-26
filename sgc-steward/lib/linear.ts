@@ -4,7 +4,7 @@
 // it, and they carry a kind so the server can tell "fix your key" from "try
 // again later".
 
-import type { LinearComment } from "./questions.ts";
+import { answerCommentId, type LinearComment } from "./questions.ts";
 
 export const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 export const CHECKIN_LABEL = "checkin";
@@ -342,4 +342,36 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
       if (!data.issueRemoveLabel.success) throw new LinearError("graphql", "Linear did not remove the label.");
     },
   };
+}
+
+/** A failure where Linear may have done the write before the reply was lost. */
+function unclear(error: unknown): boolean {
+  return error instanceof LinearError && (error.kind === "network" || error.kind === "http" || error.kind === "timeout");
+}
+
+/**
+ * Post an answer under the id derived from it. A comment with that id is
+ * this same answer, from an earlier try or submission, so finding one
+ * after a failure counts as success. Only an unclear failure is tried a
+ * second time, with the same id.
+ */
+export async function postComment(linear: LinearClient, issueId: string, body: string): Promise<string> {
+  const commentId = answerCommentId(issueId, body);
+  const landed = () =>
+    linear.listComments(issueId).then(
+      (comments) => comments.some((comment) => comment.id === commentId),
+      () => false,
+    );
+  try {
+    return await linear.createComment({ issueId, body, commentId });
+  } catch (error) {
+    if (await landed()) return commentId;
+    if (!unclear(error)) throw error;
+  }
+  try {
+    return await linear.createComment({ issueId, body, commentId });
+  } catch (error) {
+    if (await landed()) return commentId;
+    throw error;
+  }
 }

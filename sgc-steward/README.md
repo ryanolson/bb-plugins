@@ -136,7 +136,7 @@ bb plugin logs sgc-steward
 - `lib/questions.ts`: the question format, the open rules, and the answer text.
 - `lib/asks.ts`: checks for `bb sgc ask` and the text of what goes back: the message to the thread and the Linear record.
 - `lib/ask-store.ts`: the SQLite tables for bb questions, deliveries, and records.
-- `lib/linear.ts`: the Linear GraphQL client.
+- `lib/linear.ts`: the Linear GraphQL client, and posting a comment under the id its answer derives.
 - `lib/panel.ts`: the page's answer drafts, card order, badge, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
