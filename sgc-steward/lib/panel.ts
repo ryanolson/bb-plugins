@@ -80,3 +80,54 @@ export function announcement(notes: readonly Notice[]): { title: string; body: s
   }
   return { title: `${notes.length} new questions`, body: notes.map((note) => `${note.label}: ${note.preview}`).join("\n") };
 }
+
+/** A card on the page: an issue with open Linear blocks, or an open bb question. */
+export type Card<I, A> = { kind: "issue"; at: number; issue: I } | { kind: "ask"; at: number; ask: A };
+
+/** Issues and bb questions in one list, oldest first; an issue counts from its oldest open block. */
+export function orderCards<I extends { blocks: readonly Pick<QuestionBlock, "createdAt">[] }, A extends { askedAt: number }>(
+  issues: readonly I[],
+  asks: readonly A[],
+): Array<Card<I, A>> {
+  const cards: Array<Card<I, A>> = [
+    ...issues.map((issue) => ({ kind: "issue" as const, at: Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt))), issue })),
+    ...asks.map((ask) => ({ kind: "ask" as const, at: ask.askedAt, ask })),
+  ];
+  return cards.sort((a, b) => a.at - b.at);
+}
+
+/** What the owner picked or typed for one bb question. */
+export interface AskDraft {
+  option: string | null;
+  text: string;
+}
+
+/** The `asks.answer` input, or null when the draft says nothing yet. */
+export function askAnswerInput(id: string, draft: AskDraft): { id: string; option: string | null; text: string } | null {
+  if (draft.option === null && draft.text.trim() === "") return null;
+  return { id, option: draft.option, text: draft.text };
+}
+
+interface BadgeInput {
+  configured: boolean;
+  error: string | null;
+  issues: ReadonlyArray<{ blocks: readonly QuestionBlock[] }>;
+  asks: readonly unknown[];
+  undelivered: readonly unknown[];
+  unposted: readonly unknown[];
+}
+
+/** The sidebar badge: open questions first, then answers that did not go out, then Linear trouble. */
+export function questionBadge(view: BadgeInput): { count?: number; tone: "warning" | "critical"; label: string } | null {
+  const linear = view.issues.reduce(
+    (sum, issue) => sum + issue.blocks.reduce((count, block) => count + (block.format === "parsed" ? block.questions.length : 1), 0),
+    0,
+  );
+  const open = linear + view.asks.length;
+  if (open > 0) return { count: open, tone: "warning", label: `${open} open question${open === 1 ? "" : "s"}` };
+  const stuck = view.undelivered.length + view.unposted.length;
+  if (stuck > 0) return { tone: "critical", label: `${stuck} answer${stuck === 1 ? "" : "s"} did not go out` };
+  if (!view.configured) return { tone: "critical", label: "SGC Steward needs a Linear API key" };
+  if (view.error !== null) return { tone: "critical", label: "SGC Steward cannot read Linear" };
+  return null;
+}

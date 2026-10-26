@@ -1,5 +1,7 @@
 // SGC Steward frontend: the Questions page, its sidebar badge, and the
-// notifier that tells you, once per question block, that new questions came.
+// notifier that tells you, once per question, that new questions came. The
+// page holds two kinds of question: Linear blocks, and bb questions agents
+// asked with `bb sgc ask`.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
@@ -16,9 +18,19 @@ import {
   useRpc,
   type ExperimentalBadge,
 } from "@get-bb/plugin-sdk/app";
-import type { IssueView, QuestionNotification, Snapshot, rpcContract } from "./server.ts";
+import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, rpcContract } from "./server.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
-import { announcement, answerProgress, EMPTY_DRAFT, toAnswerBlocks, type BlockDraft } from "./lib/panel.ts";
+import {
+  announcement,
+  answerProgress,
+  askAnswerInput,
+  EMPTY_DRAFT,
+  orderCards,
+  questionBadge,
+  toAnswerBlocks,
+  type AskDraft,
+  type BlockDraft,
+} from "./lib/panel.ts";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
@@ -30,10 +42,10 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** The last poll's questions, refetched whenever the server says they changed. */
+/** The last poll's questions and the bb questions, refetched whenever the server says they changed. */
 function useQuestions() {
   const rpc = useRpc<typeof rpcContract>();
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<Panel | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const load = useCallback(() => {
     rpc.call("questions.list", null).then(
@@ -49,21 +61,9 @@ function useQuestions() {
   return { rpc, snapshot, setSnapshot, loadError, load };
 }
 
-function questionCount(snapshot: Snapshot): number {
-  return snapshot.issues.reduce(
-    (sum, issue) => sum + issue.blocks.reduce((count, block) => count + (block.format === "parsed" ? block.questions.length : 1), 0),
-    0,
-  );
-}
-
 function useQuestionsBadge(): ExperimentalBadge | null {
   const { snapshot } = useQuestions();
-  if (snapshot === null) return null;
-  const count = questionCount(snapshot);
-  if (count > 0) return { count, tone: "warning", label: `${count} open steward question${count === 1 ? "" : "s"}` };
-  if (!snapshot.configured) return { tone: "critical", label: "SGC Steward needs a Linear API key" };
-  if (snapshot.error !== null) return { tone: "critical", label: "SGC Steward cannot read Linear" };
-  return null;
+  return snapshot === null ? null : questionBadge(snapshot);
 }
 
 function relativeTime(at: number, now: number): string {
@@ -295,6 +295,179 @@ function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => 
   );
 }
 
+function AskCard({ ask, onAnswered }: { ask: AskView; onAnswered: () => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [draft, setDraft] = useState<AskDraft>({ option: null, text: "" });
+  const [posting, setPosting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const input = askAnswerInput(ask.id, draft);
+  const who = ask.threadTitle || ask.threadId;
+  const options = [...ask.options].sort((a, b) => Number(b.recommended) - Number(a.recommended));
+
+  async function submit() {
+    if (input === null) return;
+    setPosting(true);
+    setError(null);
+    try {
+      const result = await rpc.call("asks.answer", input);
+      if (result.delivered) toast.success(`Sent the answer to ${who}`);
+      else toast.error(`Saved the answer, but could not send it to ${who}`, result.deliveryError === null ? {} : { description: result.deliveryError });
+      if (result.record === "posted") toast.success(`Recorded it on ${ask.issue}`);
+      if (result.record === "failed") toast.error(`Could not record it on ${ask.issue}`, result.recordError === null ? {} : { description: result.recordError });
+      onAnswered();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  return (
+    <section className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+        <span className="rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">bb question</span>
+        <button
+          type="button"
+          className="min-w-0 cursor-pointer font-medium underline-offset-2 hover:underline"
+          onClick={() => navigate.toThread(ask.threadId)}
+          title="Open the thread that asked"
+        >
+          {who}
+        </button>
+        <span className="font-mono text-xs text-muted-foreground">{ask.id}</span>
+        {ask.issue === null ? null : <span className="text-xs text-muted-foreground">issue {ask.issue}</span>}
+      </header>
+      <Markdown content={ask.question} className="text-sm" />
+      {options.length === 0 ? null : (
+        <div className="space-y-1.5">
+          {options.map((option) => (
+            <label
+              key={option.letter}
+              className={cn(
+                "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
+                draft.option === option.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
+              )}
+            >
+              <input
+                type="radio"
+                name={ask.id}
+                className="mt-0.5"
+                checked={draft.option === option.letter}
+                onChange={() => setDraft({ ...draft, option: option.letter })}
+              />
+              <span className="font-mono">{option.letter}</span>
+              <span className="min-w-0 flex-1 whitespace-pre-wrap">{option.text}</span>
+              {option.recommended ? (
+                <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span>
+              ) : null}
+            </label>
+          ))}
+          {draft.option === null ? null : (
+            <button
+              type="button"
+              className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              onClick={() => setDraft({ ...draft, option: null })}
+            >
+              Clear choice
+            </button>
+          )}
+        </div>
+      )}
+      <textarea
+        className={textareaClass()}
+        value={draft.text}
+        aria-label={`Answer to ${ask.id}`}
+        placeholder={options.length === 0 ? "Type your answer" : draft.option === null ? "Or type your own answer" : "Add a note (optional)"}
+        onChange={(event) => setDraft({ ...draft, text: event.target.value })}
+      />
+      {error === null ? null : (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <footer className="flex flex-wrap items-center gap-3">
+        <Button disabled={posting || input === null} onClick={() => void submit()}>
+          {posting ? "Sending…" : "Send answer"}
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          It goes to the asking thread as a message{ask.issue === null ? "." : `, and a record of it goes on ${ask.issue}.`}
+        </span>
+      </footer>
+    </section>
+  );
+}
+
+/** Answers saved but not sent to their thread, and records not posted to Linear, each with a retry. */
+function Undelivered({ undelivered, unposted }: { undelivered: DeliveryView[]; unposted: RecordView[] }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [busy, setBusy] = useState<string | null>(null);
+  if (undelivered.length === 0 && unposted.length === 0) return null;
+
+  async function retry(key: string, work: () => Promise<{ done: boolean; error: string | null }>) {
+    setBusy(key);
+    try {
+      const { done, error } = await work();
+      if (done) toast.success("Done");
+      else toast.error("Still failing", error === null ? {} : { description: error });
+    } catch (cause) {
+      toast.error(errorText(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="space-y-2 rounded-lg border border-destructive/40 p-4 text-sm">
+      <h2 className="font-medium">Answers that did not go out</h2>
+      <p className="text-xs text-muted-foreground">A send that looked failed may still have arrived, so a retry can deliver an answer twice.</p>
+      <ul className="space-y-2">
+        {undelivered.map((row) => (
+          <li key={row.id} className="flex flex-wrap items-center gap-2">
+            <span className="min-w-0 flex-1">
+              {row.label} to <span className="font-mono">{row.threadId}</span>: {row.error ?? "not sent yet"} ({row.attempts}{" "}
+              {row.attempts === 1 ? "try" : "tries"})
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() =>
+                void retry(row.id, async () => {
+                  const result = await rpc.call("deliveries.retry", { id: row.id });
+                  return { done: result.delivered, error: result.error };
+                })
+              }
+            >
+              {busy === row.id ? "Sending…" : "Send again"}
+            </Button>
+          </li>
+        ))}
+        {unposted.map((row) => (
+          <li key={row.askId} className="flex flex-wrap items-center gap-2">
+            <span className="min-w-0 flex-1">
+              Record of {row.askId} on {row.issue}: {row.error ?? "not posted yet"}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() =>
+                void retry(row.askId, async () => {
+                  const result = await rpc.call("records.retry", { askId: row.askId });
+                  return { done: result.posted, error: result.error };
+                })
+              }
+            >
+              {busy === row.askId ? "Posting…" : "Post again"}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function QuestionsPage() {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
   const [refreshing, setRefreshing] = useState(false);
@@ -345,16 +518,23 @@ function QuestionsPage() {
             Could not read {failed.identifier}: {failed.message}
           </Notice>
         ))}
-        {snapshot !== null && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
+        {snapshot === null ? null : <Undelivered undelivered={snapshot.undelivered} unposted={snapshot.unposted} />}
+        {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
           <Notice>No open questions.</Notice>
         ) : null}
-        {snapshot?.issues.map((issue) => (
-          <IssueCard
-            key={`${issue.id}:${issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
-            issue={issue}
-            onAnswered={load}
-          />
-        ))}
+        {snapshot === null
+          ? null
+          : orderCards(snapshot.issues, snapshot.asks).map((card) =>
+              card.kind === "issue" ? (
+                <IssueCard
+                  key={`${card.issue.id}:${card.issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
+                  issue={card.issue}
+                  onAnswered={load}
+                />
+              ) : (
+                <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
+              ),
+            )}
       </div>
     </div>
   );

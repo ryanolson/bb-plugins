@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerProgress, announcement, toAnswerBlocks, type BlockDraft } from "./panel.ts";
+import { answerProgress, announcement, askAnswerInput, orderCards, questionBadge, toAnswerBlocks, type BlockDraft } from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
 
 function block(id: string, body: string, createdAt: string): QuestionBlock {
@@ -82,4 +82,35 @@ test("one new question names its issue or its thread; several are summed up in o
     title: "2 new questions",
     body: "TEAM-1: Scale?\nDriver: test project: Ship it?",
   });
+});
+
+test("cards from Linear issues and bb questions come oldest first", () => {
+  const issues = [
+    { id: "i2", blocks: [raw] },
+    { id: "i1", blocks: [parsed, raw] },
+  ];
+  const asks = [
+    { id: "bbq_late", askedAt: Date.parse("2026-01-07T00:00:00Z") },
+    { id: "bbq_early", askedAt: Date.parse("2026-01-04T00:00:00Z") },
+  ];
+  assert.deepEqual(
+    orderCards(issues, asks).map((card) => (card.kind === "issue" ? card.issue.id : card.ask.id)),
+    ["bbq_early", "i1", "i2", "bbq_late"],
+  );
+});
+
+test("a bb question's answer is a picked option, typed text, or both", () => {
+  assert.equal(askAnswerInput("bbq_1", { option: null, text: "  " }), null);
+  assert.deepEqual(askAnswerInput("bbq_1", { option: "B", text: "" }), { id: "bbq_1", option: "B", text: "" });
+  assert.deepEqual(askAnswerInput("bbq_1", { option: null, text: "Later." }), { id: "bbq_1", option: null, text: "Later." });
+});
+
+test("the badge counts open questions, then flags answers that did not go out, then Linear trouble", () => {
+  const base = { configured: true, error: null, issues: [], asks: [], undelivered: [], unposted: [] };
+  assert.equal(questionBadge(base), null);
+  assert.deepEqual(questionBadge({ ...base, issues: [{ blocks: [parsed, raw] }], asks: [{}] }), { count: 4, tone: "warning", label: "4 open questions" });
+  assert.deepEqual(questionBadge({ ...base, asks: [{}] }), { count: 1, tone: "warning", label: "1 open question" });
+  assert.deepEqual(questionBadge({ ...base, undelivered: [{}], unposted: [{}] }), { tone: "critical", label: "2 answers did not go out" });
+  assert.deepEqual(questionBadge({ ...base, configured: false }), { tone: "critical", label: "SGC Steward needs a Linear API key" });
+  assert.deepEqual(questionBadge({ ...base, error: "boom" }), { tone: "critical", label: "SGC Steward cannot read Linear" });
 });
