@@ -86,19 +86,44 @@ test("an answer is saved once, with its delivery and its record, in one step", (
   assert.equal(store.answer("bbq_9", { option: "A", text: "" }, { message: "m", label: "x" }, null), "not_found");
 });
 
+const ANSWER = { ref: "c-1", issueId: "uuid-1", label: "TEAM-1", message: "one" };
+
+test("a held delivery is released once, and only to the first caller", () => {
+  const { store } = open();
+  store.hold(ANSWER, ["thr_a", "thr_b"]);
+  store.hold({ ...ANSWER, message: "two" }, ["thr_a"]);
+  assert.deepEqual(store.undelivered(), [], "held deliveries are not listed");
+  assert.deepEqual(store.held(), [{ ref: "c-1", issueId: "uuid-1", label: "TEAM-1", heldAt: store.deliveryFor("linear", "c-1", "thr_a")!.createdAt }]);
+  const released = store.release("c-1");
+  assert.deepEqual(released.map((row) => [row.threadId, row.state, row.message]), [["thr_a", "pending", "one"], ["thr_b", "pending", "one"]]);
+  assert.deepEqual(store.release("c-1"), [], "a second release hands out nothing");
+  assert.deepEqual(store.held(), []);
+  store.hold(ANSWER, ["thr_a"]);
+  assert.equal(store.deliveryFor("linear", "c-1", "thr_a")!.state, "pending", "holding again leaves a released delivery as it is");
+});
+
+test("dropping an answer forgets only its held deliveries", () => {
+  const { store } = open();
+  store.hold(ANSWER, ["thr_a"]);
+  store.hold({ ...ANSWER, ref: "c-2" }, ["thr_a"]);
+  store.release("c-2");
+  store.drop("c-1");
+  store.drop("c-2");
+  assert.equal(store.deliveryFor("linear", "c-1", "thr_a"), null);
+  assert.equal(store.deliveryFor("linear", "c-2", "thr_a")!.state, "pending");
+});
+
 test("a delivery is kept once per source, reference, and thread, and records its attempts", () => {
   const { store } = open();
-  const first = store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "one" });
-  const again = store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "two" });
-  assert.equal(again.id, first.id);
-  assert.equal(again.message, "one");
-  store.markDelivery(first.id, { ok: false, error: "thread not found" });
+  store.hold(ANSWER, ["thr_a"]);
+  const [first] = store.release("c-1");
+  store.markDelivery(first!.id, { ok: false, error: "thread not found" });
   assert.deepEqual(
     store.undelivered().map((row) => [row.id, row.state, row.error, row.attempts]),
-    [[first.id, "failed", "thread not found", 1]],
+    [[first!.id, "failed", "thread not found", 1]],
   );
-  store.markDelivery(first.id, { ok: true });
-  const delivered = store.getDelivery(first.id)!;
+  store.markDelivery(first!.id, { ok: true });
+  const delivered = store.getDelivery(first!.id)!;
   assert.deepEqual([delivered.state, delivered.error, delivered.attempts], ["delivered", null, 2]);
   assert.ok(delivered.deliveredAt !== null);
   assert.deepEqual(store.undelivered(), []);
@@ -131,11 +156,14 @@ test("questions and their deliveries survive closing and reopening the database"
     const path = join(dir, "data.db");
     const first = open(path);
     first.store.insert(ask("bbq_1"), false);
-    first.store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "one" });
+    first.store.hold(ANSWER, ["thr_a"]);
+    first.store.hold({ ...ANSWER, ref: "c-2" }, ["thr_a"]);
+    first.store.release("c-2");
     first.db.close();
     const second = open(path);
     assert.deepEqual(second.store.listOpen().map((row) => row.id), ["bbq_1"]);
-    assert.equal(second.store.undelivered().length, 1);
+    assert.deepEqual(second.store.held().map((row) => row.ref), ["c-1"]);
+    assert.deepEqual(second.store.undelivered().map((row) => row.ref), ["c-2"]);
     second.db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -44,7 +44,7 @@ import {
   isThreadId,
   type AskAnswer,
 } from "./lib/asks.ts";
-import { ASK_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow } from "./lib/ask-store.ts";
+import { ASK_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered } from "./lib/ask-store.ts";
 import {
   rpcContract,
   type AnswerResult,
@@ -82,6 +82,11 @@ export interface SgcStewardOptions {
   createClient?: (apiKey: string) => LinearClient;
   /** Pause between label removal attempts. */
   retryDelayMs?: number;
+  /**
+   * How long an answer's post can take. A delivery held for an answer that
+   * is still not on Linear after this long is dropped: the post failed.
+   */
+  postWindowMs?: number;
 }
 
 function message(error: unknown): string {
@@ -103,7 +108,7 @@ function askView(row: AskRow): AskView {
   return { id: row.id, threadId: row.threadId, threadTitle: row.threadTitle, question: row.question, options: row.options, issue: row.issue, askedAt: row.askedAt };
 }
 
-function deliveryView(row: Delivery): DeliveryView {
+function deliveryView(row: Undelivered): DeliveryView {
   return {
     id: row.id,
     source: row.source,
@@ -123,6 +128,8 @@ function recordView(row: RecordRow): RecordView {
 
 export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
   const retryDelayMs = options.retryDelayMs ?? 1000;
+  // Two tries of 30 seconds each, the checks after them, and a wide margin.
+  const postWindowMs = options.postWindowMs ?? 10 * 60 * 1000;
   const makeClient = options.createClient ?? ((apiKey: string) => createLinearClient({ apiKey }));
 
   return async function sgcSteward(bb: BbPluginApi): Promise<void> {
@@ -267,6 +274,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       const linear = clientFor(linearApiKey);
       const fullRefresh = force || checkedAt - lastFullRefreshAt >= FULL_REFRESH_MS;
       try {
+        await settleHeld(linear, signal, linearApiKey);
+        if (signal.aborted) return null;
         const listed = await linear.listQuestionIssues(teamKey, signal);
         if (signal.aborted) return null;
         const issues: IssueView[] = [];
@@ -346,7 +355,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
      */
     async function deliver(id: string): Promise<Delivery | null> {
       const row = asks.getDelivery(id);
-      if (row === null || row.state === "delivered" || sending.has(id)) return row;
+      if (row === null || row.state === "held" || row.state === "delivered" || sending.has(id)) return row;
       sending.add(id);
       try {
         await bb.sdk.threads.send({ threadId: row.threadId, mode: "queue-if-active", input: [{ type: "text", text: row.message, mentions: [] }] });
@@ -367,15 +376,56 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return { threadId, delivered, error: delivered ? null : (row?.error ?? null) };
     }
 
-    /** Send an answer to Linear blocks to each bb thread that signed one of them, once per thread. */
-    async function deliverBlockAnswer(identifier: string, commentId: string, body: string, blocks: readonly QuestionBlock[]) {
-      const threads = [...new Set(blocks.flatMap((block) => (block.threadId !== null && isThreadId(block.threadId) ? [block.threadId] : [])))];
+    /** The bb threads that signed the blocks, once each. */
+    function signers(blocks: readonly QuestionBlock[]): string[] {
+      return [...new Set(blocks.flatMap((block) => (block.threadId !== null && isThreadId(block.threadId) ? [block.threadId] : [])))];
+    }
+
+    /** Keep the deliveries of an answer to Linear blocks, held until the answer is known to be on Linear. */
+    function holdDeliveries(issue: LinearIssue, commentId: string, body: string, blocks: readonly QuestionBlock[]): void {
+      const text = blockDelivery(issue.identifier, commentId, body);
+      asks.hold({ ref: commentId, issueId: issue.id, label: issue.identifier, message: text }, signers(blocks));
+    }
+
+    /**
+     * Send the deliveries this caller released, and report every thread that
+     * signed the answered blocks. A delivery released earlier is not sent
+     * again: only the owner's retry does that.
+     */
+    async function sendReleased(released: readonly Delivery[], commentId: string, threads: readonly string[]) {
       const results = [];
       for (const threadId of threads) {
-        const kept = asks.addDelivery({ source: "linear", ref: commentId, threadId, label: identifier, message: blockDelivery(identifier, commentId, body) });
-        results.push(notified(await deliver(kept.id), threadId));
+        const row = released.find((candidate) => candidate.threadId === threadId);
+        results.push(notified(row === undefined ? asks.deliveryFor("linear", commentId, threadId) : await deliver(row.id), threadId));
       }
       return results;
+    }
+
+    /**
+     * Settle the deliveries a restart left held. Held means the answer's post
+     * was in flight, so it may or may not be on Linear. Once it is there, the
+     * deliveries are sent, once. Once it is still missing after the post
+     * window, they are dropped. This runs under the lock, but a plugin
+     * instance from before a reload may still be posting, so a missing answer
+     * inside the window is left for the next poll.
+     */
+    async function settleHeld(linear: LinearClient, signal: AbortSignal, apiKey: string): Promise<void> {
+      for (const held of asks.held()) {
+        let comments: LinearComment[];
+        try {
+          comments = await linear.listComments(held.issueId, signal, held.label);
+        } catch (error) {
+          if (signal.aborted) return;
+          bb.log.warn(`could not check whether the answer ${held.ref} on ${held.label} posted: ${redact(message(error), [apiKey])}`);
+          continue;
+        }
+        if (comments.some((comment) => comment.id === held.ref)) {
+          for (const row of asks.release(held.ref)) await deliver(row.id);
+        } else if (Date.now() - held.heldAt >= postWindowMs) {
+          asks.drop(held.ref);
+          bb.log.warn(`dropped the deliveries of answer ${held.ref} on ${held.label}: it never posted`);
+        }
+      }
     }
 
     /** Post the Linear record of an answered bb question, under the same id rules as answers. */
@@ -518,6 +568,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         let answered: QuestionBlock[];
         if (earlier !== null) {
           ({ commentId, body, blocks: answered } = earlier);
+          holdDeliveries(issue, commentId, body, answered);
         } else {
           if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
           if (!sameBlocks(expected, blocks)) {
@@ -533,9 +584,16 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           if (commentRole({ body, author: "user" }) !== "answer") {
             throw new AnswerRefusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
           }
-          commentId = await postComment(linear, issue.id, body);
+          commentId = answerCommentId(issue.id, body);
           answered = blocks;
+          // Kept before the post, so a restart while it is in flight cannot
+          // lose them. A failed post leaves them held for settleHeld.
+          holdDeliveries(issue, commentId, body, answered);
+          await postComment(linear, issue.id, body);
         }
+        // The answer is on Linear. The deliveries this call releases are its
+        // to send; ones released before, it leaves to the owner.
+        const released = asks.release(commentId);
 
         let labelRemoved: boolean | null = null;
         let warning: string | null = null;
@@ -572,10 +630,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const mark = db.prepare("UPDATE seen_blocks SET notified_at = COALESCE(notified_at, ?) WHERE block_id = ?");
         for (const block of answered) mark.run(Date.now(), block.commentId);
         publish(0);
-        return { result: { identifier: issue.identifier, commentId, labelRemoved, warning }, body, blocks: answered };
+        return { result: { identifier: issue.identifier, commentId, labelRemoved, warning }, released, threads: signers(answered) };
       });
-      const delivered = await deliverBlockAnswer(posted.result.identifier, posted.result.commentId, posted.body, posted.blocks);
-      return { ...posted.result, notified: delivered };
+      return { ...posted.result, notified: await sendReleased(posted.released, posted.result.commentId, posted.threads) };
     }
 
     async function claimNotifications(): Promise<QuestionNotification[]> {

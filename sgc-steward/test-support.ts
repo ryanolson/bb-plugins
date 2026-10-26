@@ -121,7 +121,7 @@ export interface Notice {
  * The plugin on a fake host with a fake Linear. Thread sends are recorded in
  * `sends` and succeed; a test re-stubs `threads.send` to make them fail.
  */
-export async function setup(options: { key?: string | null } = {}) {
+export async function setup(options: { key?: string | null; postWindowMs?: number } = {}) {
   const linear = new FakeLinear();
   const factory = createSgcStewardPlugin({
     createClient: (apiKey) => {
@@ -129,6 +129,7 @@ export async function setup(options: { key?: string | null } = {}) {
       return linear;
     },
     retryDelayMs: 0,
+    ...(options.postWindowMs === undefined ? {} : { postWindowMs: options.postWindowMs }),
   });
   const settings: Record<string, string> = options.key === null ? { teamKey: "TEAM" } : { linearApiKey: options.key ?? KEY, teamKey: "TEAM" };
   const host = createFakePluginHost({ pluginId: "sgc-steward", settings });

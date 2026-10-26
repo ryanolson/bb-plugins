@@ -10,14 +10,14 @@ Answer the questions your agents ask, on Linear check-in issues or with `bb sgc 
 
 ## How it works
 
-A service on the bb server polls Linear every five minutes for the team's issues with the `checkin` or `needs-decision` label. A signed comment starts with `[agent:`. An answer from the plugin closes only the blocks it names. Any other unsigned comment closes every block before it. Before posting, the plugin reads the issue again and refuses if a block changed, a new one arrived, or the issue closed. An answer to a Linear block also goes to the bb thread named in the block's signature. bb questions live in the plugin's SQLite database, so they survive a restart. The API key is a secret setting on the server.
+A service on the bb server polls Linear every five minutes for the team's issues with the `checkin` or `needs-decision` label. A signed comment starts with `[agent:`. An answer from the plugin closes only the blocks it names. Any other unsigned comment closes every block before it. Before posting, the plugin reads the issue again and refuses if a block changed, a new one arrived, or the issue closed. An answer to a Linear block also goes to the bb thread named in the block's signature. The plugin keeps that send before it posts the answer, so a restart in the middle cannot lose it. bb questions live in the plugin's SQLite database, so they survive a restart. The API key is a secret setting on the server.
 
 ## Known limits
 
 - bb plugins cannot send mobile pushes, so the notifications reach only open bb windows.
 - After an answer on a needs-decision issue, the plugin reads the issue once more and then removes the label. A new question posted between that read and the removal loses the label, though it is still open. The window is one request.
 - An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
-- An answer that could not be sent to its thread is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
+- An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
 - Only a signature with a bb thread id, like `thr_abc123`, gets the answer sent to a thread.
 
 ## For agents

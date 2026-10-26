@@ -34,6 +34,7 @@ export const ASK_MIGRATIONS: readonly string[] = [
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     delivered_at INTEGER,
+    issue_id TEXT,
     UNIQUE (source, ref, thread_id)
   )`,
   `CREATE TABLE IF NOT EXISTS records (
@@ -58,7 +59,13 @@ export interface AskRow extends Ask {
 
 export type DeliverySource = "ask" | "linear";
 
-/** One message to send to a thread: the answer to its bb question, or to its Linear block. */
+/**
+ * One message to send to a thread: the answer to its bb question, or to its
+ * Linear block. An answer to a block is kept held before it posts, so a
+ * restart while the post is in flight cannot lose it. Whoever moves a row out
+ * of held sends it, once; after that, only the owner's retry sends it again,
+ * because a send that seemed to fail may have arrived.
+ */
 export interface Delivery {
   id: string;
   source: DeliverySource;
@@ -68,11 +75,28 @@ export interface Delivery {
   /** What the page shows it as: the question id or the issue identifier. */
   label: string;
   message: string;
-  state: "pending" | "delivered" | "failed";
+  /** held: the Linear answer is not known to be posted, so it is neither shown nor sent. */
+  state: "held" | "pending" | "delivered" | "failed";
   error: string | null;
   attempts: number;
   createdAt: number;
   deliveredAt: number | null;
+  /** The Linear issue of a block answer, where its post is checked; null for a bb question. */
+  issueId: string | null;
+}
+
+/** A delivery the page lists: one not sent yet, or whose send failed. */
+export type Undelivered = Delivery & { state: "pending" | "failed" };
+
+/** A Linear answer whose deliveries are still held. */
+export interface HeldAnswer {
+  /** The answer's comment id. */
+  ref: string;
+  issueId: string;
+  /** The issue identifier. */
+  label: string;
+  /** When its deliveries were kept, epoch ms. */
+  heldAt: number;
 }
 
 /** The Linear comment that records a bb question and its answer. */
@@ -121,6 +145,7 @@ interface DeliveryRecord {
   attempts: number;
   created_at: number;
   delivered_at: number | null;
+  issue_id: string | null;
 }
 
 interface RecordRecord {
@@ -161,6 +186,7 @@ function toDelivery(row: DeliveryRecord): Delivery {
     attempts: row.attempts,
     createdAt: row.created_at,
     deliveredAt: row.delivered_at,
+    issueId: row.issue_id,
   };
 }
 
@@ -183,14 +209,9 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
   const getDelivery = db.prepare("SELECT * FROM deliveries WHERE id = ?");
   const deliveryByKey = db.prepare("SELECT * FROM deliveries WHERE source = ? AND ref = ? AND thread_id = ?");
   const insertDelivery = db.prepare(
-    `INSERT OR IGNORE INTO deliveries (id, source, ref, thread_id, label, message, state, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    `INSERT OR IGNORE INTO deliveries (id, source, ref, thread_id, label, message, state, issue_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-
-  function addDelivery(delivery: { source: DeliverySource; ref: string; threadId: string; label: string; message: string }): Delivery {
-    insertDelivery.run(`dlv_${token(10)}`, delivery.source, delivery.ref, delivery.threadId, delivery.label, delivery.message, now());
-    return toDelivery(deliveryByKey.get(delivery.source, delivery.ref, delivery.threadId) as DeliveryRecord);
-  }
 
   return {
     /** The id of an open question with the same thread, text, options, and issue. */
@@ -253,7 +274,7 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
           .prepare("UPDATE asks SET state = 'answered', answer = ?, answered_at = ? WHERE id = ? AND state = 'open'")
           .run(JSON.stringify(answer), at, id).changes;
         if (changed !== 1) return "not_open" as const;
-        addDelivery({ source: "ask", ref: id, threadId: row.thread_id, label: id, message: delivery.message });
+        insertDelivery.run(`dlv_${token(10)}`, "ask", id, row.thread_id, id, delivery.message, "pending", null, at);
         if (record !== null) {
           db.prepare("INSERT OR IGNORE INTO records (ask_id, issue, body, state, created_at) VALUES (?, ?, ?, 'pending', ?)").run(
             id,
@@ -266,8 +287,41 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
       })();
     },
 
-    /** Insert a delivery, or return the one already kept for the same source, reference, and thread. */
-    addDelivery,
+    /**
+     * Keep the deliveries of a Linear answer, one per thread, held, before
+     * the answer posts. A delivery already kept for the answer and thread
+     * stays as it is.
+     */
+    hold(answer: { ref: string; issueId: string; label: string; message: string }, threadIds: readonly string[]): void {
+      db.transaction(() => {
+        for (const threadId of threadIds) {
+          insertDelivery.run(`dlv_${token(10)}`, "linear", answer.ref, threadId, answer.label, answer.message, "held", answer.issueId, now());
+        }
+      })();
+    },
+
+    /** Mark the held deliveries of a posted answer pending and return them. The caller sends exactly these. */
+    release(ref: string): Delivery[] {
+      const rows = db
+        .prepare("UPDATE deliveries SET state = 'pending' WHERE source = 'linear' AND ref = ? AND state = 'held' RETURNING *")
+        .all(ref) as DeliveryRecord[];
+      return rows.map(toDelivery);
+    },
+
+    /** Forget the held deliveries of an answer that never posted. */
+    drop(ref: string): void {
+      db.prepare("DELETE FROM deliveries WHERE source = 'linear' AND ref = ? AND state = 'held'").run(ref);
+    },
+
+    /** Linear answers whose deliveries are still held, oldest first. */
+    held(): HeldAnswer[] {
+      return db
+        .prepare(
+          `SELECT ref, issue_id AS issueId, label, MIN(created_at) AS heldAt FROM deliveries
+           WHERE source = 'linear' AND state = 'held' GROUP BY ref, issue_id, label ORDER BY heldAt, ref`,
+        )
+        .all() as HeldAnswer[];
+    },
 
     getDelivery(id: string): Delivery | null {
       const row = getDelivery.get(id) as DeliveryRecord | undefined;
@@ -287,9 +341,10 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
       }
     },
 
-    /** Deliveries not yet delivered, pending or failed, oldest first. */
-    undelivered(): Delivery[] {
-      return (db.prepare("SELECT * FROM deliveries WHERE state != 'delivered' ORDER BY created_at, id").all() as DeliveryRecord[]).map(toDelivery);
+    /** Deliveries to list for the owner, pending or failed, oldest first. */
+    undelivered(): Undelivered[] {
+      const rows = db.prepare("SELECT * FROM deliveries WHERE state IN ('pending', 'failed') ORDER BY created_at, id").all() as DeliveryRecord[];
+      return rows.map(toDelivery) as Undelivered[];
     },
 
     record(askId: string): RecordRow | null {

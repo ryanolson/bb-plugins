@@ -288,3 +288,142 @@ test("bb sgc questions prints asked questions and the answers that did not go ou
   assert.match(after.stdout, new RegExp(`Answers not delivered:\\n\\s+${id} to thr_asker: thread is archived \\(1 try\\)`));
   assert.match(after.stdout, new RegExp(`Records not posted to Linear:\\n\\s+${id} on TEAM-12: Linear has no issue TEAM-12\\.`));
 });
+
+/** Answer q1 on a check-in issue that the steward in thr_test1 signed. */
+async function answerInput(linear: Awaited<ReturnType<typeof setup>>["linear"], refresh: () => Promise<Panel | import("./lib/contract.ts").Snapshot>) {
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  return { issue, input: { issueId: issue.id, blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }] } };
+}
+
+/** The comment id the server asked Linear to create. */
+function createdId(calls: readonly string[]): string {
+  const call = calls.find((entry) => entry.startsWith("createComment "));
+  assert.ok(call !== undefined, "an answer was posted");
+  return call.split(" ")[2]!;
+}
+
+test("a restart while an answer posts still delivers it once the answer is on Linear", async () => {
+  const { harness, linear, refresh, sends, factory } = await setup();
+  const { input } = await answerInput(linear, refresh);
+  let stored!: () => void;
+  let resume!: () => void;
+  const atReply = new Promise<void>((resolve) => { stored = resolve; });
+  const reply = new Promise<void>((resolve) => { resume = resolve; });
+  const create = linear.createComment.bind(linear);
+  linear.createComment = async (args) => {
+    const id = await create(args);
+    stored();
+    await reply;
+    return id;
+  };
+  const posting = harness.behavior.callRpc("questions.answer", input).catch(() => undefined);
+  await atReply;
+  let replacement: Awaited<ReturnType<typeof harness.lifecycle.reload>>;
+  try {
+    replacement = await harness.lifecycle.reload(factory);
+  } finally {
+    resume();
+    await posting;
+  }
+  replacement.harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  const after = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+  await replacement.harness.behavior.callRpc("questions.refresh", null);
+  await replacement.harness.lifecycle.dispose();
+  assert.deepEqual(sends.map((send) => send.threadId), ["thr_test1"], "the restarted plugin sends the answer, once");
+  assert.deepEqual(after.undelivered, []);
+});
+
+test("an answer whose post failed unclearly is delivered if it lands late, and its delivery is not listed before", async () => {
+  const { harness, linear, refresh, sends } = await setup();
+  const { issue, input } = await answerInput(linear, refresh);
+  linear.createFaultKind = "timeout";
+  linear.createFaults = ["dropped", "dropped"];
+  const failed = await rejection(harness.behavior.callRpc("questions.answer", input));
+  assert.match(failed.message, /socket hang up/);
+  const waiting = await refresh();
+  assert.equal(sends.length, 0, "nothing is sent while the answer is not on Linear");
+  assert.deepEqual((waiting as Panel).undelivered, [], "a held delivery is not listed");
+  linear.post(issue, createdId(linear.calls), "the late write");
+  await refresh();
+  await refresh();
+  assert.deepEqual(sends.map((send) => send.threadId), ["thr_test1"], "the late answer is sent, once");
+});
+
+test("the deliveries of an answer that never posted are dropped after the post window", async () => {
+  for (const postWindowMs of [undefined, 0]) {
+    const { harness, linear, refresh } = await setup(postWindowMs === undefined ? {} : { postWindowMs });
+    const { issue, input } = await answerInput(linear, refresh);
+    linear.createFaults = ["dropped", "dropped"];
+    await rejection(harness.behavior.callRpc("questions.answer", input));
+    // Off the label, the issue is read only to settle its held answer.
+    issue.labels = [];
+    await refresh();
+    linear.calls = [];
+    await refresh();
+    const checks = linear.calls.filter((call) => call === `listComments ${issue.id}`).length;
+    assert.equal(checks, postWindowMs === 0 ? 0 : 1, postWindowMs === 0 ? "dropped after the window" : "kept inside the window");
+  }
+});
+
+test("queue review F11: repeating an answer submission does not retry an uncertain thread send", async () => {
+  const { harness, linear, refresh, sends } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const input = {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  };
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    throw new Error("The message arrived, but the send reply was lost.");
+  });
+  const first = (await harness.behavior.callRpc("questions.answer", input)) as { notified: Array<{ delivered: boolean }> };
+  assert.equal(first.notified[0]!.delivered, false);
+  assert.equal((await list(harness)).undelivered.length, 1);
+
+  // Repeating the original request after a lost RPC reply is not consent to retry a send.
+  await harness.behavior.callRpc("questions.answer", input);
+  assert.equal(issue.comments.length, 2, "the Linear answer is still posted only once");
+  assert.equal(sends.length, 1, "only deliveries.retry may repeat an uncertain send");
+});
+
+test("queue review F12: a restart after posting a Linear answer keeps its unsent delivery", async () => {
+  const { harness, linear, refresh, sends, factory } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  let reached!: () => void;
+  let release!: () => void;
+  const atLabelReply = new Promise<void>((resolve) => { reached = resolve; });
+  const labelReply = new Promise<void>((resolve) => { release = resolve; });
+  const removeLabel = linear.removeLabel.bind(linear);
+  linear.removeLabel = async (args) => {
+    await removeLabel(args);
+    reached();
+    await labelReply;
+  };
+  const posting = harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  }).catch(() => undefined);
+  await atLabelReply;
+  assert.equal(issue.comments.length, 2, "the answer has committed to Linear");
+  assert.deepEqual(sends, [], "the thread send has not started");
+  let replacement: Awaited<ReturnType<typeof harness.lifecycle.reload>>;
+  try {
+    replacement = await harness.lifecycle.reload(factory);
+  } finally {
+    release();
+    await posting;
+  }
+  const after = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+  await replacement.harness.lifecycle.dispose();
+  assert.deepEqual(after.issues, [], "the posted answer closed its question block");
+  assert.deepEqual(after.undelivered.map((row) => row.threadId), ["thr_test1"], "the unsent answer must remain available for manual delivery");
+});
