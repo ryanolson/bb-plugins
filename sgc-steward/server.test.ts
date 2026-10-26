@@ -467,3 +467,35 @@ test("review F1: editing an option refuses the answer drafted before the edit", 
   assert.equal(posts.length, 0, `The stale choice posted new option text: ${issue.comments.at(-1)?.body}`);
   assert.equal(refusal?.code, "conflict");
 });
+
+test("review F2: a question arriving during the write remains open", { skip: "F2: an issue-wide answer closes questions created after the fresh read" }, async () => {
+  const outcomes = [];
+  for (const label of ["checkin", "needs-decision"]) {
+    const { linear, harness, refresh } = await setup();
+    const issue = linear.addIssue("TEAM-1", [label]);
+    linear.post(issue, "q1", QUESTIONS);
+    await refresh();
+
+    const createComment = linear.createComment.bind(linear);
+    linear.createComment = async (args) => {
+      // Another agent writes after the fresh read and before this write lands.
+      linear.post(issue, "q-unseen", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+      return createComment(args);
+    };
+    await harness.behavior.callRpc("questions.answer", {
+      issueId: issue.id,
+      blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+    });
+
+    const after = await refresh();
+    outcomes.push({
+      label,
+      unseenStillOpen: after.issues.some((open) => open.blocks.some((block) => block.commentId === "q-unseen")),
+      labelStillPresent: issue.labels.some((current) => current.name === label),
+    });
+  }
+  assert.deepEqual(outcomes, [
+    { label: "checkin", unseenStillOpen: true, labelStillPresent: true },
+    { label: "needs-decision", unseenStillOpen: true, labelStillPresent: true },
+  ]);
+});
