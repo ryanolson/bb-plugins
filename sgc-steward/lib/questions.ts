@@ -9,6 +9,8 @@
 // the owner's answer. Comments from integrations (user null or a bot actor)
 // are neither.
 
+import { createHash } from "node:crypto";
+
 /** A Linear comment, reduced to what the rules need. */
 export interface LinearComment {
   id: string;
@@ -46,6 +48,12 @@ export interface Question {
 interface BlockBase {
   /** The Linear comment id; it also identifies the block. */
   commentId: string;
+  /**
+   * Hash of what an answer refers to: the parsed questions and options, or the
+   * whole text of a raw block. An edit that changes them changes it, so an
+   * answer drafted against the old text is refused.
+   */
+  revision: string;
   createdAt: string;
   agent: string;
   threadId: string | null;
@@ -103,16 +111,21 @@ export function parseQuestionBlock(comment: LinearComment, kind: IssueKind): Que
   const lines = [firstLine, ...body.split("\n").slice(1)];
   if (kind === "checkin" && header === null && !lines.some((line) => ANY_QUESTION_LINE.test(line))) return null;
 
+  const result = parseQuestions(lines);
   const base: BlockBase = {
     commentId: comment.id,
+    revision: revisionOf("problem" in result ? { format: "raw", body } : { format: "parsed", questions: result.questions }),
     createdAt: comment.createdAt,
     agent: signature.agent,
     threadId: signature.threadId,
     date: header?.[1] ?? null,
     body: comment.body,
   };
-  const result = parseQuestions(lines);
   return "problem" in result ? { ...base, format: "raw", problem: result.problem } : { ...base, format: "parsed", ...result };
+}
+
+function revisionOf(content: { format: "raw"; body: string } | { format: "parsed"; questions: Question[] }): string {
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 12);
 }
 
 function parseQuestions(lines: string[]): { context: string; questions: Question[] } | { problem: string } {
@@ -211,6 +224,8 @@ export interface QuestionAnswer {
 
 export interface BlockAnswer {
   blockId: string;
+  /** The revision the answers were written against. */
+  revision: string;
   /** Answers by question number, for a parsed block. */
   answers: QuestionAnswer[];
   /** The answer to a raw block. */
@@ -234,9 +249,9 @@ function postedAt(block: QuestionBlock): string {
 export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonly BlockAnswer[]): string {
   const byBlock = new Map<string, BlockAnswer>();
   for (const answer of answers) {
-    if (!blocks.some((block) => block.commentId === answer.blockId)) {
-      throw new Error(`block ${answer.blockId} is not open`);
-    }
+    const block = blocks.find((candidate) => candidate.commentId === answer.blockId);
+    if (block === undefined) throw new Error(`block ${answer.blockId} is not open`);
+    if (block.revision !== answer.revision) throw new Error(`block ${answer.blockId} changed after the answers were written`);
     byBlock.set(answer.blockId, answer);
   }
   const missing = blocks.filter((block) => !byBlock.has(block.commentId)).map((block) => block.commentId);

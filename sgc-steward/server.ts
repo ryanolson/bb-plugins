@@ -33,6 +33,7 @@ const optionSchema = z.object({ letter: z.string(), text: z.string(), recommende
 const questionSchema = z.object({ number: z.number().int(), text: z.string(), options: z.array(optionSchema) });
 const blockBase = {
   commentId: z.string(),
+  revision: z.string(),
   createdAt: z.string(),
   agent: z.string(),
   threadId: z.string().nullable(),
@@ -73,6 +74,8 @@ const answerInputSchema = z.object({
     .array(
       z.object({
         blockId: z.string().min(1),
+        // The revision the panel showed; a mismatch means the block changed.
+        revision: z.string().min(1).max(64),
         answers: z
           .array(
             z.object({
@@ -160,8 +163,16 @@ function preview(block: QuestionBlock): string {
   return truncate(firstLine([rest, ...lines.slice(1)].join("\n")), 160);
 }
 
-function sameIds(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
+interface BlockRef {
+  blockId: string;
+  revision: string;
+}
+
+function sameBlocks(sent: readonly BlockRef[], open: readonly QuestionBlock[]): boolean {
+  const key = (id: string, revision: string) => `${id}@${revision}`;
+  const a = sent.map((ref) => key(ref.blockId, ref.revision)).sort();
+  const b = open.map((block) => key(block.commentId, block.revision)).sort();
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 function formatBlock(block: QuestionBlock): string[] {
@@ -396,10 +407,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
 
     /**
      * Post one unsigned comment that answers every open block on an issue.
-     * Reads the issue fresh first; `expected` is the block ids the caller saw,
-     * and a mismatch refuses so nothing closes a question nobody read.
+     * Reads the issue fresh first; `expected` is the blocks and revisions the
+     * caller saw, and any difference refuses, so an answer never lands on a
+     * question nobody read or on an option whose text changed.
      */
-    function postAnswer(issueRef: string, expected: string[] | null, compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
+    function postAnswer(issueRef: string, expected: BlockRef[] | null, compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
       return locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
         if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
@@ -412,7 +424,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           ? openBlocks(kind, await linear.listComments(issue.id))
           : [];
         if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
-        if (expected !== null && !sameIds(expected, blocks.map((block) => block.commentId))) {
+        if (expected !== null && !sameBlocks(expected, blocks)) {
           throw new AnswerRefusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
         }
         let body: string;
@@ -489,13 +501,14 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "questions.answer": async ({ issueId, blocks }) => {
         const answers: BlockAnswer[] = blocks.map((block) => ({
           blockId: block.blockId,
+          revision: block.revision,
           answers: block.answers,
           ...(block.text === undefined ? {} : { text: block.text }),
         }));
         try {
           return await postAnswer(
             issueId,
-            blocks.map((block) => block.blockId),
+            blocks.map((block) => ({ blockId: block.blockId, revision: block.revision })),
             (open) => composeAnswer(open, answers),
           );
         } catch (error) {

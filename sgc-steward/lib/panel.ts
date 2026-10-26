@@ -21,9 +21,10 @@ function hasAnswer(draft: BlockDraft, number: number): boolean {
 export function toAnswerBlocks(blocks: readonly QuestionBlock[], drafts: Readonly<Record<string, BlockDraft>>): BlockAnswer[] {
   return blocks.map((block) => {
     const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-    if (block.format === "raw") return { blockId: block.commentId, answers: [], text: draft.raw };
+    if (block.format === "raw") return { blockId: block.commentId, revision: block.revision, answers: [], text: draft.raw };
     return {
       blockId: block.commentId,
+      revision: block.revision,
       answers: block.questions
         .filter((question) => hasAnswer(draft, question.number))
         .map((question) => ({

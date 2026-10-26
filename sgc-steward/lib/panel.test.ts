@@ -25,12 +25,13 @@ test("the panel's drafts become the answer the server composes", () => {
   assert.deepEqual(blocks, [
     {
       blockId: "q1",
+      revision: parsed.revision,
       answers: [
         { number: 1, option: "B", text: "  " },
         { number: 2, option: null, text: "Ship Friday." },
       ],
     },
-    { blockId: "q2", answers: [], text: "Yes." },
+    { blockId: "q2", revision: raw.revision, answers: [], text: "Yes." },
   ]);
   assert.equal(
     composeAnswer([parsed, raw], blocks),
@@ -49,7 +50,7 @@ test("the panel's drafts become the answer the server composes", () => {
 });
 
 test("untouched questions are left out, and progress counts what has an answer", () => {
-  assert.deepEqual(toAnswerBlocks([parsed], {}), [{ blockId: "q1", answers: [] }]);
+  assert.deepEqual(toAnswerBlocks([parsed], {}), [{ blockId: "q1", revision: parsed.revision, answers: [] }]);
   assert.deepEqual(answerProgress([parsed, raw], {}), { answered: 0, total: 3 });
   assert.deepEqual(
     answerProgress([parsed, raw], { q1: { options: {}, texts: { 2: "x" }, raw: "" }, q2: { options: {}, texts: {}, raw: " " } }),

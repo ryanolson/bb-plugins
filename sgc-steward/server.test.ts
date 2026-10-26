@@ -126,6 +126,11 @@ async function setup(options: { key?: string | null } = {}) {
   return { linear, harness, refresh, claim };
 }
 
+function revisionOf(snapshot: Snapshot, blockId: string): string {
+  for (const issue of snapshot.issues) for (const block of issue.blocks) if (block.commentId === blockId) return block.revision;
+  assert.fail(`no open block ${blockId}`);
+}
+
 async function rejection(promise: Promise<unknown>): Promise<{ message: string; code?: string }> {
   try {
     await promise;
@@ -224,10 +229,10 @@ test("answering posts one unsigned comment numbered to match and closes the bloc
   const { linear, harness, refresh } = await setup();
   const checkin = linear.addIssue("TEAM-1", ["checkin"]);
   linear.post(checkin, "q1", QUESTIONS);
-  await refresh();
+  const shown = await refresh();
   const result = await harness.behavior.callRpc("questions.answer", {
     issueId: "uuid-TEAM-1",
-    blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
   });
   assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null });
   assert.equal(
@@ -243,10 +248,10 @@ test("answering a needs-decision issue also removes the label", async () => {
   const { linear, harness, refresh } = await setup();
   const decision = linear.addIssue("TEAM-2", ["needs-decision"]);
   linear.post(decision, "d1", "[agent:codex thr_test2] Should the cache key include the tenant?");
-  await refresh();
+  const shown = await refresh();
   const result = await harness.behavior.callRpc("questions.answer", {
     issueId: "uuid-TEAM-2",
-    blocks: [{ blockId: "d1", answers: [], text: "Yes, use the org id." }],
+    blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "Yes, use the org id." }],
   });
   assert.deepEqual(result, { identifier: "TEAM-2", commentId: "posted-1", labelRemoved: true, warning: null });
   assert.deepEqual(decision.labels, []);
@@ -257,11 +262,11 @@ test("a label that will not come off is retried, then reported, and the answer i
   const { linear, harness, refresh } = await setup();
   const decision = linear.addIssue("TEAM-2", ["needs-decision"]);
   linear.post(decision, "d1", "[agent:codex thr_test2] Which tenant key?");
-  await refresh();
+  const shown = await refresh();
   linear.removeLabelFaults = ["dropped", "dropped", "dropped", "dropped"];
   const result = (await harness.behavior.callRpc("questions.answer", {
     issueId: "uuid-TEAM-2",
-    blocks: [{ blockId: "d1", answers: [], text: "The org id." }],
+    blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "The org id." }],
   })) as { labelRemoved: boolean; warning: string };
   assert.equal(result.labelRemoved, false);
   assert.match(result.warning, /answer is posted, but the needs-decision label is still on TEAM-2/);
@@ -273,11 +278,11 @@ test("a removal whose response was lost is seen as done", async () => {
   const { linear, harness, refresh } = await setup();
   const decision = linear.addIssue("TEAM-2", ["needs-decision"]);
   linear.post(decision, "d1", "[agent:codex thr_test2] Which tenant key?");
-  await refresh();
+  const shown = await refresh();
   linear.removeLabelFaults = ["lost"];
   const result = await harness.behavior.callRpc("questions.answer", {
     issueId: "uuid-TEAM-2",
-    blocks: [{ blockId: "d1", answers: [], text: "The org id." }],
+    blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "The org id." }],
   });
   assert.deepEqual(result, { identifier: "TEAM-2", commentId: "posted-1", labelRemoved: true, warning: null });
   assert.equal(linear.calls.filter((call) => call.startsWith("removeLabel")).length, 1);
@@ -288,11 +293,11 @@ test("a post whose response was lost is found by its id and never posted twice",
     const { linear, harness, refresh } = await setup();
     const checkin = linear.addIssue("TEAM-1", ["checkin"]);
     linear.post(checkin, "q1", QUESTIONS);
-    await refresh();
+    const shown = await refresh();
     linear.createFaults = [fault];
     const result = await harness.behavior.callRpc("questions.answer", {
       issueId: "uuid-TEAM-1",
-      blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+      blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
     });
     assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null }, fault);
     assert.deepEqual(
@@ -309,8 +314,8 @@ test("an answer is refused when the questions changed or were already answered",
   const { linear, harness, refresh } = await setup();
   const checkin = linear.addIssue("TEAM-1", ["checkin"]);
   linear.post(checkin, "q1", QUESTIONS);
-  await refresh();
-  const answer = { issueId: "uuid-TEAM-1", blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }] };
+  const shown = await refresh();
+  const answer = { issueId: "uuid-TEAM-1", blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }] };
 
   linear.post(checkin, "q2", QUESTIONS);
   const changed = await rejection(harness.behavior.callRpc("questions.answer", answer));
@@ -327,11 +332,11 @@ test("an answer is refused when the questions changed or were already answered",
 test("answers that do not fit the questions are refused before anything is posted", async () => {
   const { linear, harness, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
-  await refresh();
+  const shown = await refresh();
   const bad = await rejection(
     harness.behavior.callRpc("questions.answer", {
       issueId: "uuid-TEAM-1",
-      blocks: [{ blockId: "q1", answers: [{ number: 1, option: "Z", text: "" }] }],
+      blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "Z", text: "" }] }],
     }),
   );
   assert.equal(bad.code, "invalid");
@@ -439,4 +444,31 @@ test("a failed poll keeps the last questions and reports the error", async () =>
   assert.match(bad.error ?? "", /rejected the API key/);
   assert.deepEqual(bad.issues, good.issues);
   assert.equal(bad.polledAt, good.polledAt);
+});
+
+test("review F1: editing an option refuses the answer drafted before the edit", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  assert.equal(shown.issues[0]?.blocks[0]?.commentId, "q1");
+
+  issue.comments[0]!.body = QUESTIONS.replace(
+    "- A (recommended): Powers of two.\n- B: Small, medium, large.",
+    "- A (recommended): Small, medium, large.\n- B: Powers of two.",
+  );
+  issue.updatedAt = linear.tick();
+  let refusal: { code?: string } | undefined;
+  try {
+    await harness.behavior.callRpc("questions.answer", {
+      issueId: issue.id,
+      blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+    });
+  } catch (error) {
+    refusal = error as { code?: string };
+  }
+
+  const posts = linear.calls.filter((call) => call.startsWith("createComment"));
+  assert.equal(posts.length, 0, `The stale choice posted new option text: ${issue.comments.at(-1)?.body}`);
+  assert.equal(refusal?.code, "conflict");
 });

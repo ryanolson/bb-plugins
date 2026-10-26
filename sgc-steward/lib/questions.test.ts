@@ -179,6 +179,19 @@ test("a question that Linear folds into the option above it still parses", () =>
   assert.equal(parsed(parseQuestionBlock(comment("c", unsignedHeader), "checkin")).questions[0]?.text, "Indented question?");
 });
 
+test("a block's revision follows its questions and options", () => {
+  const block = parsed(parseQuestionBlock(comment("c1", QUESTIONS), "checkin"));
+  assert.match(block.revision, /^[0-9a-f]{12}$/);
+  assert.equal(parsed(parseQuestionBlock(comment("c2", QUESTIONS), "checkin")).revision, block.revision, "same content, same revision");
+  const swapped = QUESTIONS.replace("- A (recommended): Powers of two.\n- B: Small, medium, large.", "- A (recommended): Small, medium, large.\n- B: Powers of two.");
+  assert.notEqual(parsed(parseQuestionBlock(comment("c1", swapped), "checkin")).revision, block.revision);
+  const recommended = QUESTIONS.replace("- A (recommended): Powers of two.\n- B: Small, medium, large.", "- A: Powers of two.\n- B (recommended): Small, medium, large.");
+  assert.notEqual(parsed(parseQuestionBlock(comment("c1", recommended), "checkin")).revision, block.revision);
+  const rawOne = raw(parseQuestionBlock(comment("r1", "[agent:codex thr_x] Which key?"), "needs-decision"));
+  const rawTwo = raw(parseQuestionBlock(comment("r1", "[agent:codex thr_x] Which tenant key?"), "needs-decision"));
+  assert.notEqual(rawOne.revision, rawTwo.revision, "a raw block's revision follows its text");
+});
+
 test("bullets before Q1 are context, not options", () => {
   const body = ["[agent:claude-code thr_x] Questions 2026-01-05", "- A: not an option yet", "Q1. Go?"].join("\n");
   const block = parsed(parseQuestionBlock(comment("c", body), "checkin"));
@@ -274,6 +287,7 @@ test("the answer is one unsigned comment numbered to match the questions", () =>
     [
       {
         blockId: "q1",
+        revision: block.revision,
         answers: [
           { number: 1, option: "A", text: "" },
           { number: 2, option: "B", text: "Start with the cells project." },
@@ -302,8 +316,8 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
   const body = composeAnswer(
     [block, rawBlock],
     [
-      { blockId: "q1", answers: [{ number: 3, option: null, text: "Ship it\non Friday." }] },
-      { blockId: "q2", answers: [], text: "Yes, go ahead." },
+      { blockId: "q1", revision: block.revision, answers: [{ number: 3, option: null, text: "Ship it\non Friday." }] },
+      { blockId: "q2", revision: rawBlock.revision, answers: [], text: "Yes, go ahead." },
     ],
   );
   const at = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
@@ -329,7 +343,7 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
 test("a composed answer always reads as unsigned, even when the text starts with a signature", () => {
   const question = comment("q1", QUESTIONS);
   const block = parsed(parseQuestionBlock(question, "checkin"));
-  const body = composeAnswer([block], [{ blockId: "q1", answers: [{ number: 1, option: null, text: "[agent:x] sneaky" }] }]);
+  const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: "[agent:x] sneaky" }] }]);
   assert.equal(commentRole({ body, author: "user" }), "answer");
   assert.deepEqual(openBlocks("checkin", [question, comment("a1", body)]), []);
 });
@@ -339,14 +353,16 @@ test("composeAnswer refuses answers that do not fit the open blocks", () => {
   const rawBlock = raw(parseQuestionBlock(comment("q2", "[agent:codex thr_x] Questions\nfree"), "checkin"));
   const attempt = (answers: Parameters<typeof composeAnswer>[1]) => () => composeAnswer([block], answers);
   assert.throws(attempt([]), /missing answers for block q1/);
-  assert.throws(attempt([{ blockId: "zz", answers: [] }]), /block zz is not open/);
-  assert.throws(attempt([{ blockId: "q1", answers: [{ number: 9, option: null, text: "x" }] }]), /Q9 is not a question/);
-  assert.throws(attempt([{ blockId: "q1", answers: [{ number: 1, option: "D", text: "" }] }]), /Q1 has no option D/);
-  assert.throws(attempt([{ blockId: "q1", answers: [{ number: 3, option: "A", text: "" }] }]), /Q3 has no option A/);
+  assert.throws(attempt([{ blockId: "zz", revision: block.revision, answers: [] }]), /block zz is not open/);
+  assert.throws(attempt([{ blockId: "q1", revision: "000000000000", answers: [{ number: 1, option: "A", text: "" }] }]), /block q1 changed after the answers were written/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 9, option: null, text: "x" }] }]), /Q9 is not a question/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "D", text: "" }] }]), /Q1 has no option D/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 3, option: "A", text: "" }] }]), /Q3 has no option A/);
   assert.throws(
     attempt([
       {
         blockId: "q1",
+        revision: block.revision,
         answers: [
           { number: 1, option: "A", text: "" },
           { number: 1, option: "B", text: "" },
@@ -355,6 +371,6 @@ test("composeAnswer refuses answers that do not fit the open blocks", () => {
     ]),
     /Q1 is answered twice/,
   );
-  assert.throws(attempt([{ blockId: "q1", answers: [{ number: 1, option: null, text: "  " }] }]), /nothing to post/);
-  assert.throws(() => composeAnswer([rawBlock], [{ blockId: "q2", answers: [{ number: 1, option: null, text: "x" }] }]), /block q2 is not in the question format/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: "  " }] }]), /nothing to post/);
+  assert.throws(() => composeAnswer([rawBlock], [{ blockId: "q2", revision: rawBlock.revision, answers: [{ number: 1, option: null, text: "x" }] }]), /block q2 is not in the question format/);
 });
