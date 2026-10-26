@@ -4,6 +4,7 @@ import {
   answeredBlocks,
   commentRole,
   composeAnswer,
+  composeTextAnswer,
   openBlocks,
   parseQuestionBlock,
   parseSignature,
@@ -374,6 +375,20 @@ test("a composed answer always reads as unsigned, even when the text starts with
   const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: "[agent:x] sneaky" }] }]);
   assert.equal(commentRole({ body, author: "user" }), "answer");
   assert.deepEqual(openBlocks("checkin", [question, comment("a1", body)]), []);
+});
+
+test("a typed answer from the CLI gets headers that name every block it answers", () => {
+  const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
+  const other = raw(parseQuestionBlock(comment("q2", "[agent:codex thr_x] Questions 2026-01-07\nfree form"), "checkin"));
+  const one = composeTextAnswer([block], "  Q1. A\nQ2. The cells.\n");
+  assert.equal(one, `Answers to the questions of 2026-01-05 (block q1 rev ${block.revision})\n\nQ1. A\nQ2. The cells.`);
+  const both = composeTextAnswer([block, other], "Q1. A");
+  assert.deepEqual(answeredBlocks(both), [
+    { blockId: "q1", revision: block.revision },
+    { blockId: "q2", revision: other.revision },
+  ]);
+  assert.equal(commentRole({ body: both, author: "user" }), "answer");
+  assert.throws(() => composeTextAnswer([block], " \n "), /the answer is empty/);
 });
 
 test("composeAnswer refuses answers that do not fit the open blocks", () => {

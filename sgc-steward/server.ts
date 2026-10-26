@@ -19,7 +19,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
-import { commentRole, composeAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
+import { commentRole, composeAnswer, composeTextAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
@@ -170,13 +170,28 @@ function sameBlocks(sent: readonly BlockRef[], open: readonly QuestionBlock[]): 
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+/** `--block <comment id>@<revision>`, as `bb sgc questions` prints it. */
+function parseBlockOption(value: string): BlockRef {
+  const at = value.lastIndexOf("@");
+  const blockId = value.slice(0, at);
+  const revision = value.slice(at + 1);
+  if (at <= 0 || !/^[0-9a-f]{12}$/.test(revision)) {
+    throw new PluginCliError(`--block ${value} is not <comment id>@<revision>.`, {
+      code: "invalid_block",
+      hint: "Copy the block from `bb sgc questions`, like q1@3fa2c9d01b7e.",
+    });
+  }
+  return { blockId, revision };
+}
+
 function formatBlock(block: QuestionBlock): string[] {
   const asker = `${block.agent}${block.threadId === null ? "" : ` ${block.threadId}`}`;
+  const ref = `block ${block.commentId}@${block.revision}`;
   if (block.format === "raw") {
     const body = truncate(block.body.trim(), 4000).split("\n").map((line) => `    | ${line}`);
-    return [`  Question from ${asker}, not in the question format (${block.problem}):`, ...body];
+    return [`  Question from ${asker} (${ref}), not in the question format (${block.problem}):`, ...body];
   }
-  const lines = [`  Questions ${block.date ?? block.createdAt.slice(0, 10)} from ${asker}`];
+  const lines = [`  Questions ${block.date ?? block.createdAt.slice(0, 10)} from ${asker} (${ref})`];
   if (block.context !== "") lines.push(...block.context.split("\n").map((line) => `  ${line}`));
   for (const question of block.questions) {
     const [head, ...more] = question.text.split("\n");
@@ -195,7 +210,8 @@ function formatSnapshot(snapshot: Snapshot): string {
   for (const issue of snapshot.issues) {
     lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]`);
     for (const block of issue.blocks) lines.push(...formatBlock(block));
-    lines.push(`  Answer: bb sgc answer ${issue.identifier} --text-file <file>`, "");
+    const blocks = issue.blocks.map((block) => `--block ${block.commentId}@${block.revision}`).join(" ");
+    lines.push(`  Answer: bb sgc answer ${issue.identifier} ${blocks} --text-file <file>`, "");
   }
   for (const failed of snapshot.issueErrors) lines.push(`Could not read ${failed.identifier}: ${failed.message}`);
   return lines.join("\n").trimEnd();
@@ -406,7 +422,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
      * caller saw, and any difference refuses, so an answer never lands on a
      * question nobody read or on an option whose text changed.
      */
-    function postAnswer(issueRef: string, expected: BlockRef[] | null, compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
+    function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
       return locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
         if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
@@ -419,7 +435,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           ? openBlocks(kind, await linear.listComments(issue.id))
           : [];
         if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
-        if (expected !== null && !sameBlocks(expected, blocks)) {
+        if (!sameBlocks(expected, blocks)) {
           throw new AnswerRefusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
         }
         let body: string;
@@ -591,9 +607,16 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           answer: cliCommand({
             summary: "Post a file as the unsigned answer to an issue's open questions",
             description:
-              "The file's text is posted as it is, as one comment, and closes every open question block on the issue. Number the answers to match: `Q1. A`. On a needs-decision issue the label is removed too.",
+              "Posts one comment: a header line that names each block, then the file's text as written. Name every open block of the issue with --block, as `bb sgc questions` prints it; the answer is refused when the open blocks or their revisions differ. Number the answers to match: `Q1. A`. On a needs-decision issue the label is removed too.",
             positionals: [{ name: "issue", description: "Issue identifier, like TEAM-12", required: true }],
             options: {
+              block: {
+                type: "string",
+                required: true,
+                repeatable: true,
+                placeholder: "id@revision",
+                description: "A block to answer, as `bb sgc questions` prints it: <comment id>@<revision>; repeat it for every open block",
+              },
               "text-file": {
                 type: "string",
                 required: true,
@@ -607,10 +630,17 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               json,
             },
             async run(input, ctx) {
+              const refs = input.options.block.map(parseBlockOption);
               const text = (await readAnswerFile(input.options["text-file"], ctx, input.options.machine)).trim();
+              if (commentRole({ body: text, author: "user" }) !== "answer") {
+                throw new PluginCliError("The answer text starts with [agent:, an agent's signature.", {
+                  code: "invalid",
+                  hint: "Relay only the owner's own words, without a signature.",
+                });
+              }
               let result: AnswerResult;
               try {
-                result = await postAnswer(input.positionals.issue, null, () => text);
+                result = await postAnswer(input.positionals.issue, refs, (blocks) => composeTextAnswer(blocks, text));
               } catch (error) {
                 if (error instanceof AnswerRefusal) throw new PluginCliError(error.message, { code: error.code });
                 throw new PluginCliError(message(error), { code: "linear_error" });

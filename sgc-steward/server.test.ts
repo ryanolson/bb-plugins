@@ -352,15 +352,17 @@ test("bb sgc questions prints each question with the recommended option first", 
   assert.equal(cli.exitCode, 0, cli.stderr);
   assert.match(cli.stdout, /TEAM-1 {2}Title of TEAM-1 {2}\[check-in\]/);
   assert.match(cli.stdout, /Q1\. Which scale do estimates use\?\n\s+B \(recommended\): Small, medium, large\.\n\s+A: Powers of two\./);
-  assert.match(cli.stdout, /bb sgc answer TEAM-1 --text-file <file>/);
+  assert.match(cli.stdout, /Questions 2026-01-05 from claude-code thr_test1 \(block q1@[0-9a-f]{12}\)/);
+  assert.match(cli.stdout, /bb sgc answer TEAM-1 --block q1@[0-9a-f]{12} --text-file <file>/);
   const json = await harness.behavior.runCli(["questions", "--json"]);
   assert.equal((JSON.parse(json.stdout) as Snapshot).issues[0]?.identifier, "TEAM-1");
 });
 
-test("bb sgc answer reads the file on the invoking thread's machine and posts it verbatim", async () => {
-  const { linear, harness } = await setup();
+test("bb sgc answer reads the file on the invoking thread's machine and posts it under a header that names the block", async () => {
+  const { linear, harness, refresh } = await setup();
   const checkin = linear.addIssue("TEAM-1", ["checkin"]);
   linear.post(checkin, "q1", QUESTIONS);
+  const revision = revisionOf(await refresh(), "q1");
   const reads: unknown[] = [];
   harness.inspection.sdk.stub("threads.get", async () => ({ id: "thr_caller", environmentId: "env_1" }));
   harness.inspection.sdk.stub("environments.get", async () => ({ id: "env_1", hostId: "host_spark" }));
@@ -368,17 +370,21 @@ test("bb sgc answer reads the file on the invoking thread's machine and posts it
     reads.push(args);
     return { content: "Q1. A\nQ2. The cells.", contentEncoding: "utf8", path: "/work/answer.md", sha256: "x", sizeBytes: 20 };
   });
-  const cli = await harness.behavior.runCli(["answer", "TEAM-1", "--text-file", "answer.md"], { cwd: "/work", threadId: "thr_caller" });
+  const cli = await harness.behavior.runCli(["answer", "TEAM-1", "--block", `q1@${revision}`, "--text-file", "answer.md"], {
+    cwd: "/work",
+    threadId: "thr_caller",
+  });
   assert.equal(cli.exitCode, 0, cli.stderr);
   assert.deepEqual(reads, [{ path: "/work/answer.md", hostId: "host_spark" }]);
-  assert.equal(checkin.comments.at(-1)?.body, "Q1. A\nQ2. The cells.");
+  assert.equal(checkin.comments.at(-1)?.body, `Answers to the questions of 2026-01-05 (block q1 rev ${revision})\n\nQ1. A\nQ2. The cells.`);
   assert.match(cli.stdout, /Posted the answer to TEAM-1/);
 });
 
-test("bb sgc answer refuses a signed text, an issue with nothing open, and a relative path with no directory", async () => {
-  const { linear, harness } = await setup();
+test("bb sgc answer refuses a signed text, an issue with nothing open, a relative path with no directory, and a bad --block", async () => {
+  const { linear, harness, refresh } = await setup();
   const checkin = linear.addIssue("TEAM-1", ["checkin"]);
   linear.post(checkin, "q1", QUESTIONS);
+  const block = `q1@${revisionOf(await refresh(), "q1")}`;
   harness.inspection.sdk.stub("hosts.list", async () => [
     { id: "host_mac", name: "laptop" },
     { id: "host_spark", name: "spark" },
@@ -389,21 +395,28 @@ test("bb sgc answer refuses a signed text, an issue with nothing open, and a rel
     reads.push(args);
     return { content: Buffer.from(text).toString("base64"), contentEncoding: "base64", path: "/tmp/a.md", sha256: "x", sizeBytes: text.length };
   });
-  const signed = await harness.behavior.runCli(["answer", "TEAM-1", "--text-file", "/tmp/a.md", "--machine", "laptop"]);
+  const signed = await harness.behavior.runCli(["answer", "TEAM-1", "--block", block, "--text-file", "/tmp/a.md", "--machine", "laptop"]);
   assert.equal(signed.exitCode, 1);
   assert.match(signed.stderr, /starts with \[agent:/);
   assert.deepEqual(reads, [{ path: "/tmp/a.md", hostId: "host_mac" }]);
 
-  const relative = await harness.behavior.runCli(["answer", "TEAM-1", "--text-file", "a.md"]);
+  const relative = await harness.behavior.runCli(["answer", "TEAM-1", "--block", block, "--text-file", "a.md"]);
   assert.equal(relative.exitCode, 1);
   assert.match(relative.stderr, /absolute path/);
 
   text = "Q1. A";
   const none = linear.addIssue("TEAM-9", ["checkin"]);
-  const empty = await harness.behavior.runCli(["answer", "TEAM-9", "--text-file", "/tmp/a.md"]);
+  const empty = await harness.behavior.runCli(["answer", "TEAM-9", "--block", "q9@000000000000", "--text-file", "/tmp/a.md"]);
   assert.equal(empty.exitCode, 1);
   assert.match(empty.stderr, /TEAM-9 has no open questions/);
   assert.deepEqual(none.comments, []);
+
+  const missing = await harness.behavior.runCli(["answer", "TEAM-1", "--text-file", "/tmp/a.md"]);
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /--block/);
+  const malformed = await harness.behavior.runCli(["answer", "TEAM-1", "--block", "q1", "--text-file", "/tmp/a.md"]);
+  assert.equal(malformed.exitCode, 1);
+  assert.match(malformed.stderr, /is not <comment id>@<revision>/);
   assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 0);
 });
 
@@ -503,4 +516,27 @@ test("review F2: a question arriving during the write remains open", async () =>
     { label: "checkin", unseenStillOpen: true, labelStillPresent: true },
     { label: "needs-decision", unseenStillOpen: true, labelStillPresent: true },
   ]);
+});
+
+test("review F3: the CLI refuses an answer after the listed block is replaced", async () => {
+  const { linear, harness } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const listed = await harness.behavior.runCli(["questions", "--json"]);
+  assert.equal(listed.exitCode, 0, listed.stderr);
+  assert.equal((JSON.parse(listed.stdout) as Snapshot).issues[0]?.blocks[0]?.commentId, "q1");
+  const listedBlock = (JSON.parse(listed.stdout) as Snapshot).issues[0]!.blocks[0]!;
+
+  const text = "Q1. A\nQ2. The cells.";
+  harness.inspection.sdk.stub("files.read", async () => ({
+    content: text, contentEncoding: "utf8", path: "/work/answer.md", sha256: "x", sizeBytes: text.length,
+  }));
+  linear.post(issue, "q2", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+  const answer = await harness.behavior.runCli([
+    "answer", "TEAM-1", "--block", `${listedBlock.commentId}@${listedBlock.revision}`, "--text-file", "/work/answer.md",
+  ]);
+
+  const posts = linear.calls.filter((call) => call.startsWith("createComment"));
+  assert.equal(posts.length, 0, `The CLI accepted an answer to q1 for its replacement q2: ${JSON.stringify(answer)}`);
+  assert.equal(answer.exitCode, 1);
 });

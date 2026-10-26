@@ -36,7 +36,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 ## Reading the answer
 
-- An answer from the SGC Steward page names the blocks it answers in its header lines, as `(block <comment id> rev <revision>)`. It answers only those blocks, at that revision. Ask again about any block it does not name.
+- An answer from the SGC Steward page or `bb sgc answer` names the blocks it answers in its header lines, as `(block <comment id> rev <revision>)`. It answers only those blocks, at that revision. Ask again about any block it does not name.
 - Any other unsigned comment from the owner answers every block before it.
 - The page writes `Q1. A: <option text>` for a picked option, `Q2. <text>` for a typed answer, and `Q3. No answer.` for a skipped question. A note can follow on the next line.
 - Ask again in a new block for every question marked `No answer.` that still matters.
@@ -45,10 +45,10 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 ```
 bb sgc questions [--json] [--cached]
-bb sgc answer <issue> --text-file <file> [--machine <name-or-id>] [--json]
+bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 ```
 
-- `bb sgc questions` lists the open questions with the recommended option first.
-- `bb sgc answer` posts the file as one unsigned comment. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
+- `bb sgc questions` lists the open questions with the recommended option first, and each block as `<comment id>@<revision>`.
+- `bb sgc answer` posts one unsigned comment: a header that names each `--block`, then the file's text. Pass every open block of the issue, as `bb sgc questions` prints it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - The command refuses text that starts with `[agent:`, and issues with no open questions.

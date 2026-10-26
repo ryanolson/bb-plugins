@@ -280,6 +280,16 @@ export function answerHeader(block: QuestionBlock, posted: boolean): string {
 }
 
 /**
+ * A typed answer, as `bb sgc answer` posts it: one header line per block it
+ * answers, then the text as written.
+ */
+export function composeTextAnswer(blocks: readonly QuestionBlock[], text: string): string {
+  const body = text.trim();
+  if (body === "") throw new Error("the answer is empty");
+  return `${blocks.map((block) => answerHeader(block, blocks.length > 1)).join("\n")}\n\n${body}`;
+}
+
+/**
  * Write the one unsigned comment that answers every open block on an issue,
  * numbered to match. Each block gets a header that names it, so the answer
  * closes those blocks and no other. The header comes first, so the answer can
