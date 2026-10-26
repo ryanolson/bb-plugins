@@ -697,7 +697,8 @@ test("an archived or deleted asker is not told, and the withdrawal still succeed
   const gone = await askId(harness, ["--question", "Deleted asker?"], "thr_gone");
   harness.inspection.sdk.stub("threads.get", async (args: unknown) => {
     const { threadId } = args as { threadId: string };
-    if (threadId === "thr_gone") throw new Error(`No thread ${threadId}.`);
+    // How bb answers for a thread it does not know.
+    if (threadId === "thr_gone") throw Object.assign(new Error("HTTP 404: Thread not found"), { status: 404, code: "thread_not_found" });
     return { id: threadId, title: `Title of ${threadId}`, titleFallback: null, environmentId: null, archivedAt: 1_800_000_000_000, deletedAt: null };
   });
   for (const id of [archived, gone]) {

@@ -354,13 +354,18 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       };
     }
 
-    /** Whether a thread can take a message: it exists and is neither archived nor deleted. */
-    async function liveThread(threadId: string): Promise<boolean> {
+    /**
+     * Whether a thread is gone for good: archived, deleted, or unknown to bb
+     * (HTTP 404, `thread_not_found`). Any other lookup failure says nothing
+     * about the thread, so a message for it is kept, to be sent or retried.
+     */
+    async function threadGone(threadId: string): Promise<boolean> {
       try {
         const thread = await bb.sdk.threads.get({ threadId });
-        return !thread.archivedAt && !thread.deletedAt;
-      } catch {
-        return false;
+        return Boolean(thread.archivedAt || thread.deletedAt);
+      } catch (error) {
+        const failure = error as { status?: unknown; code?: unknown };
+        return failure.status === 404 || failure.code === "thread_not_found";
       }
     }
 
@@ -863,7 +868,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               const followUps =
                 others === null || reason === null
                   ? { notice: null, record: null }
-                  : withdrawalFollowUps(others, threadId, reason, others.state === "open" && (await liveThread(others.threadId)), Date.now());
+                  : withdrawalFollowUps(others, threadId, reason, others.state === "open" && !(await threadGone(others.threadId)), Date.now());
               const outcome = asks.withdraw(id, { thread: threadId, by: ctx.threadId ?? null, steward, reason, ...followUps });
               if (outcome === "not_found") throw new PluginCliError(`No bb question ${id}.`, { code: "not_found" });
               if (outcome === "not_yours") throw new PluginCliError(`${id} was asked by another thread.`, { code: "forbidden" });
