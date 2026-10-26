@@ -543,3 +543,47 @@ test("review F4: header validation does not expose a secret pasted with a newlin
     exposedInLogs: false,
   });
 });
+
+test("review F5: aborting a stalled poll releases the service and queued answers", { skip: "F5: the poller never passes its abort signal to Linear" }, async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  await refresh();
+
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  let requestIsAbortable = false;
+  linear.listQuestionIssues = async (_teamKey, signal?: AbortSignal) => {
+    requestIsAbortable = signal !== undefined;
+    entered();
+    return new Promise<LinearIssue[]>((resolve) => {
+      release = () => resolve([]);
+      if (signal?.aborted) release();
+      else signal?.addEventListener("abort", release, { once: true });
+    });
+  };
+
+  const service = harness.behavior.runService("poller");
+  await started;
+  let answerSettled = false;
+  const answer = harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+  }).finally(() => { answerSettled = true; });
+  let observed;
+  try {
+    service.controller.abort();
+    const pollerStopped = await Promise.race([
+      service.done.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    observed = { requestIsAbortable, pollerStopped, answerStillQueued: !answerSettled };
+  } finally {
+    // Release the fake even on failure so this reproduction cannot hang the runner.
+    release();
+    await Promise.all([service.done, answer]);
+  }
+  assert.deepEqual(observed, { requestIsAbortable: true, pollerStopped: true, answerStillQueued: false });
+});
