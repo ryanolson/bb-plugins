@@ -311,3 +311,38 @@ test("queue review F11: repeating an answer submission does not retry an uncerta
   assert.equal(issue.comments.length, 2, "the Linear answer is still posted only once");
   assert.equal(sends.length, 1, "only deliveries.retry may repeat an uncertain send");
 });
+
+test("queue review F12: a restart after posting a Linear answer keeps its unsent delivery", { skip: "F12: Linear answers are posted before their deliveries are persisted" }, async () => {
+  const { harness, linear, refresh, sends, factory } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  let reached!: () => void;
+  let release!: () => void;
+  const atLabelReply = new Promise<void>((resolve) => { reached = resolve; });
+  const labelReply = new Promise<void>((resolve) => { release = resolve; });
+  const removeLabel = linear.removeLabel.bind(linear);
+  linear.removeLabel = async (args) => {
+    await removeLabel(args);
+    reached();
+    await labelReply;
+  };
+  const posting = harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  }).catch(() => undefined);
+  await atLabelReply;
+  assert.equal(issue.comments.length, 2, "the answer has committed to Linear");
+  assert.deepEqual(sends, [], "the thread send has not started");
+  let replacement: Awaited<ReturnType<typeof harness.lifecycle.reload>>;
+  try {
+    replacement = await harness.lifecycle.reload(factory);
+  } finally {
+    release();
+    await posting;
+  }
+  const after = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+  await replacement.harness.lifecycle.dispose();
+  assert.deepEqual(after.issues, [], "the posted answer closed its question block");
+  assert.deepEqual(after.undelivered.map((row) => row.threadId), ["thr_test1"], "the unsent answer must remain available for manual delivery");
+});
