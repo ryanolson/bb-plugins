@@ -338,7 +338,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     let pollAgain = false;
     let wake: (() => void) | null = null;
 
-    async function pollNow(force: boolean, outer?: AbortSignal): Promise<Snapshot> {
+    async function pollNow(force: boolean, outer?: AbortSignal): Promise<Snapshot | null> {
       const controller = new AbortController();
       runningPoll = controller;
       const signal = outer === undefined ? controller.signal : AbortSignal.any([outer, controller.signal]);
@@ -349,8 +349,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       }
     }
 
-    /** One poll. A stopped poll commits nothing and records no error. */
-    async function pollOnce(force: boolean, signal: AbortSignal): Promise<Snapshot> {
+    /** One poll. A stopped poll commits nothing, records no error, and returns null. */
+    async function pollOnce(force: boolean, signal: AbortSignal): Promise<Snapshot | null> {
       const { linearApiKey, teamKey, notify } = await settings.get();
       const checkedAt = Date.now();
       const before = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
@@ -363,7 +363,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       const fullRefresh = force || checkedAt - lastFullRefreshAt >= FULL_REFRESH_MS;
       try {
         const listed = await linear.listQuestionIssues(teamKey, signal);
-        if (signal.aborted) return snapshot;
+        if (signal.aborted) return null;
         const issues: IssueView[] = [];
         const issueErrors: Snapshot["issueErrors"] = [];
         const unread = new Set<string>();
@@ -386,7 +386,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             issueErrors.push({ identifier: issue.identifier, message: redact(message(error), [linearApiKey]) });
           }
         }
-        if (signal.aborted) return snapshot;
+        if (signal.aborted) return null;
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
         if (fullRefresh) lastFullRefreshAt = checkedAt;
         const oldest = (issue: IssueView) => Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt)));
@@ -396,7 +396,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
         if (fresh > 0 || after !== before) publish(fresh);
       } catch (error) {
-        if (signal.aborted) return snapshot;
+        if (signal.aborted) return null;
         const reason = redact(message(error), [linearApiKey]);
         bb.log.warn(`poll failed: ${reason}`);
         snapshot = { ...snapshot, configured: true, teamKey, checkedAt, error: reason };
@@ -406,6 +406,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     }
 
     const poll = (force: boolean, signal?: AbortSignal) => locked(() => pollNow(force, signal));
+    /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
+    const pollForCaller = async (force: boolean) => (await poll(force)) ?? (await poll(force));
 
     /** A failure where Linear may have done the write before the reply was lost. */
     function unclear(error: unknown): boolean {
@@ -559,7 +561,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
 
     bb.rpc.register(rpcContract, {
       "questions.list": () => snapshot,
-      "questions.refresh": () => poll(true),
+      "questions.refresh": async () => (await pollForCaller(true)) ?? snapshot,
       "questions.answer": async ({ issueId, blocks }) => {
         const answers: BlockAnswer[] = blocks.map((block) => ({
           blockId: block.blockId,
@@ -627,7 +629,10 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             description: "Polls Linear first, unless --cached. Exits 1 when Linear or an issue's comments could not be read; the questions shown then miss what could not be read.",
             options: { json, cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" } },
             async run(input) {
-              const current = input.options.cached ? snapshot : await poll(false);
+              const current = input.options.cached ? snapshot : await pollForCaller(false);
+              if (current === null) {
+                throw new PluginCliError("Answers being posted stopped the check twice.", { code: "interrupted", hint: "Run `bb sgc questions` again." });
+              }
               if (!current.configured) {
                 throw new PluginCliError("The Linear API key is not set.", { code: "not_configured", hint: KEY_HINT });
               }

@@ -497,6 +497,34 @@ test("an answer stops a stalled poll instead of waiting behind it, and the polle
   await service.done;
 });
 
+test("bb sgc questions polls again when an answer stops its poll, instead of printing old questions", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const listQuestionIssues = linear.listQuestionIssues.bind(linear);
+  let stalls = 1;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  linear.listQuestionIssues = async (teamKey: string, signal?: AbortSignal) => {
+    if (stalls === 0) return listQuestionIssues(teamKey);
+    stalls -= 1;
+    entered();
+    return new Promise<LinearIssue[]>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new LinearError("aborted", "stopped")), { once: true });
+    });
+  };
+  const cli = harness.behavior.runCli(["questions", "--json"]);
+  await started;
+  await harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  });
+  const result = await cli;
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual((JSON.parse(result.stdout) as Snapshot).issues, [], "the second poll sees the answer");
+});
+
 test("an issue past the reading limits shows as unreadable, and the other issues still show", async () => {
   const { linear, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
