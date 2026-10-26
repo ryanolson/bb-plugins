@@ -124,7 +124,7 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - `teamKey` (default: the steward's team): the Linear team to watch.
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.
-- `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns this off.
+- `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns this off. A known limit: any agent can change this setting, because every agent runs as you and bb has no setting that only you can change, so an agent can name itself the steward. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
 
 ## Develop
 

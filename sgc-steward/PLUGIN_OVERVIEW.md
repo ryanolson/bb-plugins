@@ -19,6 +19,7 @@ A service on the bb server polls Linear every five minutes for the team's issues
 - An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
 - An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
 - Only a signature with a bb thread id, like `thr_abc123`, gets the answer sent to a thread.
+- Any agent can change plugin settings: every agent runs as you, with full access, and bb has no setting that only you can change. So an agent can name itself in `stewardThread` and then withdraw the questions of other threads. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
 - The `bb sgc` CLI takes the calling thread from `BB_THREAD_ID`, which the bb CLI forwards without checking. So `withdraw` and `ask --thread` trust it, and a process that sets it can withdraw another thread's question or ask for another thread. Withdrawing any thread's question is therefore not in the CLI. It is only in the `sgc_withdraw_question` agent tool. The bb plugin SDK hands that tool, for each call, the thread of the agent session that made the call, and no argument or environment variable sets it.
 
 ## For agents
