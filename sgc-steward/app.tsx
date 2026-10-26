@@ -266,7 +266,9 @@ function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => 
       </header>
       {issue.blocks.map((block) => {
         const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-        const onChange = (next: BlockDraft) => setDrafts((current) => ({ ...current, [block.commentId]: next }));
+        // The first edit pins the revision the answers are written against.
+        const onChange = (next: BlockDraft) =>
+          setDrafts((current) => ({ ...current, [block.commentId]: { ...next, revision: current[block.commentId]?.revision ?? block.revision } }));
         return block.format === "parsed" ? (
           <ParsedBlock key={block.commentId} block={block} draft={draft} onChange={onChange} />
         ) : (
@@ -347,7 +349,11 @@ function QuestionsPage() {
           <Notice>No open questions.</Notice>
         ) : null}
         {snapshot?.issues.map((issue) => (
-          <IssueCard key={`${issue.id}:${issue.blocks.map((block) => block.commentId).join(",")}`} issue={issue} onAnswered={load} />
+          <IssueCard
+            key={`${issue.id}:${issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
+            issue={issue}
+            onAnswered={load}
+          />
         ))}
       </div>
     </div>

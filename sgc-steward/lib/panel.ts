@@ -9,6 +9,11 @@ export interface BlockDraft {
   texts: Record<number, string>;
   /** The answer to a block that is not in the question format. */
   raw: string;
+  /**
+   * The block's revision when the draft was first edited. Sent with the
+   * answer, so an edit to the block since then is refused, not answered.
+   */
+  revision?: string;
 }
 
 export const EMPTY_DRAFT: BlockDraft = { options: {}, texts: {}, raw: "" };
@@ -21,10 +26,11 @@ function hasAnswer(draft: BlockDraft, number: number): boolean {
 export function toAnswerBlocks(blocks: readonly QuestionBlock[], drafts: Readonly<Record<string, BlockDraft>>): BlockAnswer[] {
   return blocks.map((block) => {
     const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-    if (block.format === "raw") return { blockId: block.commentId, revision: block.revision, answers: [], text: draft.raw };
+    const revision = draft.revision ?? block.revision;
+    if (block.format === "raw") return { blockId: block.commentId, revision, answers: [], text: draft.raw };
     return {
       blockId: block.commentId,
-      revision: block.revision,
+      revision,
       answers: block.questions
         .filter((question) => hasAnswer(draft, question.number))
         .map((question) => ({

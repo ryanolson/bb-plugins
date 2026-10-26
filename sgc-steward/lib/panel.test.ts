@@ -49,6 +49,20 @@ test("the panel's drafts become the answer the server composes", () => {
   );
 });
 
+test("a draft keeps the revision it was written against, so an edit since is refused", () => {
+  const edited = block(
+    "q1",
+    ["[agent:claude-code thr_test1] Questions 2026-01-05", "Q1. Scale?", "- A (recommended): Sizes.", "- B: Powers of two.", "Q2. Anything else?"].join("\n"),
+    "2026-01-05T10:00:00.000Z",
+  );
+  assert.notEqual(edited.revision, parsed.revision);
+  const drafts: Record<string, BlockDraft> = { q1: { options: { 1: "A" }, texts: {}, raw: "", revision: parsed.revision } };
+  const blocks = toAnswerBlocks([edited], drafts);
+  assert.equal(blocks[0]?.revision, parsed.revision, "the draft's revision, not the block's new one");
+  assert.throws(() => composeAnswer([edited], blocks), /changed after the answers were written/);
+  assert.equal(toAnswerBlocks([edited], {})[0]?.revision, edited.revision, "an untouched block sends its own revision");
+});
+
 test("untouched questions are left out, and progress counts what has an answer", () => {
   assert.deepEqual(toAnswerBlocks([parsed], {}), [{ blockId: "q1", revision: parsed.revision, answers: [] }]);
   assert.deepEqual(answerProgress([parsed, raw], {}), { answered: 0, total: 3 });
