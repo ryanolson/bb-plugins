@@ -25,6 +25,7 @@
   "include": [
     "server.ts",
     "server.test.ts",
+    "test-support.ts",
     "app.tsx",
     "components",
     "lib"
