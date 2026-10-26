@@ -499,3 +499,23 @@ test("review F2: a question arriving during the write remains open", { skip: "F2
     { label: "needs-decision", unseenStillOpen: true, labelStillPresent: true },
   ]);
 });
+
+test("review F3: the CLI refuses an answer after the listed block is replaced", { skip: "F3: CLI answers omit the expected block IDs" }, async () => {
+  const { linear, harness } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const listed = await harness.behavior.runCli(["questions", "--json"]);
+  assert.equal(listed.exitCode, 0, listed.stderr);
+  assert.equal((JSON.parse(listed.stdout) as Snapshot).issues[0]?.blocks[0]?.commentId, "q1");
+
+  const text = "Q1. A\nQ2. The cells.";
+  harness.inspection.sdk.stub("files.read", async () => ({
+    content: text, contentEncoding: "utf8", path: "/work/answer.md", sha256: "x", sizeBytes: text.length,
+  }));
+  linear.post(issue, "q2", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+  const answer = await harness.behavior.runCli(["answer", "TEAM-1", "--text-file", "/work/answer.md"]);
+
+  const posts = linear.calls.filter((call) => call.startsWith("createComment"));
+  assert.equal(posts.length, 0, `The CLI accepted an answer to q1 for its replacement q2: ${JSON.stringify(answer)}`);
+  assert.equal(answer.exitCode, 1);
+});
