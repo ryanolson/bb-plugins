@@ -77,7 +77,7 @@ When you answer, the plugin sends the answer to the asking thread as a queued me
 
 When you answer a Linear block, the plugin also sends the answer to the bb thread named in the block's signature.
 
-A question can go stale: its issue closes, a later question replaces it, or events decide it. The steward thread, named in the `stewardThread` setting, withdraws a stale question with `bb sgc withdraw <id> --reason <text>`. The plugin then sends the asking thread a queued message that starts with `[sgc-steward] Withdrawn <id>` and gives the reason, so the thread stops waiting. It skips the message when bb reports the asking thread archived, deleted, or missing. When the thread cannot be looked up, it keeps the message, to be sent or retried. When the question names an issue, the plugin also posts a record of the withdrawal there. That record also starts with `Answer to bb question`, so it closes no Linear question block. The page no longer shows a withdrawn question.
+A question can go stale: its issue closes, a later question replaces it, or events decide it. The steward thread, named in the `stewardThread` setting, withdraws a stale question with the `sgc_withdraw_question` agent tool, giving the question id and the reason. The plugin then sends the asking thread a queued message that starts with `[sgc-steward] Withdrawn <id>` and gives the reason, so the thread stops waiting. It skips the message when bb reports the asking thread archived, deleted, or missing. When the thread cannot be looked up, it keeps the message, to be sent or retried. When the question names an issue, the plugin also posts a record of the withdrawal there. That record also starts with `Answer to bb question`, so it closes no Linear question block. The page no longer shows a withdrawn question.
 
 A send or a record that fails is kept and listed on the page, with a retry. A send that looked failed may still have arrived, so a retry can deliver an answer twice. A send that a restart cut short is listed the same way.
 
@@ -106,7 +106,7 @@ bb sgc key --api-key-stdin
 ```
 
 - `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. The same open question from the same thread returns its id again. A thread can have 10 open questions, and all threads 50.
-- `withdraw` closes a question. Only the thread that asked it can withdraw it. `--thread` names that thread when you run the command outside a thread. The steward thread can withdraw any open question, and must give a `--reason`.
+- `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name every open block of the issue, as `questions` prints it. It refuses when the open blocks or their revisions differ, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
@@ -124,7 +124,7 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - `teamKey` (default: the steward's team): the Linear team to watch.
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.
-- `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads. `bb plugin config sgc-steward unset stewardThread` turns this off.
+- `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns this off.
 
 ## Develop
 

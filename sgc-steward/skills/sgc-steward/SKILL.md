@@ -26,15 +26,12 @@ bb sgc ask --question "<question>" --option "<your recommendation>" --option "<a
 
 ## Withdrawing stale questions
 
-The steward thread, named in the plugin's `stewardThread` setting, withdraws any open bb question that is no longer valid: its issue closed, a later question replaced it, or events decided it.
+The steward thread, named in the plugin's `stewardThread` setting, withdraws any open bb question that is no longer valid: its issue closed, a later question replaced it, or events decided it. It calls the `sgc_withdraw_question` agent tool with the question id and the reason.
 
-```
-bb sgc withdraw <id> --reason "<why the question is no longer valid>"
-```
-
-- The steward must give a reason. The asking thread gets it in a message that starts with `[sgc-steward] Withdrawn <id>`, unless that thread is archived or gone.
+- The tool refuses every thread but the steward. `bb sgc withdraw` withdraws only the calling thread's own questions, even in the steward thread.
+- The steward must give a reason. The asking thread gets it in a message that starts with `[sgc-steward] Withdrawn <id>`, unless bb reports that thread archived, deleted, or missing.
 - When the question names an issue, the plugin posts a record of the withdrawal there. The record closes no Linear block.
-- Any other thread can withdraw only its own questions.
+- The tool reaches the steward when its agent session next starts after the setting is made.
 
 ## Asking on a Linear check-in issue
 

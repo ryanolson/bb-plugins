@@ -17,18 +17,19 @@ test("withdraw review F2: a temporary thread lookup failure keeps the notice ret
     throw new Error("temporary SDK timeout");
   });
 
-  const result = await harness.behavior.runCli(["withdraw", id, "--reason", "Decided elsewhere.", "--json"], { threadId: "thr_steward" });
-  assert.equal(result.exitCode, 0, result.stderr);
+  // The steward withdraws through its agent tool; the CLI grants no steward power (review F1).
+  const result = await harness.behavior.callAgentTool("sgc_withdraw_question", { id, reason: "Decided elsewhere." }, { threadId: "thr_steward" });
+  assert.equal(typeof result, "string", JSON.stringify(result));
   assert.equal(lookups, 1);
-  assert.equal(JSON.parse(result.stdout).record, "posted");
+  assert.match(result as string, /Recorded it on TEAM-1\./);
   assert.equal(issue.comments.length, 1, "the withdrawal record lands");
 
   harness.inspection.sdk.stub("threads.get", async () => ({
     id: "thr_asker", title: "Asker", environmentId: null, archivedAt: null, deletedAt: null,
   }));
-  const repeated = await harness.behavior.runCli(["withdraw", id, "--reason", "Decided elsewhere."], { threadId: "thr_steward" });
-  assert.equal(repeated.exitCode, 1, "the committed withdrawal cannot be repeated");
-  assert.match(repeated.stderr, /not open/);
+  const repeated = await harness.behavior.callAgentTool("sgc_withdraw_question", { id, reason: "Decided elsewhere." }, { threadId: "thr_steward" });
+  assert.equal(typeof repeated === "string" ? false : repeated.isError, true, "the committed withdrawal cannot be repeated");
+  assert.match(JSON.stringify(repeated), /not open/);
 
   // Recovery must retain the notice after the SDK outage has ended.
   const replacement = await harness.lifecycle.reload(factory);
