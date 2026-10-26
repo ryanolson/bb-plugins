@@ -479,3 +479,28 @@ test("queue review F14: concurrent asks preserve dedupe and both queue caps", as
     assert.equal((await list(harness)).asks.length, 50);
   });
 });
+
+test("queue review F15: a signature edit cannot retarget a saved Linear answer", async (t) => {
+  for (const submittedBeforeEdit of [false, true]) {
+    await t.test(submittedBeforeEdit ? "resubmit after the first answer" : "first submit from the stale page", async () => {
+      const { harness, linear, refresh, sends } = await setup();
+      const issue = linear.addIssue("TEAM-1", ["checkin"]);
+      linear.post(issue, "q1", QUESTIONS);
+      const shown = await refresh();
+      const input = {
+        issueId: issue.id,
+        blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+      };
+      if (submittedBeforeEdit) await harness.behavior.callRpc("questions.answer", input);
+      const before = sends.map((send) => send.threadId);
+      issue.comments[0]!.body = QUESTIONS.replace("thr_test1", "thr_other");
+      issue.updatedAt = linear.tick();
+      try {
+        await harness.behavior.callRpc("questions.answer", input);
+      } catch (error) {
+        assert.equal((error as { code?: string }).code, "conflict");
+      }
+      assert.deepEqual(sends.map((send) => send.threadId), before, "changing only the signature must not send a saved answer to a new thread");
+    });
+  }
+});

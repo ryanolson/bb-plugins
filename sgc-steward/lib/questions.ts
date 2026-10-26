@@ -49,10 +49,12 @@ interface BlockBase {
   /** The Linear comment id; it also identifies the block. */
   commentId: string;
   /**
-   * Hash of what an answer refers to: the parsed context, questions, and
-   * options, or the whole text of a raw block. The context can name what a
-   * question is about, so it counts too. An edit to any of them changes the
-   * revision, so an answer drafted against the old text is refused.
+   * Hash of what an answer refers to and where it goes: the parsed context,
+   * questions, and options, with the thread in the signature, or the whole
+   * text of a raw block. The context can name what a question is about, and
+   * the thread receives the answer, so both count. An edit to any of them
+   * changes the revision, so an answer drafted against the old text is
+   * refused instead of read differently or sent elsewhere.
    */
   revision: string;
   createdAt: string;
@@ -115,7 +117,9 @@ export function parseQuestionBlock(comment: LinearComment, kind: IssueKind): Que
   const result = parseQuestions(lines);
   const base: BlockBase = {
     commentId: comment.id,
-    revision: revisionOf("problem" in result ? { format: "raw", body } : { format: "parsed", context: result.context, questions: result.questions }),
+    revision: revisionOf(
+      "problem" in result ? { format: "raw", body } : { format: "parsed", threadId: signature.threadId, context: result.context, questions: result.questions },
+    ),
     createdAt: comment.createdAt,
     agent: signature.agent,
     threadId: signature.threadId,
@@ -125,7 +129,9 @@ export function parseQuestionBlock(comment: LinearComment, kind: IssueKind): Que
   return "problem" in result ? { ...base, format: "raw", problem: result.problem } : { ...base, format: "parsed", ...result };
 }
 
-function revisionOf(content: { format: "raw"; body: string } | { format: "parsed"; context: string; questions: Question[] }): string {
+function revisionOf(
+  content: { format: "raw"; body: string } | { format: "parsed"; threadId: string | null; context: string; questions: Question[] },
+): string {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 12);
 }
 
