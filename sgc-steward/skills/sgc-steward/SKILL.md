@@ -29,6 +29,7 @@ Q2. <question with no options; the owner types the answer>
 - Mark at most one option per question `(recommended)`.
 - Put every option on one line. Indent a line that continues an option.
 - Put context before `Q1.`, not after the options.
+- Do not edit a block after you post it. Post a new block instead. An edit changes the block's revision, so an answer to the old text no longer closes it, and the owner is notified again.
 
 A comment that breaks a rule is still shown, but as plain text without option buttons.
 
