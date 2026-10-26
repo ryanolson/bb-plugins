@@ -626,3 +626,140 @@ test("queue review F18: a recovery send leaves the Linear lock free for answers"
   }
   assert.equal(beforeRelease, true, `the other answer waits for a thread send even after writeFirst (poll aborted: ${aborted})`);
 });
+
+const STEWARD = "thr_steward";
+
+/** `bb sgc withdraw` from a thread; null runs it outside any thread. */
+function withdraw(harness: Harness, args: string[], threadId: string | null) {
+  return harness.behavior.runCli(["withdraw", ...args], threadId === null ? {} : { threadId });
+}
+
+test("the steward withdraws another thread's question with a reason: the asker is told and the issue records it", async () => {
+  const { harness, linear, refresh, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  await refresh();
+  const id = await askId(harness, ["--question", "Ship the cache change today?", "--option", "Yes.", "--issue", "TEAM-1"]);
+  const result = await withdraw(harness, [id, "--reason", "The cache change shipped yesterday.", "--json"], STEWARD);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { id, withdrawn: true, notice: "sent", record: "posted" });
+  assert.deepEqual((await list(harness)).asks, [], "the page no longer shows it");
+
+  assert.deepEqual(sends.map((send) => [send.threadId, send.mode]), [["thr_asker", "queue-if-active"]]);
+  const notice = sends[0]!.input[0]!.text;
+  assert.ok(notice.startsWith(`[sgc-steward] Withdrawn ${id}\n`), notice);
+  assert.match(notice, /The cache change shipped yesterday\./);
+  assert.match(notice, /Ship the cache change today\?/);
+
+  const record = issue.comments.at(-1)!.body;
+  assert.ok(record.startsWith(`Answer to bb question ${id} from thread thr_asker `), record);
+  assert.match(record.split("\n")[0]!, /: withdrawn$/);
+  assert.match(record, new RegExp(`${STEWARD}[\\s\\S]*The cache change shipped yesterday\\.`));
+  const after = await refresh();
+  assert.deepEqual(after.issues.flatMap((open) => open.blocks.map((block) => block.commentId)), ["q1"], "the record closes no block");
+
+  const late = await rejection(harness.behavior.callRpc("asks.answer", { id, option: "A", text: "" }));
+  assert.equal(late.code, "conflict");
+  assert.match(late.message, /withdrawn/);
+});
+
+test("only the named steward withdraws another thread's question, and only with a reason", async () => {
+  const { harness, sends } = await setup();
+  const id = await askId(harness, ["--question", "Still needed?"]);
+  const unnamed = await withdraw(harness, [id, "--reason", "Stale."], STEWARD);
+  assert.equal(unnamed.exitCode, 1, "with no steward setting, behavior is as before");
+  assert.match(unnamed.stderr, /asked by another thread/);
+
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const other = await withdraw(harness, [id, "--reason", "Stale."], "thr_other");
+  assert.equal(other.exitCode, 1);
+  assert.match(other.stderr, /asked by another thread/);
+  const terminal = await withdraw(harness, [id, "--thread", STEWARD, "--reason", "Stale."], null);
+  assert.equal(terminal.exitCode, 1, "--thread names the asker; it does not make the caller the steward");
+  for (const reason of [[], ["--reason", "   "]]) {
+    const bare = await withdraw(harness, [id, ...reason], STEWARD);
+    assert.equal(bare.exitCode, 1);
+    assert.match(bare.stderr, /reason/);
+  }
+  assert.deepEqual((await list(harness)).asks.map((open) => open.id), [id]);
+  assert.equal(sends.length, 0);
+
+  const own = await withdraw(harness, [id], "thr_asker");
+  assert.equal(own.exitCode, 0, own.stderr);
+  assert.equal(sends.length, 0, "a thread that withdraws its own question is not told");
+});
+
+test("an archived or deleted asker is not told, and the withdrawal still succeeds", async () => {
+  const { harness, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const archived = await askId(harness, ["--question", "Archived asker?"], "thr_archived");
+  const gone = await askId(harness, ["--question", "Deleted asker?"], "thr_gone");
+  harness.inspection.sdk.stub("threads.get", async (args: unknown) => {
+    const { threadId } = args as { threadId: string };
+    if (threadId === "thr_gone") throw new Error(`No thread ${threadId}.`);
+    return { id: threadId, title: `Title of ${threadId}`, titleFallback: null, environmentId: null, archivedAt: 1_800_000_000_000, deletedAt: null };
+  });
+  for (const id of [archived, gone]) {
+    const result = await withdraw(harness, [id, "--reason", "No longer needed.", "--json"], STEWARD);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal((JSON.parse(result.stdout) as { notice: string }).notice, "skipped");
+  }
+  assert.equal(sends.length, 0);
+  const panel = await list(harness);
+  assert.deepEqual([panel.asks, panel.undelivered], [[], []], "a skipped notice is not listed");
+});
+
+test("an answer that lands while a steward withdrawal waits wins, and the withdrawal sends and records nothing", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  const id = await askId(harness, ["--question", "Race?", "--option", "Yes.", "--issue", "TEAM-1"]);
+  let reached!: () => void;
+  let release!: () => void;
+  const atCheck = new Promise<void>((resolve) => { reached = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  harness.inspection.sdk.stub("threads.get", async (args: unknown) => {
+    const { threadId } = args as { threadId: string };
+    reached();
+    await gate;
+    return { id: threadId, title: `Title of ${threadId}`, titleFallback: null, environmentId: null, archivedAt: null, deletedAt: null };
+  });
+  const withdrawing = withdraw(harness, [id, "--reason", "Stale."], STEWARD);
+  await atCheck;
+  await harness.behavior.callRpc("asks.answer", { id, option: "A", text: "" });
+  release();
+  const lost = await withdrawing;
+  assert.equal(lost.exitCode, 1);
+  assert.match(lost.stderr, /not open/);
+  assert.deepEqual(sends.map((send) => send.input[0]!.text.split("\n")[0]), [`[sgc-steward] Answer to ${id}`], "only the answer goes out");
+  assert.deepEqual(issue.comments.map((comment) => comment.body.split("\n")[0]!.endsWith(": withdrawn")), [false], "only the answer is recorded");
+  const panel = await list(harness);
+  assert.deepEqual([panel.undelivered, panel.unposted], [[], []]);
+});
+
+test("a withdrawal notice that fails to send is listed with a retry", async () => {
+  const { harness, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const id = await askId(harness, ["--question", "Retry me?"]);
+  harness.inspection.sdk.stub("threads.send", async () => {
+    throw new Error("the bb server is busy");
+  });
+  const result = await withdraw(harness, [id, "--reason", "Stale."], STEWARD);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.match(result.stdout, /Could not tell thr_asker: the bb server is busy/);
+  const panel = await list(harness);
+  assert.deepEqual(
+    panel.undelivered.map((row) => [row.source, row.label, row.threadId, row.error]),
+    [["withdrawal", `Withdrawal of ${id}`, "thr_asker", "the bb server is busy"]],
+  );
+  const cli = await harness.behavior.runCli(["questions", "--cached"]);
+  assert.match(cli.stdout, new RegExp(`Withdrawal of ${id} to thr_asker: the bb server is busy`));
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  const retried = (await harness.behavior.callRpc("deliveries.retry", { id: panel.undelivered[0]!.id })) as { delivered: boolean };
+  assert.equal(retried.delivered, true);
+  assert.ok(sends[0]!.input[0]!.text.startsWith(`[sgc-steward] Withdrawn ${id}`));
+});

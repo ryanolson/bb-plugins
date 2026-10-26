@@ -42,7 +42,9 @@ import {
   blockDelivery,
   checkIssueRef,
   checkQuestion,
+  checkReason,
   isThreadId,
+  withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
 import { ASK_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered } from "./lib/ask-store.ts";
@@ -57,7 +59,7 @@ import {
   type RecordView,
   type Snapshot,
 } from "./lib/contract.ts";
-import { firstLine, formatPanel, parseBlockOption, preview, truncate } from "./lib/format.ts";
+import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
@@ -158,6 +160,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         label: "Notify on new questions",
         description: "Show a notification in bb, once per question block, when new questions arrive.",
         default: true,
+      },
+      stewardThread: {
+        type: "string",
+        label: "Steward thread",
+        description: "The bb thread id of the steward, which may withdraw any open bb question, with a reason. Unset, each thread withdraws only its own.",
+        experimental_schema: z.string().regex(/^thr_[a-z0-9]+$/, "Use a bb thread id, like thr_abc123"),
       },
     });
 
@@ -344,6 +352,16 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         undelivered: asks.undelivered().map(deliveryView),
         unposted: asks.unposted().map(recordView),
       };
+    }
+
+    /** Whether a thread can take a message: it exists and is neither archived nor deleted. */
+    async function liveThread(threadId: string): Promise<boolean> {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId });
+        return !thread.archivedAt && !thread.deletedAt;
+      } catch {
+        return false;
+      }
     }
 
     /** Sends in flight, so two retries at once cannot send one answer twice. */
@@ -803,9 +821,17 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             },
           }),
           withdraw: cliCommand({
-            summary: "Withdraw a question the calling thread asked",
+            summary: "Withdraw an open question: the calling thread's own, or any as the steward",
+            description: `A thread withdraws only its own questions. The thread named in the stewardThread setting may withdraw any open question, with a --reason: the asking thread then gets a message that starts with "${DELIVERY_PREFIX} Withdrawn <id>", unless it is archived or gone, and the question's issue gets a record.`,
             positionals: [{ name: "id", description: "Question id, like bbq_k3x9mz2p4q", required: true }],
-            options: { thread: { type: "string", description: "The asking thread, when not called from a thread" }, json },
+            options: {
+              reason: {
+                type: "string",
+                description: `Why it is withdrawn, at most ${ASK_LIMITS.reasonChars} characters; the steward must give one for another thread's question`,
+              },
+              thread: { type: "string", description: "The asking thread, when not called from a thread" },
+              json,
+            },
             async run(input, ctx) {
               // A thread withdraws only its own questions; --thread is for the owner's terminal.
               const threadId = ctx.threadId ?? input.options.thread;
@@ -816,12 +842,45 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
                 throw new PluginCliError(`${threadId} cannot withdraw for ${input.options.thread}.`, { code: "forbidden", hint: "A thread withdraws only its own questions." });
               }
               const id = input.positionals.id;
-              const outcome = asks.withdraw(id, threadId);
+              let reason: string | null;
+              try {
+                reason = input.options.reason === undefined ? null : checkReason(input.options.reason);
+              } catch (error) {
+                throw new PluginCliError(message(error), { code: "invalid" });
+              }
+              // Only the calling thread can be the steward: --thread names the asker, never the caller.
+              const { stewardThread } = await settings.get();
+              const steward = ctx.threadId !== undefined && ctx.threadId === stewardThread;
+              // The steward withdrawing another thread's question tells the asker why, and records it on its issue.
+              const row = asks.get(id);
+              const others = steward && row !== null && row.threadId !== threadId ? row : null;
+              if (others !== null && reason === null) {
+                throw new PluginCliError(`Give a --reason to withdraw ${id}, a question of ${others.threadId}.`, {
+                  code: "invalid",
+                  hint: "The asking thread and the issue record get the reason.",
+                });
+              }
+              const followUps =
+                others === null || reason === null
+                  ? { notice: null, record: null }
+                  : withdrawalFollowUps(others, threadId, reason, others.state === "open" && (await liveThread(others.threadId)), Date.now());
+              const outcome = asks.withdraw(id, { thread: threadId, by: ctx.threadId ?? null, steward, reason, ...followUps });
               if (outcome === "not_found") throw new PluginCliError(`No bb question ${id}.`, { code: "not_found" });
               if (outcome === "not_yours") throw new PluginCliError(`${id} was asked by another thread.`, { code: "forbidden" });
               if (outcome === "not_open") throw new PluginCliError(`${id} is not open.`, { code: "conflict" });
               publish(0);
-              return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ id, withdrawn: true }) : `Withdrew ${id}.` };
+              if (others === null) return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ id, withdrawn: true }) : `Withdrew ${id}.` };
+              const kept = asks.deliveryFor("withdrawal", id, others.threadId);
+              const sent = kept === null ? null : notified(await deliver(kept.id), others.threadId);
+              const posted = others.issue === null ? null : await postRecord(id);
+              const result: WithdrawalResult = {
+                id,
+                withdrawn: true,
+                notice: sent === null ? "skipped" : sent.delivered ? "sent" : "failed",
+                record: posted === null ? "none" : posted.state === "posted" ? "posted" : "failed",
+              };
+              const report = withdrawalReport(result, others.threadId, sent?.error ?? null, others.issue, posted?.error ?? null);
+              return { exitCode: 0, stdout: input.options.json ? JSON.stringify(result) : report };
             },
           }),
           answer: cliCommand({

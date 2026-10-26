@@ -48,6 +48,10 @@ export const ASK_MIGRATIONS: readonly string[] = [
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
   )`,
+  // Who withdrew a question, and why: the asking thread, or the steward with a reason.
+  `ALTER TABLE asks ADD COLUMN withdrawn_by TEXT`,
+  `ALTER TABLE asks ADD COLUMN withdraw_reason TEXT`,
+  `ALTER TABLE asks ADD COLUMN withdrawn_at INTEGER`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn";
@@ -56,16 +60,21 @@ export interface AskRow extends Ask {
   state: AskState;
   answer: AskAnswer | null;
   answeredAt: number | null;
+  /** The thread that withdrew it; null unless withdrawn, and for a withdrawal from the owner's terminal. */
+  withdrawnBy: string | null;
+  withdrawReason: string | null;
+  withdrawnAt: number | null;
 }
 
-export type DeliverySource = "ask" | "linear";
+export type DeliverySource = "ask" | "linear" | "withdrawal";
 
 /**
- * One message to send to a thread: the answer to its bb question, or to its
- * Linear block. An answer to a block is kept held before it posts, so a
- * restart while the post is in flight cannot lose it. Whoever moves a row out
- * of held sends it, once; after that, only the owner's retry sends it again,
- * because a send that seemed to fail may have arrived.
+ * One message to send to a thread: the answer to its bb question or to its
+ * Linear block, or the notice that the steward withdrew its question. An
+ * answer to a block is kept held before it posts, so a restart while the
+ * post is in flight cannot lose it. Whoever moves a row out of held sends
+ * it, once; after that, only the owner's retry sends it again, because a
+ * send that seemed to fail may have arrived.
  */
 export interface Delivery {
   id: string;
@@ -73,7 +82,7 @@ export interface Delivery {
   /** The bb question id, or the Linear answer comment id. */
   ref: string;
   threadId: string;
-  /** What the page shows it as: the question id or the issue identifier. */
+  /** What the page shows it as: the question id, the issue identifier, or "Withdrawal of" the question id. */
   label: string;
   message: string;
   /** held: the Linear answer is not known to be posted, so it is neither shown nor sent. */
@@ -113,6 +122,23 @@ export interface RecordRow {
 
 export type Outcome = { ok: true } | { ok: false; error: string };
 
+export type WithdrawOutcome = "withdrawn" | "not_found" | "not_yours" | "not_open";
+
+/** A withdrawal: who acts, and what goes out with it. */
+export interface Withdrawal {
+  /** The thread the caller acts for: the calling thread, or `--thread` from the owner's terminal. */
+  thread: string;
+  /** The calling thread, stored as the withdrawer; null for the owner's terminal. */
+  by: string | null;
+  /** The caller is the steward, who may withdraw any thread's question. */
+  steward: boolean;
+  reason: string | null;
+  /** The message for the asking thread, or null when it is not told. */
+  notice: string | null;
+  /** The comment that records the withdrawal on the question's issue, or null. */
+  record: { issue: string; body: string } | null;
+}
+
 /** What happened to an asked question: stored, already open, or refused at a cap. */
 export type Admission = { kind: "asked" | "existing"; id: string } | { kind: "full"; scope: "thread" | "total"; open: number };
 
@@ -135,6 +161,9 @@ interface AskRecord {
   state: AskState;
   answer: string | null;
   answered_at: number | null;
+  withdrawn_by: string | null;
+  withdraw_reason: string | null;
+  withdrawn_at: number | null;
 }
 
 interface DeliveryRecord {
@@ -174,6 +203,9 @@ function toAsk(row: AskRecord): AskRow {
     state: row.state,
     answer: row.answer === null ? null : (JSON.parse(row.answer) as AskAnswer),
     answeredAt: row.answered_at,
+    withdrawnBy: row.withdrawn_by,
+    withdrawReason: row.withdraw_reason,
+    withdrawnAt: row.withdrawn_at,
   };
 }
 
@@ -216,6 +248,7 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     `INSERT OR IGNORE INTO deliveries (id, source, ref, thread_id, label, message, state, issue_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const insertRecord = db.prepare("INSERT OR IGNORE INTO records (ask_id, issue, body, state, created_at) VALUES (?, ?, ?, 'pending', ?)");
   // Each post of an answer gets the whole post window, so holding a
   // delivery again restarts the window of one still held.
   const holdDelivery = db.prepare(
@@ -260,12 +293,29 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
       return (db.prepare("SELECT * FROM asks WHERE state = 'open' ORDER BY asked_at, id").all() as AskRecord[]).map(toAsk);
     },
 
-    withdraw(id: string, threadId: string): "withdrawn" | "not_found" | "not_yours" | "not_open" {
-      const row = getAsk.get(id) as AskRecord | undefined;
-      if (row === undefined) return "not_found";
-      if (row.thread_id !== threadId) return "not_yours";
-      const changed = db.prepare("UPDATE asks SET state = 'withdrawn' WHERE id = ? AND state = 'open'").run(id).changes;
-      return changed === 1 ? "withdrawn" : "not_open";
+    /**
+     * Withdraw an open question. Only its own thread may, unless the caller
+     * is the steward. The notice to the asker and the record for the issue
+     * are saved in the same transaction, so a crash leaves them to retry.
+     * Only an open question is withdrawn, so a withdrawal and an answer that
+     * race have one winner, and the loser saves nothing.
+     */
+    withdraw(id: string, withdrawal: Withdrawal): WithdrawOutcome {
+      return db.transaction((): WithdrawOutcome => {
+        const row = getAsk.get(id) as AskRecord | undefined;
+        if (row === undefined) return "not_found";
+        if (row.thread_id !== withdrawal.thread && !withdrawal.steward) return "not_yours";
+        const at = now();
+        const changed = db
+          .prepare("UPDATE asks SET state = 'withdrawn', withdrawn_by = ?, withdraw_reason = ?, withdrawn_at = ? WHERE id = ? AND state = 'open'")
+          .run(withdrawal.by, withdrawal.reason, at, id).changes;
+        if (changed !== 1) return "not_open";
+        if (withdrawal.notice !== null) {
+          insertDelivery.run(`dlv_${token(10)}`, "withdrawal", id, row.thread_id, `Withdrawal of ${id}`, withdrawal.notice, "pending", null, at);
+        }
+        if (withdrawal.record !== null) insertRecord.run(id, withdrawal.record.issue, withdrawal.record.body, at);
+        return "withdrawn";
+      })();
     },
 
     /**
@@ -289,14 +339,7 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
           .run(JSON.stringify(answer), at, id).changes;
         if (changed !== 1) return "not_open" as const;
         insertDelivery.run(`dlv_${token(10)}`, "ask", id, row.thread_id, id, delivery.message, "pending", null, at);
-        if (record !== null) {
-          db.prepare("INSERT OR IGNORE INTO records (ask_id, issue, body, state, created_at) VALUES (?, ?, ?, 'pending', ?)").run(
-            id,
-            record.issue,
-            record.body,
-            at,
-          );
-        }
+        if (record !== null) insertRecord.run(id, record.issue, record.body, at);
         return "answered" as const;
       })();
     },

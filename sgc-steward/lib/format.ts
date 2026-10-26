@@ -87,3 +87,25 @@ export function formatPanel(view: Panel): string {
   for (const failed of view.issueErrors) lines.push(`Could not read ${failed.identifier}: ${failed.message}`);
   return lines.join("\n").trim();
 }
+
+/** What a steward withdrawal did, as `bb sgc withdraw` prints it. */
+export interface WithdrawalResult {
+  id: string;
+  withdrawn: true;
+  notice: "sent" | "failed" | "skipped";
+  record: "none" | "posted" | "failed";
+}
+
+export function withdrawalReport(result: WithdrawalResult, asker: string, sendError: string | null, issue: string | null, recordError: string | null): string {
+  const told = {
+    sent: `Told ${asker}.`,
+    failed: `Could not tell ${asker}: ${sendError ?? "unknown error"}. Retry it on the SGC questions page.`,
+    skipped: `Did not tell ${asker}: the thread is archived or gone.`,
+  }[result.notice];
+  const recorded = {
+    none: [],
+    posted: [`Recorded it on ${issue}.`],
+    failed: [`Could not record it on ${issue}: ${recordError ?? "unknown error"}. Retry it on the SGC questions page.`],
+  }[result.record];
+  return [`Withdrew ${result.id}.`, told, ...recorded].join("\n");
+}

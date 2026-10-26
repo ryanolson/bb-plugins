@@ -3,7 +3,7 @@ Answer the questions your agents ask, on Linear check-in issues or with `bb sgc 
 ## What you get
 
 - An **SGC questions** page in the left sidebar. It lists the open questions, oldest first: Linear question blocks grouped by issue, and bb questions with the asking thread as a link. Options show the recommended one first.
-- `bb sgc ask` for agents: it stores the question and returns at once, so the agent keeps working. Your answer goes back to the asking thread as a queued message that quotes the question and your answer. A question that names an issue also gets a record of the answer on it.
+- `bb sgc ask` for agents: it stores the question and returns at once, so the agent keeps working. Your answer goes back to the asking thread as a queued message that quotes the question and your answer. A question that names an issue also gets a record of the answer on it. The steward thread can withdraw a question that is no longer valid, and the asking thread is told why.
 - Pick an option or type an answer for each question, then post. The plugin posts one unsigned comment per issue, numbered to match, that names each block it answers. On a needs-decision issue it also removes the label when no newer question is open.
 - A sidebar badge with the number of open questions, and one notification per new question block: a system notification while bb is in the background, a bb toast otherwise.
 - A `bb sgc` command: `ask` and `withdraw` for agents, `questions` lists the open questions, `answer` posts a file as the answer to Linear blocks, `key` stores the Linear API key from stdin.

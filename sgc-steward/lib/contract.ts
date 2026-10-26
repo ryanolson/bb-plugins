@@ -53,7 +53,7 @@ const askViewSchema = z.object({
 });
 const deliveryViewSchema = z.object({
   id: z.string(),
-  source: z.enum(["ask", "linear"]),
+  source: z.enum(["ask", "linear", "withdrawal"]),
   ref: z.string(),
   threadId: z.string(),
   label: z.string(),

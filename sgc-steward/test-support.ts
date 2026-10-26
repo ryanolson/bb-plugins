@@ -141,7 +141,7 @@ export async function setup(options: { key?: string | null; postWindowMs?: numbe
   });
   harness.inspection.sdk.stub("threads.get", async (args: unknown) => {
     const { threadId } = args as { threadId: string };
-    return { id: threadId, title: `Title of ${threadId}`, titleFallback: null, environmentId: null };
+    return { id: threadId, title: `Title of ${threadId}`, titleFallback: null, environmentId: null, archivedAt: null, deletedAt: null };
   });
   await factory(host.bb);
   const refresh = async () => (await harness.behavior.callRpc("questions.refresh", null)) as Snapshot;

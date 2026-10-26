@@ -1,8 +1,9 @@
 // Questions agents ask through `bb sgc ask` instead of a bb question dialog.
 //
 // Pure helpers: checks for what an agent sends, and the exact text of what the
-// plugin sends back. The owner's words are quoted as typed, and the record
-// posted to Linear starts with the record header, so it closes no block.
+// plugin sends back. The owner's words are quoted as typed, and every record
+// posted to Linear, of an answer or of a withdrawal, starts with the record
+// header, so it closes no block.
 
 import { RECORD_HEADER } from "./questions.ts";
 
@@ -14,6 +15,8 @@ export const ASK_LIMITS = {
   openPerThread: 10,
   /** Open questions in all, which bounds `bb sgc questions` output. */
   openTotal: 50,
+  /** A withdrawal reason, which goes to the asker and the issue record. */
+  reasonChars: 2000,
 } as const;
 
 /** The first words of every message the plugin sends to a thread. */
@@ -69,6 +72,13 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
     throw new Error(`there is no option ${recommend} to recommend`);
   }
   return options;
+}
+
+export function checkReason(text: string): string {
+  const reason = text.trim();
+  if (reason === "") throw new Error("the reason is empty");
+  if (reason.length > ASK_LIMITS.reasonChars) throw new Error(`the reason is over ${ASK_LIMITS.reasonChars} characters`);
+  return reason;
 }
 
 export function checkIssueRef(ref: string): string {
@@ -135,4 +145,46 @@ export function askRecord(ask: Ask, answer: AskAnswer): string {
 /** The message sent to the thread that signed a Linear question block. */
 export function blockDelivery(issueIdentifier: string, commentId: string, body: string): string {
   return [`${DELIVERY_PREFIX} Answer to your questions on ${issueIdentifier}, posted as Linear comment ${commentId}`, "", body].join("\n");
+}
+
+/** The message that tells the asking thread the steward withdrew its question, so it stops waiting. */
+export function withdrawalNotice(ask: Ask, steward: string, reason: string): string {
+  return [
+    `${DELIVERY_PREFIX} Withdrawn ${ask.id}`,
+    "",
+    `The steward, thread ${steward}, withdrew your question asked ${formatUtc(ask.askedAt)}. It will get no answer, so stop waiting for one.`,
+    "",
+    "Reason:",
+    reason,
+    "",
+    "Your question:",
+    ask.question,
+  ].join("\n");
+}
+
+/** The comment that records a withdrawal on the question's issue. It starts with the record header, so it closes no block. */
+export function withdrawalRecord(ask: Ask, steward: string, reason: string, at: number): string {
+  const options = ask.options.length === 0 ? [] : ["", "Options:", ...optionLines(ask)];
+  return [
+    `${RECORD_HEADER} ${ask.id} from thread ${ask.threadId} (asked ${formatUtc(ask.askedAt)}): withdrawn`,
+    "",
+    "Question:",
+    ask.question,
+    ...options,
+    "",
+    `Withdrawn by the steward, thread ${steward}, at ${formatUtc(at)}. Reason:`,
+    reason,
+  ].join("\n");
+}
+
+/**
+ * What goes out when the steward withdraws another thread's question: the
+ * notice for the asker, when it can still take one, and the record for the
+ * question's issue, when it names one.
+ */
+export function withdrawalFollowUps(ask: Ask, steward: string, reason: string, tell: boolean, at: number) {
+  return {
+    notice: tell ? withdrawalNotice(ask, steward, reason) : null,
+    record: ask.issue === null ? null : { issue: ask.issue, body: withdrawalRecord(ask, steward, reason, at) },
+  };
 }

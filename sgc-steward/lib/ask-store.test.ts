@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,9 +11,16 @@ import type { Ask } from "./asks.ts";
 let clock = Date.parse("2026-01-05T10:00:00Z");
 const now = () => (clock += 1000);
 
+/** Apply the statements not applied yet, as bb.storage.migrate does: shipped statements run once. */
+function migrate(db: Database.Database, statements: readonly string[]) {
+  const applied = db.pragma("user_version", { simple: true }) as number;
+  for (const statement of statements.slice(applied)) db.exec(statement);
+  db.pragma(`user_version = ${statements.length}`);
+}
+
 function open(path = ":memory:") {
   const db = new Database(path);
-  for (const statement of ASK_MIGRATIONS) db.exec(statement);
+  migrate(db, ASK_MIGRATIONS);
   return { db, store: createAskStore(db, now) };
 }
 
@@ -31,6 +39,32 @@ function ask(id: string, extra: Partial<Ask> = {}): Ask {
     ...extra,
   };
 }
+
+/** A thread withdrawing its own question: no reason needed, nobody to tell. */
+function own(thread: string) {
+  return { thread, by: thread, steward: false, reason: null, notice: null, record: null };
+}
+
+test("the shipped migration statements never change, because the host refuses a changed one", () => {
+  const hash = (statement: string) => createHash("sha256").update(statement).digest("hex").slice(0, 16);
+  assert.deepEqual(ASK_MIGRATIONS.slice(0, 3).map(hash), ["201efed5e3e033d1", "00e4f9328a580a32", "b6975aa10840e9c7"]);
+});
+
+test("a database from before the withdrawal columns upgrades, and its questions can be withdrawn", () => {
+  const db = new Database(":memory:");
+  migrate(db, ASK_MIGRATIONS.slice(0, 3));
+  db.prepare(
+    `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
+     VALUES ('bbq_old', 'thr_a', 'Thread A', 'Old?', '[]', NULL, 1, 'open', NULL)`,
+  ).run();
+  migrate(db, ASK_MIGRATIONS);
+  const store = createAskStore(db, now);
+  const before = store.get("bbq_old")!;
+  assert.deepEqual([before.state, before.withdrawnBy, before.withdrawReason, before.withdrawnAt], ["open", null, null, null]);
+  assert.equal(store.withdraw("bbq_old", { ...own("thr_s"), steward: true, reason: "Stale." }), "withdrawn");
+  const after = store.get("bbq_old")!;
+  assert.deepEqual([after.state, after.withdrawnBy, after.withdrawReason], ["withdrawn", "thr_s", "Stale."]);
+});
 
 test("ids look like bbq_ and differ", () => {
   const ids = new Set(Array.from({ length: 50 }, () => createAskId()));
@@ -70,10 +104,13 @@ test("a full cap refuses a new question, but a repeat still gets its id", () => 
 test("only the asking thread withdraws, and only an open question", () => {
   const { store } = open();
   store.admit(ask("bbq_1"), false);
-  assert.equal(store.withdraw("bbq_1", "thr_b"), "not_yours");
-  assert.equal(store.withdraw("bbq_9", "thr_a"), "not_found");
-  assert.equal(store.withdraw("bbq_1", "thr_a"), "withdrawn");
-  assert.equal(store.withdraw("bbq_1", "thr_a"), "not_open");
+  assert.equal(store.withdraw("bbq_1", own("thr_b")), "not_yours");
+  assert.equal(store.withdraw("bbq_9", own("thr_a")), "not_found");
+  assert.equal(store.withdraw("bbq_1", own("thr_a")), "withdrawn");
+  assert.equal(store.withdraw("bbq_1", own("thr_a")), "not_open");
+  const row = store.get("bbq_1")!;
+  assert.deepEqual([row.withdrawnBy, row.withdrawReason], ["thr_a", null]);
+  assert.equal(store.deliveryFor("withdrawal", "bbq_1", "thr_a"), null, "a thread that withdraws its own question is not told");
   assert.deepEqual(store.listOpen(), []);
   assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
 });
@@ -155,7 +192,7 @@ test("each open question is handed out for a notification once", () => {
   store.admit(ask("bbq_1"), false);
   store.admit(ask("bbq_2"), true);
   store.admit(ask("bbq_3"), false);
-  store.withdraw("bbq_3", "thr_a");
+  store.withdraw("bbq_3", own("thr_a"));
   assert.deepEqual(store.claim().map((row) => row.id), ["bbq_1"]);
   assert.deepEqual(store.claim(), []);
 });
@@ -178,4 +215,19 @@ test("questions and their deliveries survive closing and reopening the database"
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the steward withdraws any open question, and its notice and record are saved with the withdrawal", () => {
+  const { store } = open();
+  store.admit(ask("bbq_1", { issue: "TEAM-1" }), false);
+  const steward = { thread: "thr_s", by: "thr_s", steward: true, reason: "Decided elsewhere.", notice: "told", record: { issue: "TEAM-1", body: "recorded" } };
+  assert.equal(store.withdraw("bbq_1", steward), "withdrawn");
+  const row = store.get("bbq_1")!;
+  assert.deepEqual([row.state, row.withdrawnBy, row.withdrawReason], ["withdrawn", "thr_s", "Decided elsewhere."]);
+  assert.ok(row.withdrawnAt !== null);
+  const notice = store.deliveryFor("withdrawal", "bbq_1", "thr_a")!;
+  assert.deepEqual([notice.state, notice.label, notice.message], ["pending", "Withdrawal of bbq_1", "told"]);
+  assert.deepEqual([store.record("bbq_1")?.issue, store.record("bbq_1")?.body], ["TEAM-1", "recorded"]);
+  assert.equal(store.withdraw("bbq_1", steward), "not_open", "a second withdrawal changes nothing");
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
 });

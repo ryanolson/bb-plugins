@@ -9,7 +9,10 @@ import {
   blockDelivery,
   checkIssueRef,
   checkQuestion,
+  checkReason,
   isThreadId,
+  withdrawalNotice,
+  withdrawalRecord,
   type Ask,
 } from "./asks.ts";
 import { answeredBlocks, commentRole } from "./questions.ts";
@@ -125,4 +128,28 @@ test("an answer to Linear blocks is delivered with its issue and comment", () =>
       "Q1. A",
     ].join("\n"),
   );
+});
+
+test("a withdrawal reason is trimmed and must say something, within the limit", () => {
+  assert.equal(checkReason("  Decided elsewhere.\n"), "Decided elsewhere.");
+  assert.throws(() => checkReason(" \n "), /the reason is empty/);
+  assert.throws(() => checkReason("x".repeat(ASK_LIMITS.reasonChars + 1)), /over 2000 characters/);
+});
+
+test("a withdrawal notice starts with its prefix and gives the reason and the question", () => {
+  const notice = withdrawalNotice(ASK, "thr_steward", "The router change shipped.");
+  assert.ok(notice.startsWith("[sgc-steward] Withdrawn bbq_test1\n"), notice);
+  assert.match(notice, /thr_steward/);
+  assert.match(notice, /Reason:\nThe router change shipped\./);
+  assert.ok(notice.includes(ASK.question));
+});
+
+test("a withdrawal record starts with the record header, so it closes no block", () => {
+  const record = withdrawalRecord(ASK, "thr_steward", "The router change shipped.", Date.parse("2026-01-05T11:30:00Z"));
+  assert.equal(record.split("\n")[0], "Answer to bb question bbq_test1 from thread thr_test9 (asked 2026-01-05 10:00 UTC): withdrawn");
+  assert.equal(commentRole({ body: record, author: "user" }), "answer");
+  assert.deepEqual(answeredBlocks(record), []);
+  assert.match(record, /Withdrawn by the steward, thread thr_steward, at 2026-01-05 11:30 UTC\. Reason:\nThe router change shipped\./);
+  assert.ok(record.includes(ASK.question));
+  assert.match(record, /- A \(recommended\): Yes, today\./);
 });
