@@ -321,9 +321,14 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
 
     /** Bumped by every answer. A poll queued before an answer skips itself, so the answer goes first. */
     let answerEpoch = 0;
-    const poll = (force: boolean, signal?: AbortSignal) => {
+    /** Deliveries a poll released from held, sent once the poll has left the lock. */
+    const releasedByPoll: Delivery[] = [];
+    const poll = async (force: boolean, signal?: AbortSignal) => {
       const epoch = answerEpoch;
-      return locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
+      const polled = await locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
+      // Outside the lock, so a slow thread send never holds up an answer.
+      for (const row of releasedByPoll.splice(0)) await deliver(row.id);
+      return polled;
     };
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
     const pollForCaller = async (force: boolean) => (await poll(force)) ?? (await poll(force));
@@ -404,10 +409,10 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     /**
      * Settle the deliveries a restart left held. Held means the answer's post
      * was in flight, so it may or may not be on Linear. Once it is there, the
-     * deliveries are sent, once. Once it is still missing after the post
-     * window, they are dropped. This runs under the lock, but a plugin
-     * instance from before a reload may still be posting, so a missing answer
-     * inside the window is left for the next poll.
+     * deliveries are released for the poll to send, once. Once it is still
+     * missing after the post window, they are dropped. This runs under the
+     * lock, but a plugin instance from before a reload may still be posting,
+     * so a missing answer inside the window is left for the next poll.
      */
     async function settleHeld(linear: LinearClient, signal: AbortSignal, apiKey: string): Promise<void> {
       for (const held of asks.held()) {
@@ -420,7 +425,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           continue;
         }
         if (comments.some((comment) => comment.id === held.ref)) {
-          for (const row of asks.release(held.ref)) await deliver(row.id);
+          releasedByPoll.push(...asks.release(held.ref));
         } else if (Date.now() - held.heldAt >= postWindowMs) {
           asks.drop(held.ref);
           bb.log.warn(`dropped the deliveries of answer ${held.ref} on ${held.label}: it never posted`);
