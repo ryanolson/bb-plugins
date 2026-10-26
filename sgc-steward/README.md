@@ -86,7 +86,7 @@ bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <nam
 bb sgc key --api-key-stdin
 ```
 
-- `questions` polls Linear and prints each open question with the recommended option first, and each block as `<comment id>@<revision>`. `--cached` prints the last poll and reads nothing. It exits 1 when Linear could not be read.
+- `questions` polls Linear and prints each open question with the recommended option first, and each block as `<comment id>@<revision>`. `--cached` prints the last poll and reads nothing. It exits 1 when Linear or an issue's comments could not be read.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name every open block of the issue, as `questions` prints it. It refuses when the open blocks or their revisions differ, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `key` reads the API key from stdin and stores it.
 

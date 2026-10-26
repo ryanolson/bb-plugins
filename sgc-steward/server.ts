@@ -624,18 +624,22 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         commands: {
           questions: cliCommand({
             summary: "List open questions on the team's check-in and needs-decision issues",
-            description: "Polls Linear first, unless --cached. Exits 1 when Linear could not be read; the questions shown are then from the last good poll.",
+            description: "Polls Linear first, unless --cached. Exits 1 when Linear or an issue's comments could not be read; the questions shown then miss what could not be read.",
             options: { json, cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" } },
             async run(input) {
               const current = input.options.cached ? snapshot : await poll(false);
               if (!current.configured) {
                 throw new PluginCliError("The Linear API key is not set.", { code: "not_configured", hint: KEY_HINT });
               }
-              const failed = current.error !== null;
+              // A failed read hides that issue's questions, so it is a failure.
+              const failures = [
+                ...(current.error === null ? [] : [`Could not read Linear: ${current.error}`]),
+                ...current.issueErrors.map((failed) => `Could not read ${failed.identifier}: ${failed.message}`),
+              ];
               return {
-                exitCode: failed ? 1 : 0,
+                exitCode: failures.length > 0 ? 1 : 0,
                 stdout: input.options.json ? JSON.stringify(current) : formatSnapshot(current),
-                ...(failed ? { stderr: `Could not read Linear: ${current.error}` } : {}),
+                ...(failures.length > 0 ? { stderr: failures.join("\n") } : {}),
               };
             },
           }),

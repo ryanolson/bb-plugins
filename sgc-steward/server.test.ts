@@ -696,3 +696,18 @@ test("review F6: stale pages cannot answer completed or canceled issues", async 
     { state: "canceled", writes: 0, labelStillPresent: true },
   ]);
 });
+
+test("review F7: the questions CLI fails when the issue comments cannot be read", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  assert.equal((await refresh()).issues.length, 1);
+
+  issue.updatedAt = linear.tick();
+  linear.listComments = async () => { throw new LinearError("http", "Linear answered HTTP 502."); };
+  const result = await harness.behavior.runCli(["questions", "--json"]);
+  const snapshot = JSON.parse(result.stdout) as Snapshot;
+  assert.equal(snapshot.issueErrors.length, 1, "the issue's comment read must fail");
+  assert.equal(snapshot.issueErrors[0]?.identifier, "TEAM-1");
+  assert.equal(result.exitCode, 1, "a failed comment read must not be reported as a successful questions check");
+});
