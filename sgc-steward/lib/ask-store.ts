@@ -35,6 +35,7 @@ export const ASK_MIGRATIONS: readonly string[] = [
     created_at INTEGER NOT NULL,
     delivered_at INTEGER,
     issue_id TEXT,
+    held_at INTEGER,
     UNIQUE (source, ref, thread_id)
   )`,
   `CREATE TABLE IF NOT EXISTS records (
@@ -95,7 +96,7 @@ export interface HeldAnswer {
   issueId: string;
   /** The issue identifier. */
   label: string;
-  /** When its deliveries were kept, epoch ms. */
+  /** When the latest post of the answer began, epoch ms. */
   heldAt: number;
 }
 
@@ -215,6 +216,13 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     `INSERT OR IGNORE INTO deliveries (id, source, ref, thread_id, label, message, state, issue_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  // Each post of an answer gets the whole post window, so holding a
+  // delivery again restarts the window of one still held.
+  const holdDelivery = db.prepare(
+    `INSERT INTO deliveries (id, source, ref, thread_id, label, message, state, issue_id, created_at, held_at)
+     VALUES (?, 'linear', ?, ?, ?, ?, 'held', ?, ?, ?)
+     ON CONFLICT (source, ref, thread_id) DO UPDATE SET held_at = excluded.held_at WHERE state = 'held'`,
+  );
 
   return {
     /**
@@ -295,13 +303,13 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
 
     /**
      * Keep the deliveries of a Linear answer, one per thread, held, before
-     * the answer posts. A delivery already kept for the answer and thread
-     * stays as it is.
+     * the answer posts. A delivery already released stays as it is.
      */
     hold(answer: { ref: string; issueId: string; label: string; message: string }, threadIds: readonly string[]): void {
       db.transaction(() => {
+        const at = now();
         for (const threadId of threadIds) {
-          insertDelivery.run(`dlv_${token(10)}`, "linear", answer.ref, threadId, answer.label, answer.message, "held", answer.issueId, now());
+          holdDelivery.run(`dlv_${token(10)}`, answer.ref, threadId, answer.label, answer.message, answer.issueId, at, at);
         }
       })();
     },
@@ -323,7 +331,7 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     held(): HeldAnswer[] {
       return db
         .prepare(
-          `SELECT ref, issue_id AS issueId, label, MIN(created_at) AS heldAt FROM deliveries
+          `SELECT ref, issue_id AS issueId, label, MAX(held_at) AS heldAt FROM deliveries
            WHERE source = 'linear' AND state = 'held' GROUP BY ref, issue_id, label ORDER BY heldAt, ref`,
         )
         .all() as HeldAnswer[];

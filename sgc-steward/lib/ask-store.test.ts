@@ -99,9 +99,11 @@ const ANSWER = { ref: "c-1", issueId: "uuid-1", label: "TEAM-1", message: "one" 
 test("a held delivery is released once, and only to the first caller", () => {
   const { store } = open();
   store.hold(ANSWER, ["thr_a", "thr_b"]);
+  const [first] = store.held();
+  assert.deepEqual(first, { ref: "c-1", issueId: "uuid-1", label: "TEAM-1", heldAt: store.deliveryFor("linear", "c-1", "thr_a")!.createdAt });
   store.hold({ ...ANSWER, message: "two" }, ["thr_a"]);
+  assert.ok(store.held()[0]!.heldAt > first!.heldAt, "a new post restarts the post window");
   assert.deepEqual(store.undelivered(), [], "held deliveries are not listed");
-  assert.deepEqual(store.held(), [{ ref: "c-1", issueId: "uuid-1", label: "TEAM-1", heldAt: store.deliveryFor("linear", "c-1", "thr_a")!.createdAt }]);
   const released = store.release("c-1");
   assert.deepEqual(released.map((row) => [row.threadId, row.state, row.message]), [["thr_a", "pending", "one"], ["thr_b", "pending", "one"]]);
   assert.deepEqual(store.release("c-1"), [], "a second release hands out nothing");

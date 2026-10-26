@@ -76,7 +76,7 @@ When you answer a Linear block, the plugin also sends the answer to the bb threa
 
 A send or a record that fails is kept and listed on the page, with a retry. A send that looked failed may still have arrived, so a retry can deliver an answer twice. A send that a restart cut short is listed the same way.
 
-The sends for an answer to a Linear block are kept before the answer posts. When a restart stops the post, a later poll sends them once the answer is on Linear. When the answer is still not on Linear after ten minutes, the post failed, and the poll drops them.
+The sends for an answer to a Linear block are kept before the answer posts. When a restart stops the post, a later poll sends them once the answer is on Linear. When the answer is still not on Linear ten minutes after its latest post began, the post failed, and the poll drops them.
 
 ## How it works
 
