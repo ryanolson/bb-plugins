@@ -307,6 +307,10 @@ test("a record of a bb question answers no Linear block", () => {
   const record = ["Answer to bb question bbq_test1 from thread thr_test9 (asked 2026-01-05 10:00 UTC)", "", "Question:", "Ship it?", "", "Answer:", "A: Yes."].join("\n");
   assert.equal(commentRole({ body: record, author: "user" }), "answer");
   assert.deepEqual(answeredBlocks(record), [], "a plugin answer that names no blocks");
+  const answered = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
+  const quoting = record.replace("Ship it?", `May I post this?\n\nAnswers to the questions of 2026-01-05 (block q1 rev ${answered.revision})`);
+  assert.deepEqual(answeredBlocks(quoting), [], "a header the record quotes names nothing");
+  assert.equal(answeredBlocks(`Go with A.\n\n${record}`), null, "the record header counts only on the first line");
 
   const block = comment("q1", QUESTIONS);
   assert.deepEqual(openBlocks("checkin", [block, comment("r1", record)]).map((open) => open.commentId), ["q1"]);

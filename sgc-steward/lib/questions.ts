@@ -210,20 +210,18 @@ export const RECORD_HEADER = "Answer to bb question";
 /**
  * The blocks a plugin answer names in its header lines, or null for a plain
  * answer, which names none and so closes every block before it. The record of
- * a bb question is a plugin answer that names no block: it closes nothing.
+ * a bb question starts with the record header and names no block, whatever
+ * else it holds: the question it records can quote an answer header.
  */
 export function answeredBlocks(body: string): BlockRef[] | null {
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
+  if ((lines.find((line) => line.trim() !== "") ?? "").trimStart().startsWith(`${RECORD_HEADER} `)) return [];
   const refs: BlockRef[] = [];
-  let pluginAnswer = false;
-  for (const line of body.replace(/\r\n?/g, "\n").split("\n")) {
-    if (line.trimStart().startsWith(`${RECORD_HEADER} `)) pluginAnswer = true;
+  for (const line of lines) {
     if (!ANSWER_HEADER.test(line)) continue;
-    for (const match of line.matchAll(BLOCK_REFERENCE)) {
-      refs.push({ blockId: match[1]!, revision: match[2]! });
-      pluginAnswer = true;
-    }
+    for (const match of line.matchAll(BLOCK_REFERENCE)) refs.push({ blockId: match[1]!, revision: match[2]! });
   }
-  return pluginAnswer ? refs : null;
+  return refs.length > 0 ? refs : null;
 }
 
 /**
