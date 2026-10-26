@@ -587,3 +587,39 @@ test("review F5: aborting a stalled poll releases the service and queued answers
   }
   assert.deepEqual(observed, { requestIsAbortable: true, pollerStopped: true, answerStillQueued: false });
 });
+
+test("review F6: stale pages cannot answer completed or canceled issues", { skip: "F6: the answer path does not check the issue lifecycle state" }, async () => {
+  const outcomes = [];
+  for (const terminal of ["completed", "canceled"]) {
+    const { linear, harness, refresh } = await setup();
+    const issue = Object.assign(linear.addIssue("TEAM-1", ["needs-decision"]), { state: { type: "started" } });
+    const listQuestionIssues = linear.listQuestionIssues.bind(linear);
+    // Terminal states leave the list while direct issue reads still find them.
+    linear.listQuestionIssues = async (teamKey) =>
+      ["completed", "canceled"].includes(issue.state.type) ? [] : listQuestionIssues(teamKey);
+    linear.post(issue, "q1", QUESTIONS);
+    assert.equal((await refresh()).issues.length, 1);
+
+    issue.state.type = terminal;
+    issue.updatedAt = linear.tick();
+    assert.deepEqual(await linear.listQuestionIssues("TEAM"), []);
+    assert.ok(await linear.getIssue(issue.id));
+    try {
+      await harness.behavior.callRpc("questions.answer", {
+        issueId: issue.id,
+        blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+      });
+    } catch (error) {
+      assert.equal((error as { code?: string }).code, "conflict");
+    }
+    outcomes.push({
+      state: terminal,
+      writes: linear.calls.filter((call) => call.startsWith("createComment")).length,
+      labelStillPresent: issue.labels.some((label) => label.name === "needs-decision"),
+    });
+  }
+  assert.deepEqual(outcomes, [
+    { state: "completed", writes: 0, labelStillPresent: true },
+    { state: "canceled", writes: 0, labelStillPresent: true },
+  ]);
+});
