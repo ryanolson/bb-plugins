@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { authorizationHeader, createLinearClient, LinearError, type FetchLike } from "./linear.ts";
+import { authorizationHeader, createLinearClient, keyProblem, LinearError, redact, type FetchLike } from "./linear.ts";
 
 const KEY = "lin_api_test_not_a_real_key";
 
@@ -38,7 +38,47 @@ function commentsPage(nodes: unknown[], hasNextPage: boolean, endCursor: string 
 test("a personal API key goes in bare, an OAuth token as Bearer", () => {
   assert.equal(authorizationHeader(" lin_api_abc\n"), "lin_api_abc");
   assert.equal(authorizationHeader("lin_oauth_abc"), "Bearer lin_oauth_abc");
-  assert.equal(authorizationHeader("Bearer lin_oauth_abc"), "Bearer lin_oauth_abc");
+});
+
+test("a key with spaces or control characters is refused before any request, without echoing it", async () => {
+  for (const bad of ["lin_api_secret\nsecond", "lin_api_sec ret", "lin_api_secret\u0000", "lin_api_sécret"]) {
+    assert.match(keyProblem(bad) ?? "", /spaces, line breaks, or other control characters/);
+    let fetched = false;
+    const client = createLinearClient({
+      apiKey: bad,
+      fetch: async () => {
+        fetched = true;
+        throw new Error("unreachable");
+      },
+    });
+    await assert.rejects(client.listQuestionIssues("TEAM"), (error: unknown) => {
+      assert.ok(error instanceof LinearError);
+      assert.equal(error.kind, "auth");
+      assert.ok(!error.message.includes("secret") && !error.message.includes("sec ret") && !error.message.includes("sécret"), error.message);
+      return true;
+    });
+    assert.equal(fetched, false);
+  }
+  assert.equal(keyProblem(" lin_api_fine\n"), null, "outer whitespace is trimmed");
+});
+
+test("error text from the network or from Linear never carries the key", async () => {
+  const echo: FetchLike = async (_url, init) => {
+    throw new Error(`header rejected: ${init.headers.authorization} and ${JSON.stringify(init.headers.authorization)}`);
+  };
+  await assert.rejects(createLinearClient({ apiKey: KEY, fetch: echo }).listQuestionIssues("TEAM"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.ok(!error.message.includes(KEY), error.message);
+    assert.match(error.message, /\[redacted\]/);
+    return true;
+  });
+  const { client } = fakeLinear([{ json: { errors: [{ message: `bad token ${KEY} or lin_api_someoneelse` }] } }]);
+  await assert.rejects(client.listQuestionIssues("TEAM"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.ok(!error.message.includes(KEY) && !error.message.includes("lin_api_someoneelse"), error.message);
+    return true;
+  });
+  assert.equal(redact(`a ${KEY} b`, [KEY]), "a [redacted] b");
 });
 
 test("question issues: one team, both labels, open states, every page", async () => {

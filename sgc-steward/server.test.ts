@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createSgcStewardPlugin, type Snapshot } from "./server.ts";
-import { LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
+import { createLinearClient, LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
 import type { LinearComment } from "./lib/questions.ts";
 
 const KEY = "lin_api_test_not_a_real_key";
@@ -432,6 +432,18 @@ test("bb sgc key stores the key without printing it, and the next poll uses it",
   assert.ok(!harness.inspection.logEntries.some((entry) => JSON.stringify(entry).includes("lin_api_fresh_key")));
 });
 
+test("a key with a line break or a space is refused on save, and the refusal does not echo it", async () => {
+  const { harness } = await setup({ key: null });
+  for (const bad of ["lin_api_pasted_secret\nsecond_line", "lin_api_pasted secret"]) {
+    const refused = await rejection(harness.behavior.setSettings({ linearApiKey: bad }));
+    assert.match(refused.message, /no spaces, line breaks, or other control characters/);
+    assert.ok(!refused.message.includes("pasted"), refused.message);
+  }
+  const cli = await harness.behavior.runCli(["key", "--api-key", "lin_api_tab\tinside"]);
+  assert.equal(cli.exitCode, 1);
+  assert.ok(!cli.stderr.includes("lin_api_tab") && !cli.stdout.includes("lin_api_tab"), cli.stderr);
+});
+
 test("the poller polls at start, wakes on a settings change, and stops on abort", async () => {
   const { linear, harness } = await setup();
   const service = harness.behavior.runService("poller");
@@ -539,4 +551,28 @@ test("review F3: the CLI refuses an answer after the listed block is replaced", 
   const posts = linear.calls.filter((call) => call.startsWith("createComment"));
   assert.equal(posts.length, 0, `The CLI accepted an answer to q1 for its replacement q2: ${JSON.stringify(answer)}`);
   assert.equal(answer.exitCode, 1);
+});
+
+test("review F4: header validation does not expose a secret pasted with a newline", async () => {
+  const key = "lin_api_review_secret\nsecond_line";
+  const host = createFakePluginHost({ pluginId: "sgc-steward", settings: { linearApiKey: key, teamKey: "TEAM" } });
+  await createSgcStewardPlugin({
+    createClient: (apiKey) => createLinearClient({
+      apiKey,
+      fetch: async (_url, init) => {
+        // Exercise native header validation without making a network request.
+        new Headers(init.headers);
+        throw new Error("network disabled in this test");
+      },
+    }),
+  })(host.bb);
+  const snapshot = await host.harness.behavior.callRpc("questions.refresh", null) as Snapshot;
+  assert.ok(snapshot.error, "the malformed key must fail locally");
+  assert.deepEqual({
+    exposedToFrontend: snapshot.error.includes("lin_api_review_secret"),
+    exposedInLogs: host.harness.inspection.logEntries.some((entry) => entry.message.includes("lin_api_review_secret")),
+  }, {
+    exposedToFrontend: false,
+    exposedInLogs: false,
+  });
 });

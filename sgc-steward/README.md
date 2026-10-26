@@ -97,7 +97,7 @@ bb plugin config sgc-steward set pollMinutes 10
 bb plugin config sgc-steward set notify false
 ```
 
-- `linearApiKey` (secret): set it with `bb sgc key`. The key needs read and write access to the team.
+- `linearApiKey` (secret): set it with `bb sgc key`. The key needs read and write access to the team. A key with spaces, line breaks, or other control characters is refused, and error messages never show the key.
 - `teamKey` (default: the steward's team): the Linear team to watch.
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.

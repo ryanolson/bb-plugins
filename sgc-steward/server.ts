@@ -18,7 +18,7 @@ import {
   type PluginCliContext,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
+import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
 import { commentRole, composeAnswer, composeTextAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
@@ -229,6 +229,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         label: "Linear API key",
         description: "A personal Linear API key that can read the team's issues and post comments. Kept as a secret on the bb server.",
         secret: true,
+        // A key that is not a valid header value would be quoted back by the
+        // runtime's header error, so it is refused on save.
+        experimental_schema: z.string().regex(/^[\x21-\x7e]+$/, "Paste only the key: no spaces, line breaks, or other control characters."),
       },
       teamKey: {
         type: "string",
@@ -361,7 +364,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             // only this issue.
             if (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit")) throw error;
             unread.add(issue.id);
-            issueErrors.push({ identifier: issue.identifier, message: message(error) });
+            issueErrors.push({ identifier: issue.identifier, message: redact(message(error), [linearApiKey]) });
           }
         }
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
@@ -373,8 +376,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
         if (fresh > 0 || after !== before) publish(fresh);
       } catch (error) {
-        bb.log.warn(`poll failed: ${message(error)}`);
-        snapshot = { ...snapshot, configured: true, teamKey, checkedAt, error: message(error) };
+        const reason = redact(message(error), [linearApiKey]);
+        bb.log.warn(`poll failed: ${reason}`);
+        snapshot = { ...snapshot, configured: true, teamKey, checkedAt, error: reason };
         if (JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]) !== before) publish(0);
       }
       return snapshot;
@@ -461,7 +465,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           try {
             stillOpen = openBlocks("needs-decision", await linear.listComments(issue.id));
           } catch (error) {
-            bb.log.warn(`could not re-read ${issue.identifier} after answering: ${message(error)}`);
+            bb.log.warn(`could not re-read ${issue.identifier} after answering: ${redact(message(error), [linearApiKey])}`);
           }
           if (stillOpen === null || stillOpen.length > 0) {
             labelRemoved = false;
@@ -473,7 +477,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             const failure = await removeLabel(linear, issue.id, label.id);
             labelRemoved = failure === null;
             if (failure !== null) {
-              warning = `The answer is posted, but the needs-decision label is still on ${issue.identifier} (${failure}). Remove it in Linear.`;
+              warning = `The answer is posted, but the needs-decision label is still on ${issue.identifier} (${redact(failure, [linearApiKey])}). Remove it in Linear.`;
               bb.log.warn(warning);
             }
           }
@@ -517,9 +521,10 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         }));
     }
 
-    function refuse(error: unknown): never {
+    async function refuse(error: unknown): Promise<never> {
       if (error instanceof AnswerRefusal) throw new experimental_PluginRpcRefusal({ code: error.code, message: error.message });
-      throw error;
+      const { linearApiKey } = await settings.get();
+      throw new Error(redact(message(error), linearApiKey ? [linearApiKey] : []));
     }
 
     bb.rpc.register(rpcContract, {
@@ -539,7 +544,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             (open) => composeAnswer(open, answers),
           );
         } catch (error) {
-          return refuse(error);
+          return await refuse(error);
         }
       },
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
@@ -643,7 +648,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
                 result = await postAnswer(input.positionals.issue, refs, (blocks) => composeTextAnswer(blocks, text));
               } catch (error) {
                 if (error instanceof AnswerRefusal) throw new PluginCliError(error.message, { code: error.code });
-                throw new PluginCliError(message(error), { code: "linear_error" });
+                const { linearApiKey } = await settings.get();
+                throw new PluginCliError(redact(message(error), linearApiKey ? [linearApiKey] : []), { code: "linear_error" });
               }
               const lines = [`Posted the answer to ${result.identifier} (comment ${result.commentId}).`];
               if (result.labelRemoved === true) lines.push("Removed the needs-decision label.");
@@ -664,9 +670,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             },
             async run(input) {
               const key = input.options["api-key"].trim();
-              if (key === "" || /\s/.test(key)) {
-                throw new PluginCliError("That does not look like a Linear API key.", { code: "invalid_key", hint: KEY_HINT });
-              }
+              const problem = keyProblem(key);
+              if (problem !== null) throw new PluginCliError(problem, { code: "invalid_key", hint: KEY_HINT });
               await settings.experimental_set({ linearApiKey: key });
               return { exitCode: 0, stdout: "Saved the Linear API key. The next poll uses it." };
             },

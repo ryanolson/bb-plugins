@@ -45,8 +45,30 @@ export type FetchLike = (
  */
 export function authorizationHeader(apiKey: string): string {
   const key = apiKey.trim();
-  if (key.startsWith("Bearer ")) return key;
   return key.startsWith("lin_oauth_") ? `Bearer ${key}` : key;
+}
+
+// Printable ASCII without spaces. Anything else is not a valid header value,
+// and the runtime's error for an invalid header quotes the value.
+const KEY_SHAPE = /^[\x21-\x7e]+$/;
+const KEY_LIKE = /lin_(?:api|oauth)_[A-Za-z0-9_]+/g;
+
+/** Why a key cannot be sent, or null. The message never contains the key. */
+export function keyProblem(apiKey: string): string | null {
+  return KEY_SHAPE.test(apiKey.trim())
+    ? null
+    : "The Linear API key may hold only printable ASCII: no spaces, line breaks, or other control characters. Set it again with `bb sgc key --api-key-stdin`.";
+}
+
+/** Text with every copy of the secrets, and anything shaped like a Linear key, blanked out. */
+export function redact(text: string, secrets: readonly string[] = []): string {
+  let clean = text;
+  for (const secret of secrets) {
+    for (const form of new Set([secret, secret.trim(), JSON.stringify(secret).slice(1, -1)])) {
+      if (form.length >= 8) clean = clean.split(form).join("[redacted]");
+    }
+  }
+  return clean.replace(KEY_LIKE, "[redacted]");
 }
 
 // Nested page sizes stay small: Linear limits query complexity.
@@ -174,9 +196,12 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
   const fetchImpl: FetchLike = options.fetch ?? ((url, init) => fetch(url, init));
   const endpoint = options.endpoint ?? LINEAR_ENDPOINT;
   const maxCommentPages = options.maxCommentPages ?? 20;
-  const authorization = authorizationHeader(options.apiKey);
+  const problem = keyProblem(options.apiKey);
+  const authorization = problem === null ? authorizationHeader(options.apiKey) : null;
+  const clean = (text: string) => redact(text, [options.apiKey]);
 
   async function request<T>(query: string, variables: Record<string, unknown>, signal?: AbortSignal): Promise<{ data: T | null; errors: GraphQLError[] }> {
+    if (authorization === null) throw new LinearError("auth", problem!);
     let response: Awaited<ReturnType<FetchLike>>;
     try {
       response = await fetchImpl(endpoint, {
@@ -186,7 +211,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      throw new LinearError("network", `could not reach Linear: ${error instanceof Error ? error.message : String(error)}`);
+      throw new LinearError("network", clean(`could not reach Linear: ${error instanceof Error ? error.message : String(error)}`));
     }
     const text = await response.text();
     let payload: { data?: T | null; errors?: GraphQLError[] } | null = null;
@@ -215,7 +240,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
   async function query<T>(document: string, variables: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const { data, errors } = await request<T>(document, variables, signal);
     if (errors.length > 0 || data === null) {
-      throw new LinearError("graphql", `Linear refused the request: ${errors.length > 0 ? firstMessage(errors) : "no data"}`);
+      throw new LinearError("graphql", clean(`Linear refused the request: ${errors.length > 0 ? firstMessage(errors) : "no data"}`));
     }
     return data;
   }
@@ -239,7 +264,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
     async getIssue(id, signal) {
       const { data, errors } = await request<{ issue: IssueNode | null }>(ISSUE_QUERY, { id }, signal);
       if (errors.some((error) => /not found/i.test(error.message ?? ""))) return null;
-      if (errors.length > 0) throw new LinearError("graphql", `Linear refused the request: ${firstMessage(errors)}`);
+      if (errors.length > 0) throw new LinearError("graphql", clean(`Linear refused the request: ${firstMessage(errors)}`));
       return data?.issue ? toIssue(data.issue) : null;
     },
 
