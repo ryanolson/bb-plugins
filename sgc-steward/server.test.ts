@@ -440,3 +440,30 @@ test("a failed poll keeps the last questions and reports the error", async () =>
   assert.deepEqual(bad.issues, good.issues);
   assert.equal(bad.polledAt, good.polledAt);
 });
+
+test("review F1: editing an option refuses the answer drafted before the edit", { skip: "F1: the write guard compares block IDs without their content" }, async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  assert.equal(shown.issues[0]?.blocks[0]?.commentId, "q1");
+
+  issue.comments[0]!.body = QUESTIONS.replace(
+    "- A (recommended): Powers of two.\n- B: Small, medium, large.",
+    "- A (recommended): Small, medium, large.\n- B: Powers of two.",
+  );
+  issue.updatedAt = linear.tick();
+  let refusal: { code?: string } | undefined;
+  try {
+    await harness.behavior.callRpc("questions.answer", {
+      issueId: issue.id,
+      blocks: [{ blockId: "q1", answers: [{ number: 1, option: "A", text: "" }] }],
+    });
+  } catch (error) {
+    refusal = error as { code?: string };
+  }
+
+  const posts = linear.calls.filter((call) => call.startsWith("createComment"));
+  assert.equal(posts.length, 0, `The stale choice posted new option text: ${issue.comments.at(-1)?.body}`);
+  assert.equal(refusal?.code, "conflict");
+});
