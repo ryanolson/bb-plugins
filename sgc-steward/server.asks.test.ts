@@ -524,3 +524,47 @@ test("queue review F16: a bb record containing a quoted answer header closes no 
   const after = await refresh();
   assert.deepEqual(after.issues.flatMap((open) => open.blocks.map((block) => block.commentId)), ["q1"], "a bb record must not interpret quoted headers as answers to Linear blocks");
 });
+
+test("queue review F17: a new post attempt gets its own delivery window", { skip: "F17: a repeated post retains the first attempt's expiry and loses its delivery" }, async (t) => {
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const { harness, linear, refresh, sends, factory } = await setup();
+  const { issue, input } = await answerInput(linear, refresh);
+  linear.createFaults = ["dropped", "dropped"];
+  await rejection(harness.behavior.callRpc("questions.answer", input));
+  assert.equal(issue.comments.length, 1, "the first submission never posted");
+
+  now += 9 * 60_000 + 50_000;
+  let reached!: () => void;
+  let resume!: () => void;
+  const atWrite = new Promise<void>((resolve) => { reached = resolve; });
+  const reply = new Promise<void>((resolve) => { resume = resolve; });
+  const create = linear.createComment.bind(linear);
+  linear.createComment = async (args) => {
+    reached();
+    await reply;
+    return create(args);
+  };
+  const posting = harness.behavior.callRpc("questions.answer", input).catch(() => undefined);
+  await atWrite;
+  const replacement = await harness.lifecycle.reload(factory);
+  replacement.harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  try {
+    now += 15_000;
+    await replacement.harness.behavior.callRpc("questions.refresh", null);
+    now += 5_000;
+    resume();
+    await posting;
+    const after = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+    assert.equal(issue.comments.length, 2, "the new post lands twenty seconds after it starts");
+    assert.deepEqual(after.issues, [], "the posted answer closes its block");
+    assert.equal(sends.length + after.undelivered.length, 1, "the fresh post must deliver its answer or list it for retry");
+  } finally {
+    resume();
+    await posting;
+    await replacement.harness.lifecycle.dispose();
+  }
+});
