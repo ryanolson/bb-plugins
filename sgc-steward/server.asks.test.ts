@@ -356,3 +356,34 @@ test("queue review F13: a caller cannot withdraw another thread's question throu
   assert.equal(forged.exitCode, 1, "--thread must not replace the known calling thread");
   assert.deepEqual((await list(harness)).asks.map((row) => row.id), [id]);
 });
+
+test("queue review F14: concurrent asks preserve dedupe and both queue caps", { skip: "F14: settings.get separates admission checks from inserting an ask" }, async (t) => {
+  await t.test("the same open question has one id", async () => {
+    const { harness } = await setup();
+    const ids = await Promise.all([
+      askId(harness, ["--question", "One decision?", "--option", "Yes."]),
+      askId(harness, ["--question", "One decision?", "--option", "Yes."]),
+    ]);
+    assert.equal(new Set(ids).size, 1, "concurrent repetitions must return the same question id");
+  });
+  await t.test("a thread has at most ten open questions", async () => {
+    const { harness } = await setup();
+    for (let n = 0; n < 9; n += 1) await askId(harness, ["--question", `Seed ${n}?`]);
+    const results = await Promise.all([
+      ask(harness, ["--question", "Concurrent A?"]),
+      ask(harness, ["--question", "Concurrent B?"]),
+    ]);
+    assert.equal(results.filter((result) => result.exitCode === 0).length, 1, "only one remaining thread slot may be claimed");
+    assert.equal((await list(harness)).asks.length, 10);
+  });
+  await t.test("all threads have at most fifty open questions", async () => {
+    const { harness } = await setup();
+    for (let n = 0; n < 49; n += 1) await askId(harness, ["--question", `Seed ${n}?`], `thr_cap${Math.floor(n / 10)}`);
+    const results = await Promise.all([
+      ask(harness, ["--question", "Concurrent A?"], "thr_global1"),
+      ask(harness, ["--question", "Concurrent B?"], "thr_global2"),
+    ]);
+    assert.equal(results.filter((result) => result.exitCode === 0).length, 1, "only one remaining global slot may be claimed");
+    assert.equal((await list(harness)).asks.length, 50);
+  });
+});
