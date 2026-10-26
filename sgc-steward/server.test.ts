@@ -237,7 +237,7 @@ test("answering posts one unsigned comment numbered to match and closes the bloc
   assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null });
   assert.equal(
     checkin.comments.at(-1)?.body,
-    ["Answers to the questions of 2026-01-05", "", "Q1. A: Powers of two.", "", "Q2. No answer."].join("\n"),
+    [`Answers to the questions of 2026-01-05 (block q1 rev ${revisionOf(shown, "q1")})`, "", "Q1. A: Powers of two.", "", "Q2. No answer."].join("\n"),
   );
   const snapshot = (await harness.behavior.callRpc("questions.list", null)) as Snapshot;
   assert.deepEqual(snapshot.issues, []);
@@ -255,7 +255,7 @@ test("answering a needs-decision issue also removes the label", async () => {
   });
   assert.deepEqual(result, { identifier: "TEAM-2", commentId: "posted-1", labelRemoved: true, warning: null });
   assert.deepEqual(decision.labels, []);
-  assert.match(decision.comments.at(-1)!.body, /^Answer to the question of 2026-01-05\n\nYes, use the org id\.$/);
+  assert.equal(decision.comments.at(-1)!.body, `Answer to the question of 2026-01-05 (block d1 rev ${revisionOf(shown, "d1")})\n\nYes, use the org id.`);
 });
 
 test("a label that will not come off is retried, then reported, and the answer is not posted twice", async () => {
@@ -471,4 +471,36 @@ test("review F1: editing an option refuses the answer drafted before the edit", 
   const posts = linear.calls.filter((call) => call.startsWith("createComment"));
   assert.equal(posts.length, 0, `The stale choice posted new option text: ${issue.comments.at(-1)?.body}`);
   assert.equal(refusal?.code, "conflict");
+});
+
+test("review F2: a question arriving during the write remains open", async () => {
+  const outcomes = [];
+  for (const label of ["checkin", "needs-decision"]) {
+    const { linear, harness, refresh } = await setup();
+    const issue = linear.addIssue("TEAM-1", [label]);
+    linear.post(issue, "q1", QUESTIONS);
+    const shown = await refresh();
+
+    const createComment = linear.createComment.bind(linear);
+    linear.createComment = async (args) => {
+      // Another agent writes after the fresh read and before this write lands.
+      linear.post(issue, "q-unseen", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+      return createComment(args);
+    };
+    await harness.behavior.callRpc("questions.answer", {
+      issueId: issue.id,
+      blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+    });
+
+    const after = await refresh();
+    outcomes.push({
+      label,
+      unseenStillOpen: after.issues.some((open) => open.blocks.some((block) => block.commentId === "q-unseen")),
+      labelStillPresent: issue.labels.some((current) => current.name === label),
+    });
+  }
+  assert.deepEqual(outcomes, [
+    { label: "checkin", unseenStillOpen: true, labelStillPresent: true },
+    { label: "needs-decision", unseenStillOpen: true, labelStillPresent: true },
+  ]);
 });

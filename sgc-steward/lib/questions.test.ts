@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  answeredBlocks,
   commentRole,
   composeAnswer,
   openBlocks,
@@ -278,6 +279,33 @@ test("a needs-decision question is the latest signed comment, open until an unsi
   assert.deepEqual(openBlocks("needs-decision", []), []);
 });
 
+test("an answer that names its blocks closes only those blocks, at their revision", () => {
+  const first = comment("q1", QUESTIONS);
+  const second = comment("q2", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+  const answered = parsed(parseQuestionBlock(first, "checkin"));
+  const reply = comment("a1", `Answers to the questions of 2026-01-05 (block q1 rev ${answered.revision})\n\nQ1. A`);
+  assert.deepEqual(answeredBlocks(reply.body), [{ blockId: "q1", revision: answered.revision }]);
+  assert.deepEqual(openBlocks("checkin", [first, second, reply]).map((block) => block.commentId), ["q2"]);
+
+  const stale = comment("a2", "Answers to the questions of 2026-01-05 (block q2 rev 000000000000)\n\nQ1. A");
+  assert.deepEqual(openBlocks("checkin", [first, second, reply, stale]).map((block) => block.commentId), ["q2"], "another revision answers nothing");
+
+  const plain = comment("a3", "Go with A everywhere.");
+  assert.equal(answeredBlocks(plain.body), null);
+  assert.deepEqual(openBlocks("checkin", [first, second, plain]), [], "a plain answer closes every block before it");
+  const mention = comment("a4", "I saw (block q2 rev 000000000000) in a header once.");
+  assert.equal(answeredBlocks(mention.body), null, "only answer header lines name blocks");
+});
+
+test("a needs-decision question stays open when the answer names an older block", () => {
+  const older = comment("d1", "[agent:codex thr_x] Which tenant key?");
+  const newer = comment("d2", "[agent:codex thr_x] May I drop the old table?");
+  const olderBlock = raw(parseQuestionBlock(older, "needs-decision"));
+  const reply = comment("a1", `Answer to the question of 2026-01-05 (block d1 rev ${olderBlock.revision})\n\nThe org id.`);
+  assert.deepEqual(openBlocks("needs-decision", [older, newer, reply]).map((block) => block.commentId), ["d2"]);
+  assert.deepEqual(openBlocks("needs-decision", [older, reply]), []);
+});
+
 // --- composing the answer ------------------------------------------------
 
 test("the answer is one unsigned comment numbered to match the questions", () => {
@@ -298,7 +326,7 @@ test("the answer is one unsigned comment numbered to match the questions", () =>
   assert.equal(
     body,
     [
-      "Answers to the questions of 2026-01-05",
+      `Answers to the questions of 2026-01-05 (block q1 rev ${block.revision})`,
       "",
       "Q1. A: Powers of two.",
       "",
@@ -324,7 +352,7 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
   assert.equal(
     body,
     [
-      `Answers to the questions of 2026-01-05 (posted ${at(block.createdAt)})`,
+      `Answers to the questions of 2026-01-05, posted ${at(block.createdAt)} (block q1 rev ${block.revision})`,
       "",
       "Q1. No answer.",
       "",
@@ -333,7 +361,7 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
       "Q3. Ship it",
       "on Friday.",
       "",
-      `Answer to the question of 2026-01-07 (posted ${at(rawBlock.createdAt)})`,
+      `Answer to the question of 2026-01-07, posted ${at(rawBlock.createdAt)} (block q2 rev ${rawBlock.revision})`,
       "",
       "Yes, go ahead.",
     ].join("\n"),

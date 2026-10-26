@@ -44,16 +44,17 @@ The page shows a comment that breaks these rules as written, with the reason, an
 ## When a question is open
 
 - A signed comment starts with `[agent:`. Any other comment from a user is your answer. Comments from integrations are neither.
-- On a check-in issue (label `checkin`), a signed comment is a question block when it has a `Q1.` line or a bare `Questions` header. Run reports and digests stay out. A block is open until an unsigned comment comes after it. A reply in a comment thread counts.
-- On a needs-decision issue (label `needs-decision`), the latest signed comment is the question, in any shape. It is open while the issue has the label and no unsigned comment came after it.
+- An answer from this plugin names each block it answers, as `(block <comment id> rev <revision>)` in a header line. It closes only those blocks, at that revision. Any other answer closes every block before it.
+- On a check-in issue (label `checkin`), a signed comment is a question block when it has a `Q1.` line or a bare `Questions` header. Run reports and digests stay out. A block is open until an answer closes it. A reply in a comment thread counts.
+- On a needs-decision issue (label `needs-decision`), the latest signed comment is the question, in any shape. It is open while the issue has the label and no answer closed it.
 - Completed and canceled issues are skipped.
 
 ## Answer format
 
-Your first unsigned comment closes every open block on the issue, so one comment answers them all. The page writes it like this:
+One comment answers every open block on the issue. The page writes it like this:
 
 ```
-Answers to the questions of 2026-01-05
+Answers to the questions of 2026-01-05 (block 4f1c2e9a-5b6d-4c8e-9f0a-1b2c3d4e5f60 rev 3fa2c9d01b7e)
 
 Q1. A: Powers of two: 1, 2, 4, 8.
 
@@ -63,7 +64,7 @@ Start with the cells project.
 Q3. No answer.
 ```
 
-A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. When one comment answers several blocks, each block gets a header with the time it was posted. Answering a needs-decision issue also removes the label.
+A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. When one comment answers several blocks, each block gets its own header, with the time the block was posted. Answering a needs-decision issue also removes the label, unless a newer question is open on the issue.
 
 ## How it works
 

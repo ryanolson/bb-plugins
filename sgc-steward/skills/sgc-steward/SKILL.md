@@ -36,7 +36,8 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 ## Reading the answer
 
-- The owner's answer is the first unsigned comment after your block. It closes every open block on the issue.
+- An answer from the SGC Steward page names the blocks it answers in its header lines, as `(block <comment id> rev <revision>)`. It answers only those blocks, at that revision. Ask again about any block it does not name.
+- Any other unsigned comment from the owner answers every block before it.
 - The page writes `Q1. A: <option text>` for a picked option, `Q2. <text>` for a typed answer, and `Q3. No answer.` for a skipped question. A note can follow on the next line.
 - Ask again in a new block for every question marked `No answer.` that still matters.
 

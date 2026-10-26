@@ -19,7 +19,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
-import { commentRole, composeAnswer, openBlocks, type BlockAnswer, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
+import { commentRole, composeAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
@@ -161,11 +161,6 @@ function preview(block: QuestionBlock): string {
   const lines = block.body.trimStart().split("\n");
   const rest = lines[0]!.replace(/^\[agent:[^\]]*\]\s*/, "");
   return truncate(firstLine([rest, ...lines.slice(1)].join("\n")), 160);
-}
-
-interface BlockRef {
-  blockId: string;
-  revision: string;
 }
 
 function sameBlocks(sent: readonly BlockRef[], open: readonly QuestionBlock[]): boolean {
@@ -444,11 +439,27 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         let warning: string | null = null;
         const label = kind === "needs-decision" ? issue.labels.find((candidate) => candidate.name === DECISION_LABEL) : undefined;
         if (label !== undefined) {
-          const failure = await removeLabel(linear, issue.id, label.id);
-          labelRemoved = failure === null;
-          if (failure !== null) {
-            warning = `The answer is posted, but the needs-decision label is still on ${issue.identifier} (${failure}). Remove it in Linear.`;
-            bb.log.warn(warning);
+          // Another agent can post a newer question while this answer is
+          // written. The label stays until nothing on the issue is open.
+          let stillOpen: QuestionBlock[] | null = null;
+          try {
+            stillOpen = openBlocks("needs-decision", await linear.listComments(issue.id));
+          } catch (error) {
+            bb.log.warn(`could not re-read ${issue.identifier} after answering: ${message(error)}`);
+          }
+          if (stillOpen === null || stillOpen.length > 0) {
+            labelRemoved = false;
+            warning =
+              stillOpen === null
+                ? `The answer is posted. ${issue.identifier} could not be read again, so the needs-decision label stays. Remove it in Linear if no question is open.`
+                : `The answer is posted. A newer question is open on ${issue.identifier}, so the needs-decision label stays.`;
+          } else {
+            const failure = await removeLabel(linear, issue.id, label.id);
+            labelRemoved = failure === null;
+            if (failure !== null) {
+              warning = `The answer is posted, but the needs-decision label is still on ${issue.identifier} (${failure}). Remove it in Linear.`;
+              bb.log.warn(warning);
+            }
           }
         }
 

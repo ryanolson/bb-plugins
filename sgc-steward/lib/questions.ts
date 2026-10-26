@@ -189,29 +189,56 @@ function byCreatedAt(a: LinearComment, b: LinearComment): number {
   return Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id);
 }
 
+/** One block at one revision, as an answer names it. */
+export interface BlockRef {
+  blockId: string;
+  revision: string;
+}
+
+const ANSWER_HEADER = /^\s*Answers? to the questions? of /;
+const BLOCK_REFERENCE = /\(block ([^\s)]+) rev ([0-9a-f]{12})\)/g;
+
+/**
+ * The blocks an answer names in its header lines, or null for a plain answer
+ * that names none.
+ */
+export function answeredBlocks(body: string): BlockRef[] | null {
+  const refs: BlockRef[] = [];
+  for (const line of body.replace(/\r\n?/g, "\n").split("\n")) {
+    if (!ANSWER_HEADER.test(line)) continue;
+    for (const match of line.matchAll(BLOCK_REFERENCE)) refs.push({ blockId: match[1]!, revision: match[2]! });
+  }
+  return refs.length === 0 ? null : refs;
+}
+
 /**
  * The question blocks on one issue that still wait for an answer.
  *
- * Check-in: every question block posted after the latest unsigned comment.
- * One answer therefore closes every block before it, which is why the panel
- * answers all open blocks of an issue in one comment.
+ * An answer written by this plugin names the blocks it answers and closes
+ * only those, at the revision it names. Any other unsigned comment closes
+ * every block before it, as the Charter has it. Naming the blocks keeps a
+ * question that lands while an answer is being posted open.
  *
- * needs-decision: the latest signed comment, unless an unsigned comment came
- * after it. The caller checks the label itself.
+ * Check-in: every question block. needs-decision: only the latest signed
+ * comment; the caller checks the label itself.
  */
 export function openBlocks(kind: IssueKind, comments: readonly LinearComment[]): QuestionBlock[] {
-  const sorted = [...comments].sort(byCreatedAt);
-  let lastAnswer = -1;
-  sorted.forEach((comment, index) => {
-    if (commentRole(comment) === "answer") lastAnswer = index;
-  });
-  const after = sorted.slice(lastAnswer + 1);
-  if (kind === "checkin") {
-    return after.flatMap((comment) => parseQuestionBlock(comment, "checkin") ?? []);
+  let open: QuestionBlock[] = [];
+  for (const comment of [...comments].sort(byCreatedAt)) {
+    const role = commentRole(comment);
+    if (role === "signed") {
+      const block = parseQuestionBlock(comment, kind);
+      if (kind === "needs-decision") open = block === null ? [] : [block];
+      else if (block !== null) open.push(block);
+    } else if (role === "answer") {
+      const refs = answeredBlocks(comment.body);
+      open =
+        refs === null
+          ? []
+          : open.filter((block) => !refs.some((ref) => ref.blockId === block.commentId && ref.revision === block.revision));
+    }
   }
-  const latest = after.filter((comment) => commentRole(comment) === "signed").at(-1);
-  const block = latest === undefined ? null : parseQuestionBlock(latest, "needs-decision");
-  return block === null ? [] : [block];
+  return open;
 }
 
 export interface QuestionAnswer {
@@ -242,9 +269,22 @@ function postedAt(block: QuestionBlock): string {
 }
 
 /**
+ * The header line that names one block: its date, and the comment id and
+ * revision that `answeredBlocks` reads back. `posted` adds the time, which
+ * tells apart two blocks of the same day.
+ */
+export function answerHeader(block: QuestionBlock, posted: boolean): string {
+  const noun = block.format === "raw" ? "Answer to the question" : "Answers to the questions";
+  const when = posted ? `, posted ${postedAt(block)}` : "";
+  return `${noun} of ${blockDay(block)}${when} (block ${block.commentId} rev ${block.revision})`;
+}
+
+/**
  * Write the one unsigned comment that answers every open block on an issue,
- * numbered to match. It starts with a plain header, so it can never read as
- * signed. Throws when the answers do not fit the blocks or say nothing.
+ * numbered to match. Each block gets a header that names it, so the answer
+ * closes those blocks and no other. The header comes first, so the answer can
+ * never read as signed. Throws when the answers do not fit the blocks or say
+ * nothing.
  */
 export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonly BlockAnswer[]): string {
   const byBlock = new Map<string, BlockAnswer>();
@@ -260,12 +300,12 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
   let said = false;
   const sections = blocks.map((block) => {
     const answer = byBlock.get(block.commentId)!;
-    const when = blocks.length > 1 ? ` (posted ${postedAt(block)})` : "";
+    const header = answerHeader(block, blocks.length > 1);
     if (block.format === "raw") {
       if (answer.answers.length > 0) throw new Error(`block ${block.commentId} is not in the question format; answer it with text`);
       const text = answer.text?.trim() ?? "";
       if (text !== "") said = true;
-      return `Answer to the question of ${blockDay(block)}${when}\n\n${text === "" ? "No answer." : text}`;
+      return `${header}\n\n${text === "" ? "No answer." : text}`;
     }
     const byNumber = new Map<number, QuestionAnswer>();
     for (const item of answer.answers) {
@@ -287,7 +327,7 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
       const picked = `Q${question.number}. ${option.letter}: ${option.text.replace(/\n/g, " ")}`;
       return note === "" ? picked : `${picked}\n${note}`;
     });
-    return [`Answers to the questions of ${blockDay(block)}${when}`, ...lines].join("\n\n");
+    return [header, ...lines].join("\n\n");
   });
   if (!said) throw new Error("nothing to post: every answer is empty");
   return sections.join("\n\n");

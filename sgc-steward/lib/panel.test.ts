@@ -36,13 +36,13 @@ test("the panel's drafts become the answer the server composes", () => {
   assert.equal(
     composeAnswer([parsed, raw], blocks),
     [
-      "Answers to the questions of 2026-01-05 (posted 2026-01-05 10:00 UTC)",
+      `Answers to the questions of 2026-01-05, posted 2026-01-05 10:00 UTC (block q1 rev ${parsed.revision})`,
       "",
       "Q1. B: Sizes.",
       "",
       "Q2. Ship Friday.",
       "",
-      "Answer to the question of 2026-01-06 (posted 2026-01-06 09:30 UTC)",
+      `Answer to the question of 2026-01-06, posted 2026-01-06 09:30 UTC (block q2 rev ${raw.revision})`,
       "",
       "Yes.",
     ].join("\n"),
