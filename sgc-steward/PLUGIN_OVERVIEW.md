@@ -11,7 +11,11 @@ Answer the questions a steward agent asks on Linear check-in issues, from a page
 
 A service on the bb server polls Linear every five minutes for the team's issues with the `checkin` or `needs-decision` label. A signed comment starts with `[agent:`. An answer from the plugin closes only the blocks it names. Any other unsigned comment closes every block before it. Before posting, the plugin reads the issue again and refuses if a block changed, a new one arrived, or the issue closed. The API key is a secret setting on the server.
 
-bb plugins cannot send mobile pushes, so the notifications reach only open bb windows.
+## Known limits
+
+- bb plugins cannot send mobile pushes, so the notifications reach only open bb windows.
+- After an answer on a needs-decision issue, the plugin reads the issue once more and then removes the label. A new question posted between that read and the removal loses the label, though it is still open. The window is one request.
+- An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
 
 ## For agents
 

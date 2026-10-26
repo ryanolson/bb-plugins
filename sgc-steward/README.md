@@ -64,7 +64,7 @@ Start with the cells project.
 Q3. No answer.
 ```
 
-A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. When one comment answers several blocks, each block gets its own header, with the time the block was posted. Answering a needs-decision issue also removes the label, unless a newer question is open on the issue.
+A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. When one comment answers several blocks, each block gets its own header, with the time the block was posted. Answering a needs-decision issue also removes the label, unless a newer question is open on the issue. A question posted in the one request between the plugin's last read and the label removal loses the label. This is a known limit.
 
 ## How it works
 
