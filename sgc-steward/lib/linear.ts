@@ -22,7 +22,7 @@ export interface LinearIssue {
   labels: Array<{ id: string; name: string }>;
 }
 
-export type LinearErrorKind = "auth" | "rate-limit" | "graphql" | "http" | "network";
+export type LinearErrorKind = "auth" | "rate-limit" | "graphql" | "http" | "network" | "timeout" | "aborted";
 
 export class LinearError extends Error {
   readonly kind: LinearErrorKind;
@@ -161,6 +161,8 @@ export interface LinearClientOptions {
   endpoint?: string;
   /** Pages of 50 comments read per issue before giving up. */
   maxCommentPages?: number;
+  /** How long one request may take, reading the reply included. */
+  requestTimeoutMs?: number;
 }
 
 function toIssue(node: IssueNode): LinearIssue {
@@ -196,24 +198,32 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
   const fetchImpl: FetchLike = options.fetch ?? ((url, init) => fetch(url, init));
   const endpoint = options.endpoint ?? LINEAR_ENDPOINT;
   const maxCommentPages = options.maxCommentPages ?? 20;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   const problem = keyProblem(options.apiKey);
   const authorization = problem === null ? authorizationHeader(options.apiKey) : null;
   const clean = (text: string) => redact(text, [options.apiKey]);
 
   async function request<T>(query: string, variables: Record<string, unknown>, signal?: AbortSignal): Promise<{ data: T | null; errors: GraphQLError[] }> {
     if (authorization === null) throw new LinearError("auth", problem!);
+    if (signal?.aborted) throw new LinearError("aborted", "The request was stopped.");
+    // A stalled request would hold the plugin's lock, so every request has
+    // a deadline, and the caller can stop it.
+    const deadline = AbortSignal.timeout(requestTimeoutMs);
     let response: Awaited<ReturnType<FetchLike>>;
+    let text: string;
     try {
       response = await fetchImpl(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json", authorization },
         body: JSON.stringify({ query, variables }),
-        ...(signal === undefined ? {} : { signal }),
+        signal: signal === undefined ? deadline : AbortSignal.any([signal, deadline]),
       });
+      text = await response.text();
     } catch (error) {
+      if (signal?.aborted) throw new LinearError("aborted", "The request was stopped.");
+      if (deadline.aborted) throw new LinearError("timeout", `Linear did not answer within ${Math.ceil(requestTimeoutMs / 1000)} s.`);
       throw new LinearError("network", clean(`could not reach Linear: ${error instanceof Error ? error.message : String(error)}`));
     }
-    const text = await response.text();
     let payload: { data?: T | null; errors?: GraphQLError[] } | null = null;
     try {
       payload = JSON.parse(text) as { data?: T | null; errors?: GraphQLError[] };

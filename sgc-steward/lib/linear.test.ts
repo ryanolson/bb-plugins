@@ -81,6 +81,31 @@ test("error text from the network or from Linear never carries the key", async (
   assert.equal(redact(`a ${KEY} b`, [KEY]), "a [redacted] b");
 });
 
+test("a request that hangs times out, and one the caller stops says so", async () => {
+  const hang: FetchLike = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new Error("aborted by signal")), { once: true });
+    });
+  const slow = createLinearClient({ apiKey: KEY, fetch: hang, requestTimeoutMs: 20 });
+  const started = Date.now();
+  await assert.rejects(slow.listQuestionIssues("TEAM"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.equal(error.kind, "timeout");
+    assert.match(error.message, /did not answer within/);
+    return true;
+  });
+  assert.ok(Date.now() - started < 2_000);
+
+  const stop = new AbortController();
+  const stopped = createLinearClient({ apiKey: KEY, fetch: hang }).listComments("issue-1", stop.signal);
+  stop.abort();
+  await assert.rejects(stopped, (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.equal(error.kind, "aborted");
+    return true;
+  });
+});
+
 test("question issues: one team, both labels, open states, every page", async () => {
   const issue = (id: string, labels: string[]) => ({
     id,

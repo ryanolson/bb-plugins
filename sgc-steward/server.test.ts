@@ -26,6 +26,7 @@ class FakeLinear implements LinearClient {
   keys: string[] = [];
   /** "lost": the write lands but the response is lost. "dropped": it never lands. */
   createFaults: Array<"lost" | "dropped"> = [];
+  createFaultKind: "network" | "timeout" = "network";
   removeLabelFaults: Array<"lost" | "dropped"> = [];
   private clock = Date.parse("2026-01-05T10:00:00Z");
 
@@ -89,7 +90,7 @@ class FakeLinear implements LinearClient {
     }
     const fault = this.createFaults.shift();
     if (fault !== "dropped") this.post(issue, commentId, body);
-    if (fault !== undefined) throw new LinearError("network", "could not reach Linear: socket hang up");
+    if (fault !== undefined) throw new LinearError(this.createFaultKind, "could not reach Linear: socket hang up");
     return commentId;
   }
 
@@ -289,8 +290,9 @@ test("a removal whose response was lost is seen as done", async () => {
 });
 
 test("a post whose response was lost is found by its id and never posted twice", async () => {
-  for (const fault of ["lost", "dropped"] as const) {
+  for (const [fault, kind] of [["lost", "network"], ["dropped", "network"], ["lost", "timeout"]] as const) {
     const { linear, harness, refresh } = await setup();
+    linear.createFaultKind = kind;
     const checkin = linear.addIssue("TEAM-1", ["checkin"]);
     linear.post(checkin, "q1", QUESTIONS);
     const shown = await refresh();
@@ -458,6 +460,42 @@ test("the poller polls at start, wakes on a settings change, and stops on abort"
   await service.done;
 });
 
+test("an answer stops a stalled poll instead of waiting behind it, and the poller polls again", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+
+  const listQuestionIssues = linear.listQuestionIssues.bind(linear);
+  let stalls = 1;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  linear.listQuestionIssues = async (teamKey: string, signal?: AbortSignal) => {
+    if (stalls === 0) return listQuestionIssues(teamKey);
+    stalls -= 1;
+    entered();
+    // Never answers; only the abort signal ends it.
+    return new Promise<LinearIssue[]>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new LinearError("aborted", "stopped")), { once: true });
+    });
+  };
+  const service = harness.behavior.runService("poller");
+  await started;
+  const result = await harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  });
+  assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null });
+  for (let attempt = 0; attempt < 200 && linear.calls.filter((call) => call === "listQuestionIssues TEAM").length < 2; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(linear.calls.filter((call) => call === "listQuestionIssues TEAM").length, 2, "the poller polls again after the answer");
+  const after = (await harness.behavior.callRpc("questions.list", null)) as Snapshot;
+  assert.equal(after.error, null, "a stopped poll records no error");
+  service.controller.abort();
+  await service.done;
+});
+
 test("a failed poll keeps the last questions and reports the error", async () => {
   const { linear, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
@@ -575,4 +613,48 @@ test("review F4: header validation does not expose a secret pasted with a newlin
     exposedToFrontend: false,
     exposedInLogs: false,
   });
+});
+
+test("review F5: aborting a stalled poll releases the service and queued answers", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  let requestIsAbortable = false;
+  linear.listQuestionIssues = async (_teamKey, signal?: AbortSignal) => {
+    requestIsAbortable = signal !== undefined;
+    entered();
+    return new Promise<LinearIssue[]>((resolve) => {
+      release = () => resolve([]);
+      if (signal?.aborted) release();
+      else signal?.addEventListener("abort", release, { once: true });
+    });
+  };
+
+  const service = harness.behavior.runService("poller");
+  await started;
+  let answerSettled = false;
+  const answer = harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  }).finally(() => { answerSettled = true; });
+  let observed;
+  try {
+    service.controller.abort();
+    const pollerStopped = await Promise.race([
+      service.done.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    observed = { requestIsAbortable, pollerStopped, answerStillQueued: !answerSettled };
+  } finally {
+    // Release the fake even on failure so this reproduction cannot hang the runner.
+    release();
+    await Promise.all([service.done, answer]);
+  }
+  assert.deepEqual(observed, { requestIsAbortable: true, pollerStopped: true, answerStillQueued: false });
 });

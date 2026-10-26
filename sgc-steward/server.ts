@@ -332,7 +332,25 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return fresh;
     }
 
-    async function pollNow(force: boolean): Promise<Snapshot> {
+    /** The poll in progress, so an answer can stop it instead of waiting. */
+    let runningPoll: AbortController | null = null;
+    /** Set when the poller should poll again at once: settings changed, or an answer stopped a poll. */
+    let pollAgain = false;
+    let wake: (() => void) | null = null;
+
+    async function pollNow(force: boolean, outer?: AbortSignal): Promise<Snapshot> {
+      const controller = new AbortController();
+      runningPoll = controller;
+      const signal = outer === undefined ? controller.signal : AbortSignal.any([outer, controller.signal]);
+      try {
+        return await pollOnce(force, signal);
+      } finally {
+        if (runningPoll === controller) runningPoll = null;
+      }
+    }
+
+    /** One poll. A stopped poll commits nothing and records no error. */
+    async function pollOnce(force: boolean, signal: AbortSignal): Promise<Snapshot> {
       const { linearApiKey, teamKey, notify } = await settings.get();
       const checkedAt = Date.now();
       const before = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
@@ -344,7 +362,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       const linear = clientFor(linearApiKey);
       const fullRefresh = force || checkedAt - lastFullRefreshAt >= FULL_REFRESH_MS;
       try {
-        const listed = await linear.listQuestionIssues(teamKey);
+        const listed = await linear.listQuestionIssues(teamKey, signal);
+        if (signal.aborted) return snapshot;
         const issues: IssueView[] = [];
         const issueErrors: Snapshot["issueErrors"] = [];
         const unread = new Set<string>();
@@ -352,7 +371,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           try {
             const cached = commentCache.get(issue.id);
             const comments =
-              !fullRefresh && cached?.updatedAt === issue.updatedAt ? cached.comments : await linear.listComments(issue.id);
+              !fullRefresh && cached?.updatedAt === issue.updatedAt ? cached.comments : await linear.listComments(issue.id, signal);
             commentCache.set(issue.id, { updatedAt: issue.updatedAt, comments });
             const kind = issueKind(issue);
             const blocks = openBlocks(kind, comments);
@@ -362,11 +381,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           } catch (error) {
             // A bad key or the rate limit fails the whole poll; anything else
             // only this issue.
-            if (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit")) throw error;
+            if (signal.aborted || (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit"))) throw error;
             unread.add(issue.id);
             issueErrors.push({ identifier: issue.identifier, message: redact(message(error), [linearApiKey]) });
           }
         }
+        if (signal.aborted) return snapshot;
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
         if (fullRefresh) lastFullRefreshAt = checkedAt;
         const oldest = (issue: IssueView) => Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt)));
@@ -376,6 +396,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
         if (fresh > 0 || after !== before) publish(fresh);
       } catch (error) {
+        if (signal.aborted) return snapshot;
         const reason = redact(message(error), [linearApiKey]);
         bb.log.warn(`poll failed: ${reason}`);
         snapshot = { ...snapshot, configured: true, teamKey, checkedAt, error: reason };
@@ -384,11 +405,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return snapshot;
     }
 
-    const poll = (force: boolean) => locked(() => pollNow(force));
+    const poll = (force: boolean, signal?: AbortSignal) => locked(() => pollNow(force, signal));
 
     /** A failure where Linear may have done the write before the reply was lost. */
     function unclear(error: unknown): boolean {
-      return error instanceof LinearError && (error.kind === "network" || error.kind === "http");
+      return error instanceof LinearError && (error.kind === "network" || error.kind === "http" || error.kind === "timeout");
     }
 
     /** Post once: after an unclear failure, look for our own comment id before trying again with it. */
@@ -427,6 +448,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
      * question nobody read or on an option whose text changed.
      */
     function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
+      // An answer never waits behind a poll: stop it, and poll again after.
+      if (runningPoll !== null) {
+        runningPoll.abort();
+        pollAgain = true;
+        wake?.();
+      }
       return locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
         if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
@@ -682,10 +709,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
 
     // A settings change wakes the poller; a change during a poll makes it
     // poll again at once.
-    let changed = false;
-    let wake: (() => void) | null = null;
     settings.onChange(() => {
-      changed = true;
+      pollAgain = true;
       client = null;
       commentCache.clear();
       wake?.();
@@ -694,9 +719,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     bb.background.service("poller", {
       async start(signal) {
         while (!signal.aborted) {
-          changed = false;
-          await poll(false);
-          if (changed || signal.aborted) continue;
+          pollAgain = false;
+          await poll(false, signal);
+          if (pollAgain || signal.aborted) continue;
           const { pollMinutes } = await settings.get();
           await new Promise<void>((resolve) => {
             const done = () => {
