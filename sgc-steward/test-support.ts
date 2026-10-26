@@ -2,7 +2,8 @@
 // set up on bb's fake plugin host.
 import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createSgcStewardPlugin, type Snapshot } from "./server.ts";
+import { createSgcStewardPlugin } from "./server.ts";
+import type { Snapshot } from "./lib/contract.ts";
 import { LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
 import type { LinearComment } from "./lib/questions.ts";
 

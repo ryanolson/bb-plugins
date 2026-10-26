@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Panel } from "./server.ts";
+import type { Panel } from "./lib/contract.ts";
 import { askDelivery, askRecord, blockDelivery, type Ask } from "./lib/asks.ts";
 import { LinearError } from "./lib/linear.ts";
 import { answerCommentId } from "./lib/questions.ts";

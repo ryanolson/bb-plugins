@@ -18,7 +18,7 @@ import {
   useRpc,
   type ExperimentalBadge,
 } from "@get-bb/plugin-sdk/app";
-import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, rpcContract } from "./server.ts";
+import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, rpcContract } from "./lib/contract.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
 import {
   announcement,

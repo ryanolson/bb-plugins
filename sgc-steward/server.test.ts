@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createSgcStewardPlugin, type Snapshot } from "./server.ts";
+import { createSgcStewardPlugin } from "./server.ts";
+import type { Snapshot } from "./lib/contract.ts";
 import { createLinearClient, LinearError, type LinearIssue } from "./lib/linear.ts";
 import { answerCommentId } from "./lib/questions.ts";
 import { KEY, QUESTIONS, rejection, revisionOf, setup } from "./test-support.ts";
