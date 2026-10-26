@@ -288,3 +288,26 @@ test("bb sgc questions prints asked questions and the answers that did not go ou
   assert.match(after.stdout, new RegExp(`Answers not delivered:\\n\\s+${id} to thr_asker: thread is archived \\(1 try\\)`));
   assert.match(after.stdout, new RegExp(`Records not posted to Linear:\\n\\s+${id} on TEAM-12: Linear has no issue TEAM-12\\.`));
 });
+
+test("queue review F11: repeating an answer submission does not retry an uncertain thread send", { skip: "F11: postedBefore resends a failed delivery without deliveries.retry" }, async () => {
+  const { harness, linear, refresh, sends } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const input = {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  };
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    throw new Error("The message arrived, but the send reply was lost.");
+  });
+  const first = (await harness.behavior.callRpc("questions.answer", input)) as { notified: Array<{ delivered: boolean }> };
+  assert.equal(first.notified[0]!.delivered, false);
+  assert.equal((await list(harness)).undelivered.length, 1);
+
+  // Repeating the original request after a lost RPC reply is not consent to retry a send.
+  await harness.behavior.callRpc("questions.answer", input);
+  assert.equal(issue.comments.length, 2, "the Linear answer is still posted only once");
+  assert.equal(sends.length, 1, "only deliveries.retry may repeat an uncertain send");
+});
