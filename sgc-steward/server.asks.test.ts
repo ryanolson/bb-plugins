@@ -568,3 +568,61 @@ test("queue review F17: a new post attempt gets its own delivery window", { skip
     await replacement.harness.lifecycle.dispose();
   }
 });
+
+test("queue review F18: a recovery send leaves the Linear lock free for answers", { skip: "F18: settleHeld awaits a thread send inside the Linear lock despite poll cancellation" }, async () => {
+  const { harness, linear, refresh, sends } = await setup();
+  const first = linear.addIssue("TEAM-1", ["checkin"]);
+  const second = linear.addIssue("TEAM-2", ["checkin"]);
+  linear.post(first, "q1", QUESTIONS);
+  linear.post(second, "q2", QUESTIONS.replace("thr_test1", "thr_test2"));
+  const shown = await refresh();
+  const input = (issueId: string, blockId: string) => ({
+    issueId,
+    blocks: [{ blockId, revision: revisionOf(shown, blockId), answers: [{ number: 1, option: "A", text: "" }] }],
+  });
+  const create = linear.createComment.bind(linear);
+  let delayed!: Parameters<typeof linear.createComment>[0];
+  linear.createComment = async (args) => {
+    delayed = args;
+    return create(args);
+  };
+  linear.createFaults = ["dropped", "dropped"];
+  await rejection(harness.behavior.callRpc("questions.answer", input(first.id, "q1")));
+  linear.createComment = create;
+  await create(delayed);
+
+  let recoverySignal: AbortSignal | undefined;
+  const listComments = linear.listComments.bind(linear);
+  linear.listComments = async (id, signal?: AbortSignal) => {
+    if (id === first.id && signal !== undefined) recoverySignal = signal;
+    return listComments(id);
+  };
+  let reached!: () => void;
+  let resume!: () => void;
+  const atSend = new Promise<void>((resolve) => { reached = resolve; });
+  const sendReply = new Promise<void>((resolve) => { resume = resolve; });
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    const send = args as (typeof sends)[number];
+    sends.push(send);
+    if (send.threadId === "thr_test1") {
+      reached();
+      await sendReply;
+    }
+    return {};
+  });
+  const polling = refresh();
+  await atSend;
+  let done = false;
+  const posting = harness.behavior.callRpc("questions.answer", input(second.id, "q2")).then(() => { done = true; });
+  let beforeRelease = false;
+  let aborted = false;
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    beforeRelease = done;
+    aborted = recoverySignal?.aborted ?? false;
+  } finally {
+    resume();
+    await Promise.all([posting, polling]);
+  }
+  assert.equal(beforeRelease, true, `the other answer waits for a thread send even after writeFirst (poll aborted: ${aborted})`);
+});
