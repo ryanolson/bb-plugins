@@ -69,7 +69,7 @@ test("each new question block is handed out for a notification exactly once", as
   assert.deepEqual(signals.at(-1)?.payload, { newBlocks: 1 });
 
   const first = await claim();
-  assert.deepEqual(first.notifications.map((note) => [note.blockId, note.issueIdentifier]), [["q1", "TEAM-1"]]);
+  assert.deepEqual(first.notifications.map((note) => [note.id, note.label]), [["q1", "TEAM-1"]]);
   assert.match(first.notifications[0]!.preview, /Which scale do estimates use\?/);
   assert.deepEqual((await claim()).notifications, [], "a second window gets nothing");
 
@@ -78,7 +78,7 @@ test("each new question block is handed out for a notification exactly once", as
 
   linear.post(checkin, "q2", QUESTIONS.replace("2026-01-05", "2026-01-06"));
   await refresh();
-  assert.deepEqual((await claim()).notifications.map((note) => note.blockId), ["q2"]);
+  assert.deepEqual((await claim()).notifications.map((note) => note.id), ["q2"]);
 });
 
 test("notifications can be turned off", async () => {
@@ -101,7 +101,13 @@ test("answering posts one unsigned comment numbered to match and closes the bloc
     blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
   });
   const posted = checkin.comments.at(-1)!;
-  assert.deepEqual(result, { identifier: "TEAM-1", commentId: posted.id, labelRemoved: null, warning: null });
+  assert.deepEqual(result, {
+    identifier: "TEAM-1",
+    commentId: posted.id,
+    labelRemoved: null,
+    warning: null,
+    notified: [{ threadId: "thr_test1", delivered: true, error: null }],
+  });
   assert.equal(posted.id, answerCommentId("uuid-TEAM-1", posted.body), "the id comes from the answer");
   assert.equal(
     checkin.comments.at(-1)?.body,
@@ -121,7 +127,13 @@ test("answering a needs-decision issue also removes the label", async () => {
     issueId: "uuid-TEAM-2",
     blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "Yes, use the org id." }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-2", commentId: decision.comments.at(-1)!.id, labelRemoved: true, warning: null });
+  assert.deepEqual(result, {
+    identifier: "TEAM-2",
+    commentId: decision.comments.at(-1)!.id,
+    labelRemoved: true,
+    warning: null,
+    notified: [{ threadId: "thr_test2", delivered: true, error: null }],
+  });
   assert.deepEqual(decision.labels, []);
   assert.equal(decision.comments.at(-1)!.body, `Answer to the question of 2026-01-05 (block d1 rev ${revisionOf(shown, "d1")})\n\nYes, use the org id.`);
 });
@@ -152,7 +164,13 @@ test("a removal whose response was lost is seen as done", async () => {
     issueId: "uuid-TEAM-2",
     blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "The org id." }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-2", commentId: decision.comments.at(-1)!.id, labelRemoved: true, warning: null });
+  assert.deepEqual(result, {
+    identifier: "TEAM-2",
+    commentId: decision.comments.at(-1)!.id,
+    labelRemoved: true,
+    warning: null,
+    notified: [{ threadId: "thr_test2", delivered: true, error: null }],
+  });
   assert.equal(linear.calls.filter((call) => call.startsWith("removeLabel")).length, 1);
 });
 
@@ -169,7 +187,8 @@ test("a post whose response was lost is found by its id and never posted twice",
       blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
     });
     const posted = checkin.comments.at(-1)!;
-    assert.deepEqual(result, { identifier: "TEAM-1", commentId: posted.id, labelRemoved: null, warning: null }, fault);
+    const notified = [{ threadId: "thr_test1", delivered: true, error: null }];
+    assert.deepEqual(result, { identifier: "TEAM-1", commentId: posted.id, labelRemoved: null, warning: null, notified }, fault);
     assert.deepEqual(
       checkin.comments.map((comment) => comment.id),
       ["q1", posted.id],
@@ -379,11 +398,15 @@ test("the poller polls at start, wakes on a settings change, and stops on abort"
     for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.ok(predicate(), `timed out; calls: ${linear.calls.join(", ")}`);
   };
-  await waitFor(() => linear.calls.includes("listQuestionIssues TEAM"));
-  await harness.behavior.setSettings({ teamKey: "OTHER" });
-  await waitFor(() => linear.calls.includes("listQuestionIssues OTHER"));
-  service.controller.abort();
-  await service.done;
+  // A failed assertion must still stop the poller, or its sleep keeps the runner alive.
+  try {
+    await waitFor(() => linear.calls.includes("listQuestionIssues TEAM"));
+    await harness.behavior.setSettings({ teamKey: "OTHER" });
+    await waitFor(() => linear.calls.includes("listQuestionIssues OTHER"));
+  } finally {
+    service.controller.abort();
+    await service.done;
+  }
 });
 
 test("an answer stops a stalled poll instead of waiting behind it, and the poller polls again", async () => {
@@ -406,20 +429,29 @@ test("an answer stops a stalled poll instead of waiting behind it, and the polle
     });
   };
   const service = harness.behavior.runService("poller");
-  await started;
-  const result = await harness.behavior.callRpc("questions.answer", {
-    issueId: issue.id,
-    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
-  });
-  assert.deepEqual(result, { identifier: "TEAM-1", commentId: issue.comments.at(-1)!.id, labelRemoved: null, warning: null });
-  for (let attempt = 0; attempt < 200 && linear.calls.filter((call) => call === "listQuestionIssues TEAM").length < 2; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+  try {
+    await started;
+    const result = await harness.behavior.callRpc("questions.answer", {
+      issueId: issue.id,
+      blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+    });
+    assert.deepEqual(result, {
+      identifier: "TEAM-1",
+      commentId: issue.comments.at(-1)!.id,
+      labelRemoved: null,
+      warning: null,
+      notified: [{ threadId: "thr_test1", delivered: true, error: null }],
+    });
+    for (let attempt = 0; attempt < 200 && linear.calls.filter((call) => call === "listQuestionIssues TEAM").length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(linear.calls.filter((call) => call === "listQuestionIssues TEAM").length, 2, "the poller polls again after the answer");
+    const after = (await harness.behavior.callRpc("questions.list", null)) as Snapshot;
+    assert.equal(after.error, null, "a stopped poll records no error");
+  } finally {
+    service.controller.abort();
+    await service.done;
   }
-  assert.equal(linear.calls.filter((call) => call === "listQuestionIssues TEAM").length, 2, "the poller polls again after the answer");
-  const after = (await harness.behavior.callRpc("questions.list", null)) as Snapshot;
-  assert.equal(after.error, null, "a stopped poll records no error");
-  service.controller.abort();
-  await service.done;
 });
 
 test("bb sgc questions polls again when an answer stops its poll, instead of printing old questions", async () => {

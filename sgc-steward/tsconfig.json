@@ -25,6 +25,7 @@
   "include": [
     "server.ts",
     "server.test.ts",
+    "server.asks.test.ts",
     "test-support.ts",
     "app.tsx",
     "components",

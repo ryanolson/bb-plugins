@@ -80,7 +80,7 @@ export function isThreadId(value: string): boolean {
   return THREAD_ID.test(value);
 }
 
-function formatUtc(ms: number): string {
+export function formatUtc(ms: number): string {
   const iso = new Date(ms).toISOString();
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }

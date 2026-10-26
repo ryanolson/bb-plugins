@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node --test --test-timeout=20000 lib/*.test.ts server.test.ts"
+    "test": "node --test --test-timeout=20000 lib/*.test.ts server.test.ts server.asks.test.ts"
   },
   "engines": {
     "bb": ">=0.47",

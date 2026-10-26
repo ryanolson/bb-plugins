@@ -72,12 +72,14 @@ test("untouched questions are left out, and progress counts what has an answer",
   );
 });
 
-test("one new block names its issue; several are summed up in one notification", () => {
-  const note = { blockId: "q1", issueIdentifier: "TEAM-1", issueTitle: "Daily", questionCount: 3, preview: "Scale?" };
+test("one new question names its issue or its thread; several are summed up in one notification", () => {
+  const note = { id: "q1", source: "linear" as const, label: "TEAM-1", questionCount: 3, preview: "Scale?" };
   assert.deepEqual(announcement([note]), { title: "Steward question on TEAM-1", body: "Scale? (+2 more)" });
   assert.deepEqual(announcement([{ ...note, questionCount: 1 }]), { title: "Steward question on TEAM-1", body: "Scale?" });
-  assert.deepEqual(announcement([note, { ...note, blockId: "q9", issueIdentifier: "TEAM-2", preview: "Tenant?" }]), {
-    title: "2 new steward question blocks",
-    body: "TEAM-1: Scale?\nTEAM-2: Tenant?",
+  const asked = { id: "bbq_1", source: "ask" as const, label: "Driver: test project", questionCount: 1, preview: "Ship it?" };
+  assert.deepEqual(announcement([asked]), { title: "Question from Driver: test project", body: "Ship it?" });
+  assert.deepEqual(announcement([note, asked]), {
+    title: "2 new questions",
+    body: "TEAM-1: Scale?\nDriver: test project: Ship it?",
   });
 });

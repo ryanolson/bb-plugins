@@ -375,7 +375,7 @@ function announce(notes: QuestionNotification[], open: () => void): void {
   const inFront = document.visibilityState === "visible" && document.hasFocus();
   if (!inFront && canShowSystemNotification()) {
     try {
-      const notification = new Notification(title, { body, tag: `sgc-steward-${notes[0]!.blockId}` });
+      const notification = new Notification(title, { body, tag: `sgc-steward-${notes[0]!.id}` });
       notification.onclick = () => {
         window.focus();
         open();

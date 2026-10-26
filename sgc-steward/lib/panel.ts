@@ -60,23 +60,23 @@ export function answerProgress(blocks: readonly QuestionBlock[], drafts: Readonl
   return { answered, total };
 }
 
-export interface BlockNotice {
-  blockId: string;
-  issueIdentifier: string;
+/** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
+export interface Notice {
+  id: string;
+  source: "linear" | "ask";
+  label: string;
   questionCount: number;
   preview: string;
 }
 
-/** One notification for every block claimed together. */
-export function announcement(notes: readonly BlockNotice[]): { title: string; body: string } {
+/** One notification for every question claimed together. */
+export function announcement(notes: readonly Notice[]): { title: string; body: string } {
   const first = notes[0];
   if (first === undefined) return { title: "", body: "" };
   if (notes.length === 1) {
     const more = first.questionCount > 1 ? ` (+${first.questionCount - 1} more)` : "";
-    return { title: `Steward question on ${first.issueIdentifier}`, body: `${first.preview}${more}` };
+    const title = first.source === "linear" ? `Steward question on ${first.label}` : `Question from ${first.label}`;
+    return { title, body: `${first.preview}${more}` };
   }
-  return {
-    title: `${notes.length} new steward question blocks`,
-    body: notes.map((note) => `${note.issueIdentifier}: ${note.preview}`).join("\n"),
-  };
+  return { title: `${notes.length} new questions`, body: notes.map((note) => `${note.label}: ${note.preview}`).join("\n") };
 }

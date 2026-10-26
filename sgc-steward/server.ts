@@ -1,11 +1,13 @@
-// SGC Steward: the steward agent's Linear questions, answered from bb.
+// SGC Steward: questions for the owner, answered from bb without blocking
+// the agents that ask them.
 //
-// A background service polls Linear for check-in and needs-decision issues,
-// keeps the open question blocks in memory for the panel and the CLI, and
-// records each block in SQLite so the app can notify about it exactly once.
-// Answers go back as one unsigned comment per issue. Every read and write of
-// Linear runs under one lock, so a poll can never resurrect a block that an
-// answer just closed, and two answers to one issue cannot both post.
+// Two kinds of question: blocks a steward agent posts on Linear issues, which
+// a background service polls, and questions agents ask with `bb sgc ask`,
+// kept in SQLite. Answers to blocks go back as one unsigned comment per issue;
+// every answer is also sent to the asking thread as a queued message. Every
+// read and write of Linear runs under one lock, so a poll can never resurrect
+// a block that an answer just closed, and two answers to one issue cannot
+// both post.
 import { posix } from "node:path";
 import {
   PluginCliError,
@@ -18,7 +20,33 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
-import { answerCommentId, commentRole, composeAnswer, composeTextAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
+import {
+  answerCommentId,
+  commentRole,
+  composeAnswer,
+  composeTextAnswer,
+  openBlocks,
+  parseQuestionBlock,
+  type BlockAnswer,
+  type BlockRef,
+  type IssueKind,
+  type LinearComment,
+  type QuestionBlock,
+} from "./lib/questions.ts";
+import {
+  ASK_LIMITS,
+  DELIVERY_PREFIX,
+  askDelivery,
+  askOptions,
+  askRecord,
+  blockDelivery,
+  checkIssueRef,
+  checkQuestion,
+  formatUtc,
+  isThreadId,
+  type AskAnswer,
+} from "./lib/asks.ts";
+import { ASK_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow } from "./lib/ask-store.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
@@ -67,6 +95,44 @@ const snapshotSchema = z.object({
 export type Snapshot = z.infer<typeof snapshotSchema>;
 export type IssueView = z.infer<typeof issueSchema>;
 
+const askViewSchema = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  threadTitle: z.string(),
+  question: z.string(),
+  options: z.array(optionSchema),
+  issue: z.string().nullable(),
+  askedAt: z.number(),
+});
+const deliveryViewSchema = z.object({
+  id: z.string(),
+  source: z.enum(["ask", "linear"]),
+  ref: z.string(),
+  threadId: z.string(),
+  label: z.string(),
+  state: z.enum(["pending", "delivered", "failed"]),
+  error: z.string().nullable(),
+  attempts: z.number().int(),
+  createdAt: z.number(),
+});
+const recordViewSchema = z.object({
+  askId: z.string(),
+  issue: z.string(),
+  state: z.enum(["pending", "posted", "failed"]),
+  error: z.string().nullable(),
+  attempts: z.number().int(),
+});
+/** What the page shows: the last Linear poll, the open bb questions, and the answers that did not go out. */
+const panelSchema = snapshotSchema.extend({
+  asks: z.array(askViewSchema),
+  undelivered: z.array(deliveryViewSchema),
+  unposted: z.array(recordViewSchema),
+});
+export type Panel = z.infer<typeof panelSchema>;
+export type AskView = z.infer<typeof askViewSchema>;
+export type DeliveryView = z.infer<typeof deliveryViewSchema>;
+export type RecordView = z.infer<typeof recordViewSchema>;
+
 const answerInputSchema = z.object({
   issueId: z.string().min(1),
   blocks: z
@@ -90,32 +156,52 @@ const answerInputSchema = z.object({
     .min(1)
     .max(20),
 });
+const notifiedSchema = z.object({ threadId: z.string(), delivered: z.boolean(), error: z.string().nullable() });
 const answerResultSchema = z.object({
   identifier: z.string(),
   commentId: z.string(),
   /** Null when the issue is a check-in, which has no label to remove. */
   labelRemoved: z.boolean().nullable(),
   warning: z.string().nullable(),
+  /** The threads that signed the answered blocks, and whether the answer reached them. */
+  notified: z.array(notifiedSchema),
 });
 export type AnswerResult = z.infer<typeof answerResultSchema>;
 
 const notificationSchema = z.object({
-  blockId: z.string(),
-  issueIdentifier: z.string(),
-  issueTitle: z.string(),
+  /** The Linear block's comment id, or the bb question id. */
+  id: z.string(),
+  source: z.enum(["linear", "ask"]),
+  /** The issue identifier, or the asking thread's title. */
+  label: z.string(),
   questionCount: z.number().int(),
   preview: z.string(),
 });
 export type QuestionNotification = z.infer<typeof notificationSchema>;
 
 export const rpcContract = defineRpcContract({
-  /** The questions from the last poll; reads nothing from Linear. */
-  "questions.list": { input: z.null(), output: snapshotSchema },
+  /** The questions from the last poll and the bb questions; reads nothing from Linear. */
+  "questions.list": { input: z.null(), output: panelSchema },
   /** Poll now, reading every issue's comments again. */
-  "questions.refresh": { input: z.null(), output: snapshotSchema },
+  "questions.refresh": { input: z.null(), output: panelSchema },
   /** Post one unsigned comment that answers every open block on an issue. */
   "questions.answer": { input: answerInputSchema, output: answerResultSchema },
-  /** Hand out the blocks no window has notified about yet, once each. */
+  /** Answer a bb question: send it to the asking thread, and record it on its issue. */
+  "asks.answer": {
+    input: z.object({ id: z.string().min(1), option: z.string().regex(/^[A-Z]$/).nullable(), text: z.string().max(20_000) }),
+    output: z.object({
+      id: z.string(),
+      delivered: z.boolean(),
+      deliveryError: z.string().nullable(),
+      record: z.enum(["none", "posted", "failed"]),
+      recordError: z.string().nullable(),
+    }),
+  },
+  /** Send an undelivered answer again. Ask the owner first: a send that seemed to fail may have landed. */
+  "deliveries.retry": { input: z.object({ id: z.string().min(1) }), output: z.object({ delivered: z.boolean(), error: z.string().nullable() }) },
+  /** Post a record that did not post. */
+  "records.retry": { input: z.object({ askId: z.string().min(1) }), output: z.object({ posted: z.boolean(), error: z.string().nullable() }) },
+  /** Hand out the questions no window has notified about yet, once each. */
   "notifications.claim": { input: z.null(), output: z.object({ notifications: z.array(notificationSchema) }) },
 });
 
@@ -201,17 +287,60 @@ function formatBlock(block: QuestionBlock): string[] {
   return lines;
 }
 
-function formatSnapshot(snapshot: Snapshot): string {
+function askView(row: AskRow): AskView {
+  return { id: row.id, threadId: row.threadId, threadTitle: row.threadTitle, question: row.question, options: row.options, issue: row.issue, askedAt: row.askedAt };
+}
+
+function deliveryView(row: Delivery): DeliveryView {
+  return {
+    id: row.id,
+    source: row.source,
+    ref: row.ref,
+    threadId: row.threadId,
+    label: row.label,
+    state: row.state,
+    error: row.error,
+    attempts: row.attempts,
+    createdAt: row.createdAt,
+  };
+}
+
+function recordView(row: RecordRow): RecordView {
+  return { askId: row.askId, issue: row.issue, state: row.state, error: row.error, attempts: row.attempts };
+}
+
+function formatPanel(view: Panel): string {
   const lines: string[] = [];
-  if (snapshot.issues.length === 0) lines.push(`No open questions on ${snapshot.teamKey} issues.`);
-  for (const issue of snapshot.issues) {
-    lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]`);
-    for (const block of issue.blocks) lines.push(...formatBlock(block));
-    const blocks = issue.blocks.map((block) => `--block ${block.commentId}@${block.revision}`).join(" ");
-    lines.push(`  Answer: bb sgc answer ${issue.identifier} ${blocks} --text-file <file>`, "");
+  if (view.configured) {
+    if (view.issues.length === 0) lines.push(`No open questions on ${view.teamKey} issues.`);
+    for (const issue of view.issues) {
+      lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]`);
+      for (const block of issue.blocks) lines.push(...formatBlock(block));
+      const blocks = issue.blocks.map((block) => `--block ${block.commentId}@${block.revision}`).join(" ");
+      lines.push(`  Answer: bb sgc answer ${issue.identifier} ${blocks} --text-file <file>`, "");
+    }
   }
-  for (const failed of snapshot.issueErrors) lines.push(`Could not read ${failed.identifier}: ${failed.message}`);
-  return lines.join("\n").trimEnd();
+  if (view.asks.length === 0) lines.push("No open bb questions.");
+  for (const ask of view.asks) {
+    lines.push(`${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), asked ${formatUtc(ask.askedAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}`);
+    lines.push(...ask.question.split("\n").map((line) => `  ${line}`));
+    for (const option of ask.options) lines.push(`    ${option.letter}${option.recommended ? " (recommended)" : ""}: ${option.text}`);
+    lines.push("  Answer it on the SGC questions page.", "");
+  }
+  if (view.undelivered.length > 0) {
+    lines.push("Answers not delivered:");
+    for (const row of view.undelivered) {
+      lines.push(`  ${row.label} to ${row.threadId}: ${row.error ?? "not sent yet"} (${row.attempts} ${row.attempts === 1 ? "try" : "tries"})`);
+    }
+    lines.push("  Retry them on the SGC questions page.", "");
+  }
+  if (view.unposted.length > 0) {
+    lines.push("Records not posted to Linear:");
+    for (const row of view.unposted) lines.push(`  ${row.askId} on ${row.issue}: ${row.error ?? "not posted yet"}`);
+    lines.push("  Retry them on the SGC questions page.", "");
+  }
+  for (const failed of view.issueErrors) lines.push(`Could not read ${failed.identifier}: ${failed.message}`);
+  return lines.join("\n").trim();
 }
 
 export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
@@ -268,7 +397,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         first_seen_at INTEGER NOT NULL,
         notified_at INTEGER
       )`,
+      ...ASK_MIGRATIONS,
     ]);
+    const asks = createAskStore(db);
 
     let snapshot: Snapshot = {
       configured: Boolean(initial.linearApiKey),
@@ -410,6 +541,96 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
     const pollForCaller = async (force: boolean) => (await poll(force)) ?? (await poll(force));
 
+    /** A Linear write never waits behind a poll: stop the running one, make the queued ones skip, and poll again after. */
+    function writeFirst(): void {
+      answerEpoch += 1;
+      runningPoll?.abort();
+      pollAgain = true;
+      wake?.();
+    }
+
+    function panel(): Panel {
+      return {
+        ...snapshot,
+        asks: asks.listOpen().map(askView),
+        undelivered: asks.undelivered().map(deliveryView),
+        unposted: asks.unposted().map(recordView),
+      };
+    }
+
+    /** Sends in flight, so two retries at once cannot send one answer twice. */
+    const sending = new Set<string>();
+
+    /**
+     * Send a kept delivery to its thread as a queued message, the way
+     * `bb thread tell --mode queue` does. Never throws: a failed send is kept,
+     * marked, for the owner to retry.
+     */
+    async function deliver(id: string): Promise<Delivery | null> {
+      const row = asks.getDelivery(id);
+      if (row === null || row.state === "delivered" || sending.has(id)) return row;
+      sending.add(id);
+      try {
+        await bb.sdk.threads.send({ threadId: row.threadId, mode: "queue-if-active", input: [{ type: "text", text: row.message, mentions: [] }] });
+        asks.markDelivery(id, { ok: true });
+      } catch (error) {
+        const reason = truncate(message(error), 300);
+        asks.markDelivery(id, { ok: false, error: reason });
+        bb.log.warn(`could not deliver the answer for ${row.label} to ${row.threadId}: ${reason}`);
+      } finally {
+        sending.delete(id);
+      }
+      publish(0);
+      return asks.getDelivery(id);
+    }
+
+    function notified(row: Delivery | null, threadId: string): { threadId: string; delivered: boolean; error: string | null } {
+      const delivered = row?.state === "delivered";
+      return { threadId, delivered, error: delivered ? null : (row?.error ?? null) };
+    }
+
+    /** Send an answer to Linear blocks to each bb thread that signed one of them, once per thread. */
+    async function deliverBlockAnswer(identifier: string, commentId: string, body: string, blocks: readonly QuestionBlock[]) {
+      const threads = [...new Set(blocks.flatMap((block) => (block.threadId !== null && isThreadId(block.threadId) ? [block.threadId] : [])))];
+      const results = [];
+      for (const threadId of threads) {
+        const kept = asks.addDelivery({ source: "linear", ref: commentId, threadId, label: identifier, message: blockDelivery(identifier, commentId, body) });
+        results.push(notified(await deliver(kept.id), threadId));
+      }
+      return results;
+    }
+
+    /** Post the Linear record of an answered bb question, under the same id rules as answers. */
+    function postRecord(askId: string): Promise<RecordRow | null> {
+      writeFirst();
+      return locked(async () => {
+        const record = asks.record(askId);
+        if (record === null || record.state === "posted") return record;
+        const { linearApiKey, teamKey } = await settings.get();
+        let outcome: { ok: true; commentId: string } | { ok: false; error: string };
+        if (!linearApiKey) {
+          outcome = { ok: false, error: `The Linear API key is not set. ${KEY_HINT}` };
+        } else {
+          try {
+            const linear = clientFor(linearApiKey);
+            const issue = await linear.getIssue(record.issue);
+            if (issue === null) outcome = { ok: false, error: `Linear has no issue ${record.issue}.` };
+            else if (issue.teamKey !== teamKey) outcome = { ok: false, error: `${issue.identifier} is not in team ${teamKey}.` };
+            else {
+              outcome = { ok: true, commentId: await postComment(linear, issue.id, record.body) };
+              commentCache.delete(issue.id);
+            }
+          } catch (error) {
+            outcome = { ok: false, error: redact(message(error), [linearApiKey]) };
+          }
+        }
+        asks.markRecord(askId, outcome);
+        if (!outcome.ok) bb.log.warn(`could not record ${askId} on ${record.issue}: ${outcome.error}`);
+        publish(0);
+        return asks.record(askId);
+      });
+    }
+
     /** A failure where Linear may have done the write before the reply was lost. */
     function unclear(error: unknown): boolean {
       return error instanceof LinearError && (error.kind === "network" || error.kind === "http" || error.kind === "timeout");
@@ -460,19 +681,46 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     }
 
     /**
-     * Post one unsigned comment that answers every open block on an issue.
-     * Reads the issue fresh first; `expected` is the blocks and revisions the
-     * caller saw, and any difference refuses, so an answer never lands on a
-     * question nobody read or on an option whose text changed.
+     * The answer an earlier try already posted: the comment with the id this
+     * same answer derives, when it is on the issue. Its reply was lost, so
+     * the answer is finished instead of refused.
      */
-    function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
-      // An answer never waits behind a poll: stop the running one, make the
-      // queued ones skip, and poll again after.
-      answerEpoch += 1;
-      runningPoll?.abort();
-      pollAgain = true;
-      wake?.();
-      return locked(async () => {
+    function postedBefore(
+      issue: LinearIssue,
+      comments: readonly LinearComment[],
+      expected: readonly BlockRef[],
+      compose: (blocks: QuestionBlock[]) => string,
+    ): { commentId: string; body: string; blocks: QuestionBlock[] } | null {
+      const byId = new Map(comments.map((comment) => [comment.id, comment]));
+      const blocks: QuestionBlock[] = [];
+      for (const ref of expected) {
+        const comment = byId.get(ref.blockId);
+        // The id and revision pin the block, so any signed comment may be read as one.
+        const block = comment === undefined ? null : parseQuestionBlock(comment, "needs-decision");
+        if (block === null || block.revision !== ref.revision) return null;
+        blocks.push(block);
+      }
+      blocks.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.commentId.localeCompare(b.commentId));
+      let body: string;
+      try {
+        body = compose(blocks);
+      } catch {
+        return null;
+      }
+      const commentId = answerCommentId(issue.id, body);
+      return byId.has(commentId) ? { commentId, body, blocks } : null;
+    }
+
+    /**
+     * Post one unsigned comment that answers every open block on an issue,
+     * then send it to the threads that signed the blocks. Reads the issue
+     * fresh first; `expected` is the blocks and revisions the caller saw, and
+     * any difference refuses, so an answer never lands on a question nobody
+     * read or on an option whose text changed.
+     */
+    async function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
+      writeFirst();
+      const posted = await locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
         if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
         const linear = clientFor(linearApiKey);
@@ -483,26 +731,34 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           throw new AnswerRefusal("conflict", `${issue.identifier} is ${issue.state.type}, so it takes no answer.`);
         }
         const kind = issueKind(issue);
-        const blocks = issue.labels.some((label) => label.name === CHECKIN_LABEL || label.name === DECISION_LABEL)
-          ? openBlocks(kind, await linear.listComments(issue.id, undefined, issue.identifier))
-          : [];
-        if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
-        if (!sameBlocks(expected, blocks)) {
-          throw new AnswerRefusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
-        }
+        const comments = await linear.listComments(issue.id, undefined, issue.identifier);
+        const blocks = issue.labels.some((label) => label.name === CHECKIN_LABEL || label.name === DECISION_LABEL) ? openBlocks(kind, comments) : [];
+        const earlier = sameBlocks(expected, blocks) ? null : postedBefore(issue, comments, expected, compose);
+
+        let commentId: string;
         let body: string;
-        try {
-          body = compose(blocks);
-        } catch (error) {
-          throw new AnswerRefusal("invalid", message(error));
-        }
-        if (body.trim() === "") throw new AnswerRefusal("invalid", "The answer is empty.");
-        if (Buffer.byteLength(body) > MAX_ANSWER_BYTES) throw new AnswerRefusal("invalid", `The answer is over ${MAX_ANSWER_BYTES} bytes.`);
-        if (commentRole({ body, author: "user" }) !== "answer") {
-          throw new AnswerRefusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
+        let answered: QuestionBlock[];
+        if (earlier !== null) {
+          ({ commentId, body, blocks: answered } = earlier);
+        } else {
+          if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
+          if (!sameBlocks(expected, blocks)) {
+            throw new AnswerRefusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
+          }
+          try {
+            body = compose(blocks);
+          } catch (error) {
+            throw new AnswerRefusal("invalid", message(error));
+          }
+          if (body.trim() === "") throw new AnswerRefusal("invalid", "The answer is empty.");
+          if (Buffer.byteLength(body) > MAX_ANSWER_BYTES) throw new AnswerRefusal("invalid", `The answer is over ${MAX_ANSWER_BYTES} bytes.`);
+          if (commentRole({ body, author: "user" }) !== "answer") {
+            throw new AnswerRefusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
+          }
+          commentId = await postComment(linear, issue.id, body);
+          answered = blocks;
         }
 
-        const commentId = await postComment(linear, issue.id, body);
         let labelRemoved: boolean | null = null;
         let warning: string | null = null;
         const label = kind === "needs-decision" ? issue.labels.find((candidate) => candidate.name === DECISION_LABEL) : undefined;
@@ -536,37 +792,35 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         commentCache.delete(issue.id);
         snapshot = { ...snapshot, issues: snapshot.issues.filter((open) => open.id !== issue.id) };
         const mark = db.prepare("UPDATE seen_blocks SET notified_at = COALESCE(notified_at, ?) WHERE block_id = ?");
-        for (const block of blocks) mark.run(Date.now(), block.commentId);
+        for (const block of answered) mark.run(Date.now(), block.commentId);
         publish(0);
-        return { identifier: issue.identifier, commentId, labelRemoved, warning };
+        return { result: { identifier: issue.identifier, commentId, labelRemoved, warning }, body, blocks: answered };
       });
+      const delivered = await deliverBlockAnswer(posted.result.identifier, posted.result.commentId, posted.body, posted.blocks);
+      return { ...posted.result, notified: delivered };
     }
 
     async function claimNotifications(): Promise<QuestionNotification[]> {
       const { notify } = await settings.get();
-      const rows = db
+      const blocks = db
         .prepare(
           `UPDATE seen_blocks SET notified_at = ? WHERE notified_at IS NULL
-           RETURNING block_id, issue_identifier, issue_title, question_count, preview, first_seen_at`,
+           RETURNING block_id, issue_identifier, question_count, preview, first_seen_at`,
         )
-        .all(Date.now()) as Array<{
-        block_id: string;
-        issue_identifier: string;
-        issue_title: string;
-        question_count: number;
-        preview: string;
-        first_seen_at: number;
-      }>;
+        .all(Date.now()) as Array<{ block_id: string; issue_identifier: string; question_count: number; preview: string; first_seen_at: number }>;
+      const asked = asks.claim();
       if (!notify) return [];
-      return rows
-        .sort((a, b) => a.first_seen_at - b.first_seen_at || a.block_id.localeCompare(b.block_id))
-        .map((row) => ({
-          blockId: row.block_id,
-          issueIdentifier: row.issue_identifier,
-          issueTitle: row.issue_title,
-          questionCount: row.question_count,
-          preview: row.preview,
-        }));
+      const notices = [
+        ...blocks.map((row) => ({
+          at: row.first_seen_at,
+          notice: { id: row.block_id, source: "linear" as const, label: row.issue_identifier, questionCount: row.question_count, preview: row.preview },
+        })),
+        ...asked.map((row) => ({
+          at: row.askedAt,
+          notice: { id: row.id, source: "ask" as const, label: row.threadTitle || row.threadId, questionCount: 1, preview: truncate(firstLine(row.question), 160) },
+        })),
+      ];
+      return notices.sort((a, b) => a.at - b.at || a.notice.id.localeCompare(b.notice.id)).map((entry) => entry.notice);
     }
 
     async function refuse(error: unknown): Promise<never> {
@@ -576,8 +830,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     }
 
     bb.rpc.register(rpcContract, {
-      "questions.list": () => snapshot,
-      "questions.refresh": async () => (await pollForCaller(true)) ?? snapshot,
+      "questions.list": () => panel(),
+      "questions.refresh": async () => {
+        await pollForCaller(true);
+        return panel();
+      },
       "questions.answer": async ({ issueId, blocks }) => {
         const answers: BlockAnswer[] = blocks.map((block) => ({
           blockId: block.blockId,
@@ -594,6 +851,45 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         } catch (error) {
           return await refuse(error);
         }
+      },
+      "asks.answer": async ({ id, option, text }) => {
+        const row = asks.get(id);
+        if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No bb question ${id}.` });
+        if (row.state !== "open") throw new experimental_PluginRpcRefusal({ code: "conflict", message: `${id} is ${row.state}.` });
+        const answer: AskAnswer = { option, text };
+        let delivery: string;
+        let record: { issue: string; body: string } | null;
+        try {
+          delivery = askDelivery(row, answer);
+          record = row.issue === null ? null : { issue: row.issue, body: askRecord(row, answer) };
+        } catch (error) {
+          throw new experimental_PluginRpcRefusal({ code: "invalid", message: message(error) });
+        }
+        const saved = asks.answer(id, answer, { message: delivery, label: id }, record);
+        if (saved !== "answered") {
+          throw new experimental_PluginRpcRefusal({ code: saved === "not_found" ? "not_found" : "conflict", message: `${id} is no longer open.` });
+        }
+        publish(0);
+        const kept = asks.deliveryFor("ask", id, row.threadId);
+        const sent = notified(kept === null ? null : await deliver(kept.id), row.threadId);
+        const posted = record === null ? null : await postRecord(id);
+        return {
+          id,
+          delivered: sent.delivered,
+          deliveryError: sent.error,
+          record: posted === null ? ("none" as const) : posted.state === "posted" ? ("posted" as const) : ("failed" as const),
+          recordError: posted === null || posted.state === "posted" ? null : posted.error,
+        };
+      },
+      "deliveries.retry": async ({ id }) => {
+        const row = await deliver(id);
+        if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No delivery ${id}.` });
+        return { delivered: row.state === "delivered", error: row.state === "delivered" ? null : row.error };
+      },
+      "records.retry": async ({ askId }) => {
+        const row = await postRecord(askId);
+        if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No record for ${askId}.` });
+        return { posted: row.state === "posted", error: row.state === "posted" ? null : row.error };
       },
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
     });
@@ -615,13 +911,13 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return (await bb.sdk.environments.get({ environmentId: thread.environmentId })).hostId;
     }
 
-    async function readAnswerFile(path: string, ctx: PluginCliContext, machine: string | undefined): Promise<string> {
+    async function readHostFile(path: string, ctx: PluginCliContext, machine: string | undefined, flag: string): Promise<string> {
       let absolute = path;
       if (!posix.isAbsolute(path)) {
         if (ctx.cwd === undefined) {
           throw new PluginCliError(`${path} is relative and this command has no working directory.`, {
             code: "relative_path",
-            hint: "Pass an absolute path to --text-file.",
+            hint: `Pass an absolute path to ${flag}.`,
           });
         }
         absolute = posix.resolve(ctx.cwd, path);
@@ -629,7 +925,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       const hostId = await invokingHost(ctx, machine);
       const file = await bb.sdk.files.read({ path: absolute, ...(hostId === undefined ? {} : { hostId }) });
       if (file.sizeBytes > MAX_ANSWER_BYTES) {
-        throw new PluginCliError(`${absolute} is over ${MAX_ANSWER_BYTES} bytes.`, { code: "answer_too_large" });
+        throw new PluginCliError(`${absolute} is over ${MAX_ANSWER_BYTES} bytes.`, { code: "file_too_large" });
       }
       return file.contentEncoding === "base64" ? Buffer.from(file.content, "base64").toString("utf8") : file.content;
     }
@@ -638,30 +934,122 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     bb.cli.register(
       defineCli({
         name: "sgc",
-        summary: "Answer the steward agent's Linear questions: list them, post answers, store the Linear key",
+        summary: "Ask the owner questions without waiting, list them, answer Linear questions, store the Linear key",
         commands: {
           questions: cliCommand({
-            summary: "List open questions on the team's check-in and needs-decision issues",
-            description: "Polls Linear first, unless --cached. Exits 1 when Linear or an issue's comments could not be read; the questions shown then miss what could not be read.",
+            summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
+            description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
             options: { json, cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" } },
             async run(input) {
-              const current = input.options.cached ? snapshot : await pollForCaller(false);
-              if (current === null) {
+              const polled = input.options.cached ? snapshot : await pollForCaller(false);
+              if (polled === null) {
                 throw new PluginCliError("Answers being posted stopped the check twice.", { code: "interrupted", hint: "Run `bb sgc questions` again." });
               }
-              if (!current.configured) {
-                throw new PluginCliError("The Linear API key is not set.", { code: "not_configured", hint: KEY_HINT });
-              }
+              const current = panel();
               // A failed read hides that issue's questions, so it is a failure.
               const failures = [
+                ...(current.configured ? [] : [`The Linear API key is not set, so Linear questions are not listed. ${KEY_HINT}`]),
                 ...(current.error === null ? [] : [`Could not read Linear: ${current.error}`]),
                 ...current.issueErrors.map((failed) => `Could not read ${failed.identifier}: ${failed.message}`),
               ];
               return {
                 exitCode: failures.length > 0 ? 1 : 0,
-                stdout: input.options.json ? JSON.stringify(current) : formatSnapshot(current),
+                stdout: input.options.json ? JSON.stringify(current) : formatPanel(current),
                 ...(failures.length > 0 ? { stderr: failures.join("\n") } : {}),
               };
+            },
+          }),
+          ask: cliCommand({
+            summary: "Ask the owner a question without waiting: store it and print its id",
+            description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
+            options: {
+              question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionChars} characters` },
+              "question-file": { type: "string", description: "File with the question, on the calling thread's machine" },
+              option: {
+                type: "string",
+                repeatable: true,
+                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionChars} characters each; they get letters A, B, and so on`,
+              },
+              recommend: { type: "string", description: "The letter of the recommended option, or none; default A when there are options" },
+              issue: { type: "string", description: "A Linear issue, like TEAM-12, that gets a comment recording the question and its answer" },
+              thread: { type: "string", description: "The asking thread, which gets the answer; default the calling thread" },
+              machine: { type: "string", description: "Machine that holds --question-file, when not called from a thread" },
+              json,
+            },
+            constraints: [{ kind: "exactly-one", options: ["question", "question-file"] }],
+            async run(input, ctx) {
+              const threadId = input.options.thread ?? ctx.threadId;
+              if (threadId === undefined) {
+                throw new PluginCliError("No asking thread.", { code: "no_thread", hint: "Run it from a bb thread, or pass --thread <id>." });
+              }
+              if (!isThreadId(threadId)) throw new PluginCliError(`${threadId} is not a bb thread id, like thr_abc123.`, { code: "invalid_thread" });
+              const raw =
+                input.options["question-file"] === undefined
+                  ? (input.options.question ?? "")
+                  : await readHostFile(input.options["question-file"], ctx, input.options.machine, "--question-file");
+              let question: string;
+              let options: ReturnType<typeof askOptions>;
+              let issue: string | null;
+              try {
+                question = checkQuestion(raw);
+                const texts = input.options.option ?? [];
+                const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
+                options = askOptions(texts, recommend);
+                issue = input.options.issue === undefined ? null : checkIssueRef(input.options.issue);
+              } catch (error) {
+                throw new PluginCliError(message(error), { code: "invalid" });
+              }
+              let threadTitle: string;
+              try {
+                const thread = await bb.sdk.threads.get({ threadId });
+                threadTitle = thread.title ?? thread.titleFallback ?? "";
+              } catch {
+                throw new PluginCliError(`No bb thread ${threadId}.`, { code: "unknown_thread", hint: "The asking thread gets the answer, so it must exist." });
+              }
+              const reply = (id: string, existing: boolean) => {
+                const where = threadId === ctx.threadId ? "this thread" : `thread ${threadId}`;
+                return {
+                  exitCode: 0,
+                  stdout: input.options.json
+                    ? JSON.stringify({ id, existing })
+                    : `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`,
+                };
+              };
+              const existing = asks.findOpen(threadId, question, options, issue);
+              if (existing !== null) return reply(existing, true);
+              const counts = asks.counts(threadId);
+              if (counts.thread >= ASK_LIMITS.openPerThread) {
+                throw new PluginCliError(`${threadId} already has ${counts.thread} open questions.`, {
+                  code: "too_many",
+                  hint: "Wait for answers, or withdraw one with `bb sgc withdraw <id>`.",
+                });
+              }
+              if (counts.total >= ASK_LIMITS.openTotal) {
+                throw new PluginCliError(`${counts.total} questions are already open.`, { code: "too_many", hint: "Wait for the owner to answer some." });
+              }
+              const { notify } = await settings.get();
+              const id = createAskId();
+              asks.insert({ id, threadId, threadTitle, question, options, issue, askedAt: Date.now() }, !notify);
+              publish(notify ? 1 : 0);
+              return reply(id, false);
+            },
+          }),
+          withdraw: cliCommand({
+            summary: "Withdraw a question the calling thread asked",
+            positionals: [{ name: "id", description: "Question id, like bbq_k3x9mz2p4q", required: true }],
+            options: { thread: { type: "string", description: "The asking thread; default the calling thread" }, json },
+            async run(input, ctx) {
+              const threadId = input.options.thread ?? ctx.threadId;
+              if (threadId === undefined) {
+                throw new PluginCliError("No asking thread.", { code: "no_thread", hint: "Run it from the thread that asked, or pass --thread <id>." });
+              }
+              const id = input.positionals.id;
+              const outcome = asks.withdraw(id, threadId);
+              if (outcome === "not_found") throw new PluginCliError(`No bb question ${id}.`, { code: "not_found" });
+              if (outcome === "not_yours") throw new PluginCliError(`${id} was asked by another thread.`, { code: "forbidden" });
+              if (outcome === "not_open") throw new PluginCliError(`${id} is not open.`, { code: "conflict" });
+              publish(0);
+              return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ id, withdrawn: true }) : `Withdrew ${id}.` };
             },
           }),
           answer: cliCommand({
@@ -691,7 +1079,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             },
             async run(input, ctx) {
               const refs = input.options.block.map(parseBlockOption);
-              const text = (await readAnswerFile(input.options["text-file"], ctx, input.options.machine)).trim();
+              const text = (await readHostFile(input.options["text-file"], ctx, input.options.machine, "--text-file")).trim();
               if (commentRole({ body: text, author: "user" }) !== "answer") {
                 throw new PluginCliError("The answer text starts with [agent:, an agent's signature.", {
                   code: "invalid",
@@ -709,6 +1097,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               const lines = [`Posted the answer to ${result.identifier} (comment ${result.commentId}).`];
               if (result.labelRemoved === true) lines.push("Removed the needs-decision label.");
               if (result.warning !== null) lines.push(result.warning);
+              for (const sent of result.notified) {
+                lines.push(sent.delivered ? `Sent it to ${sent.threadId}.` : `Could not send it to ${sent.threadId}: ${sent.error ?? "unknown error"}. Retry it on the SGC questions page.`);
+              }
               return { exitCode: 0, stdout: input.options.json ? JSON.stringify(result) : lines.join("\n") };
             },
           }),
