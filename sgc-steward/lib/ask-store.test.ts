@@ -1,0 +1,143 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
+import { ASK_MIGRATIONS, createAskId, createAskStore } from "./ask-store.ts";
+import type { Ask } from "./asks.ts";
+
+let clock = Date.parse("2026-01-05T10:00:00Z");
+const now = () => (clock += 1000);
+
+function open(path = ":memory:") {
+  const db = new Database(path);
+  for (const statement of ASK_MIGRATIONS) db.exec(statement);
+  return { db, store: createAskStore(db, now) };
+}
+
+function ask(id: string, extra: Partial<Ask> = {}): Ask {
+  return {
+    id,
+    threadId: "thr_a",
+    threadTitle: "Thread A",
+    question: `Question ${id}?`,
+    options: [
+      { letter: "A", text: "Yes.", recommended: true },
+      { letter: "B", text: "No.", recommended: false },
+    ],
+    issue: null,
+    askedAt: now(),
+    ...extra,
+  };
+}
+
+test("ids look like bbq_ and differ", () => {
+  const ids = new Set(Array.from({ length: 50 }, () => createAskId()));
+  assert.equal(ids.size, 50);
+  for (const id of ids) assert.match(id, /^bbq_[a-z0-9]{10}$/);
+});
+
+test("open questions list oldest first, with counts per thread and in all", () => {
+  const { store } = open();
+  store.insert(ask("bbq_1"), false);
+  store.insert(ask("bbq_2", { threadId: "thr_b" }), false);
+  store.insert(ask("bbq_3"), false);
+  assert.deepEqual(store.listOpen().map((row) => row.id), ["bbq_1", "bbq_2", "bbq_3"]);
+  assert.deepEqual(store.counts("thr_a"), { thread: 2, total: 3 });
+  assert.deepEqual(store.get("bbq_2")?.options.map((option) => option.letter), ["A", "B"]);
+  assert.equal(store.get("bbq_9"), null);
+});
+
+test("the same open question from the same thread is found again", () => {
+  const { store } = open();
+  const first = ask("bbq_1", { issue: "TEAM-1" });
+  store.insert(first, false);
+  assert.equal(store.findOpen(first.threadId, first.question, first.options, first.issue), "bbq_1");
+  assert.equal(store.findOpen("thr_b", first.question, first.options, first.issue), null);
+  assert.equal(store.findOpen(first.threadId, first.question, first.options, null), null);
+  assert.equal(store.findOpen(first.threadId, first.question, first.options.slice(0, 1), first.issue), null);
+});
+
+test("only the asking thread withdraws, and only an open question", () => {
+  const { store } = open();
+  store.insert(ask("bbq_1"), false);
+  assert.equal(store.withdraw("bbq_1", "thr_b"), "not_yours");
+  assert.equal(store.withdraw("bbq_9", "thr_a"), "not_found");
+  assert.equal(store.withdraw("bbq_1", "thr_a"), "withdrawn");
+  assert.equal(store.withdraw("bbq_1", "thr_a"), "not_open");
+  assert.deepEqual(store.listOpen(), []);
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
+});
+
+test("an answer is saved once, with its delivery and its record, in one step", () => {
+  const { store } = open();
+  store.insert(ask("bbq_1", { issue: "TEAM-1" }), false);
+  assert.equal(store.answer("bbq_1", { option: "B", text: "Wait." }, { message: "delivered text", label: "bbq_1" }, { issue: "TEAM-1", body: "record" }), "answered");
+  const row = store.get("bbq_1")!;
+  assert.equal(row.state, "answered");
+  assert.deepEqual(row.answer, { option: "B", text: "Wait." });
+  const delivery = store.deliveryFor("ask", "bbq_1", "thr_a")!;
+  assert.equal(delivery.state, "pending");
+  assert.equal(delivery.message, "delivered text");
+  assert.deepEqual(store.record("bbq_1"), { askId: "bbq_1", issue: "TEAM-1", body: "record", state: "pending", commentId: null, error: null, attempts: 0 });
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "again", label: "bbq_1" }, null), "not_open");
+  assert.equal(store.deliveryFor("ask", "bbq_1", "thr_a")!.message, "delivered text", "a second answer changes nothing");
+  assert.equal(store.answer("bbq_9", { option: "A", text: "" }, { message: "m", label: "x" }, null), "not_found");
+});
+
+test("a delivery is kept once per source, reference, and thread, and records its attempts", () => {
+  const { store } = open();
+  const first = store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "one" });
+  const again = store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "two" });
+  assert.equal(again.id, first.id);
+  assert.equal(again.message, "one");
+  store.markDelivery(first.id, { ok: false, error: "thread not found" });
+  assert.deepEqual(
+    store.undelivered().map((row) => [row.id, row.state, row.error, row.attempts]),
+    [[first.id, "failed", "thread not found", 1]],
+  );
+  store.markDelivery(first.id, { ok: true });
+  const delivered = store.getDelivery(first.id)!;
+  assert.deepEqual([delivered.state, delivered.error, delivered.attempts], ["delivered", null, 2]);
+  assert.ok(delivered.deliveredAt !== null);
+  assert.deepEqual(store.undelivered(), []);
+});
+
+test("records that did not post are listed until they do", () => {
+  const { store } = open();
+  store.insert(ask("bbq_1", { issue: "TEAM-1" }), false);
+  store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, { issue: "TEAM-1", body: "record" });
+  store.markRecord("bbq_1", { ok: false, error: "no key" });
+  assert.deepEqual(store.unposted().map((row) => [row.askId, row.state, row.error, row.attempts]), [["bbq_1", "failed", "no key", 1]]);
+  store.markRecord("bbq_1", { ok: true, commentId: "c-9" });
+  assert.deepEqual(store.unposted(), []);
+  assert.equal(store.record("bbq_1")?.commentId, "c-9");
+});
+
+test("each open question is handed out for a notification once", () => {
+  const { store } = open();
+  store.insert(ask("bbq_1"), false);
+  store.insert(ask("bbq_2"), true);
+  store.insert(ask("bbq_3"), false);
+  store.withdraw("bbq_3", "thr_a");
+  assert.deepEqual(store.claim().map((row) => row.id), ["bbq_1"]);
+  assert.deepEqual(store.claim(), []);
+});
+
+test("questions and their deliveries survive closing and reopening the database", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sgc-asks-"));
+  try {
+    const path = join(dir, "data.db");
+    const first = open(path);
+    first.store.insert(ask("bbq_1"), false);
+    first.store.addDelivery({ source: "linear", ref: "c-1", threadId: "thr_a", label: "TEAM-1", message: "one" });
+    first.db.close();
+    const second = open(path);
+    assert.deepEqual(second.store.listOpen().map((row) => row.id), ["bbq_1"]);
+    assert.equal(second.store.undelivered().length, 1);
+    second.db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
