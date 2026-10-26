@@ -6,7 +6,7 @@ Plugins for [bb](https://bb.dev), the agentic IDE.
 | --- | --- |
 | [`roundtable/`](roundtable/) | A group chat where several agents (different providers) share one transcript, get tagged in with `@handle`, and go back and forth for a set number of turns on an idea or an implementation. |
 | [`review-desk/`](review-desk/) | A GitHub pull request review page inside bb: Pierre diffs with inline GitHub threads and comment authoring, a chat with an analyst that has the PR checked out, code pills for pointing at lines, files, symbols, and threads, and a tree-sitter codemap. |
-| [`sgc-steward/`](sgc-steward/) | A page in bb for the questions a steward agent asks on Linear check-in issues: answer them there, get one notification per question block, and the answers go back to Linear as unsigned comments. |
+| [`sgc-steward/`](sgc-steward/) | One page in bb for the questions agents ask, on Linear check-in issues or with `bb sgc ask`, without blocking any thread: one notification per question, and each answer goes back to Linear and to the asking thread. |
 
 Each directory is a self-contained plugin with its own `package.json`, README, and `PLUGIN_OVERVIEW.md`.
 

@@ -11,7 +11,7 @@
   },
   "bb": {
     "name": "SGC Steward",
-    "description": "Answer the questions a steward agent asks on Linear check-in issues from a panel in bb, without blocking the agent's thread.",
+    "description": "Answer the questions your agents ask, on Linear check-in issues or with bb sgc ask, from one page in bb, without blocking any thread.",
     "branding": {
       "icon": "MessageQuestion"
     },
