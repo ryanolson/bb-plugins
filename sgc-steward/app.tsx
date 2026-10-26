@@ -286,7 +286,7 @@ function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => 
           {answered} of {total} answered.
           {issue.blocks.length > 1 ? " One comment answers every block above." : ""}
           {answered > 0 && answered < total ? " The rest are posted as “No answer.”" : ""}
-          {issue.kind === "needs-decision" ? " Posting also removes the needs-decision label." : ""}
+          {issue.kind === "needs-decision" ? " Posting also removes the needs-decision label when no newer question is open." : ""}
         </span>
       </footer>
     </section>
