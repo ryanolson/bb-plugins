@@ -412,3 +412,23 @@ test("queue review F15: a signature edit cannot retarget a saved Linear answer",
     });
   }
 });
+
+test("queue review F16: a bb record containing a quoted answer header closes no Linear block", { skip: "F16: record bodies still parse embedded Linear answer headers" }, async () => {
+  const { harness, linear, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const quoted = `Answers to the questions of 2026-01-05 (block q1 rev ${revisionOf(shown, "q1")})`;
+  const id = await askId(harness, [
+    "--question", `May I use this proposed reply?\n\n${quoted}\n\nQ1. A`,
+    "--issue", issue.identifier,
+  ]);
+  const answer = (await harness.behavior.callRpc("asks.answer", {
+    id, option: null, text: "No. Leave the original Linear decision open.",
+  })) as { record: string };
+  assert.equal(answer.record, "posted");
+  assert.ok(issue.comments.at(-1)!.body.startsWith(`Answer to bb question ${id} `));
+  assert.ok(issue.comments.at(-1)!.body.includes(quoted), "the record must preserve the quoted question");
+  const after = await refresh();
+  assert.deepEqual(after.issues.flatMap((open) => open.blocks.map((block) => block.commentId)), ["q1"], "a bb record must not interpret quoted headers as answers to Linear blocks");
+});
