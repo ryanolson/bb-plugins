@@ -164,9 +164,10 @@ export interface LinearClient {
    * Every comment of one issue, threaded replies included, oldest first.
    * Reads every page whatever order Linear returns. Throws a "limit"
    * LinearError past the page cap or past one page of replies in a thread,
-   * so the caller shows the issue as unreadable instead of guessing.
+   * so the caller shows the issue as unreadable instead of guessing. `label`
+   * names the issue in that message, like TEAM-12; it defaults to the id.
    */
-  listComments(issueId: string, signal?: AbortSignal): Promise<LinearComment[]>;
+  listComments(issueId: string, signal?: AbortSignal, label?: string): Promise<LinearComment[]>;
   /** Post a comment with an id the caller chose, so a retried post cannot duplicate it. */
   createComment(args: { issueId: string; body: string; commentId: string }, signal?: AbortSignal): Promise<string>;
   removeLabel(args: { issueId: string; labelId: string }, signal?: AbortSignal): Promise<void>;
@@ -296,7 +297,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
       return data?.issue ? toIssue(data.issue) : null;
     },
 
-    async listComments(issueId, signal) {
+    async listComments(issueId, signal, label = issueId) {
       const byId = new Map<string, LinearComment>();
       let after: string | null = null;
       for (let page = 1; ; page += 1) {
@@ -309,7 +310,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
         for (const node of data.issue.comments.nodes) {
           byId.set(node.id, toComment(node));
           if (node.children?.pageInfo.hasNextPage) {
-            throw new LinearError("limit", `a comment thread has more than ${REPLY_PAGE} replies, so the plugin does not guess which questions are open`);
+            throw new LinearError("limit", `A comment thread on ${label} has more than ${REPLY_PAGE} replies, so the plugin does not guess which questions are open.`);
           }
           for (const child of node.children?.nodes ?? []) byId.set(child.id, toComment(child));
         }
@@ -318,7 +319,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
           return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id));
         }
         if (page >= maxCommentPages) {
-          throw new LinearError("limit", `the issue has more than ${maxCommentPages * COMMENT_PAGE} comments, so the plugin does not guess which questions are open`);
+          throw new LinearError("limit", `${label} has more than ${maxCommentPages * COMMENT_PAGE} comments, so the plugin does not guess which questions are open.`);
         }
         after = endCursor;
       }

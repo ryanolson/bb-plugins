@@ -589,9 +589,9 @@ test("an issue past the reading limits shows as unreadable, and the other issues
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
   linear.post(linear.addIssue("TEAM-2", ["checkin"]), "q2", QUESTIONS);
   const listComments = linear.listComments.bind(linear);
-  linear.listComments = async (issueId: string) => {
+  linear.listComments = async (issueId: string, _signal?: AbortSignal, label?: string) => {
     if (issueId === "uuid-TEAM-1") {
-      throw new LinearError("limit", "the issue has more than 1000 comments, so the plugin does not guess which questions are open");
+      throw new LinearError("limit", `${label} has more than 1000 comments, so the plugin does not guess which questions are open.`);
     }
     return listComments(issueId);
   };
@@ -599,7 +599,7 @@ test("an issue past the reading limits shows as unreadable, and the other issues
   assert.equal(snapshot.error, null);
   assert.deepEqual(snapshot.issues.map((issue) => issue.identifier), ["TEAM-2"]);
   assert.deepEqual(snapshot.issueErrors.map((failed) => failed.identifier), ["TEAM-1"]);
-  assert.match(snapshot.issueErrors[0]!.message, /does not guess/);
+  assert.match(snapshot.issueErrors[0]!.message, /^TEAM-1 has more than 1000 comments/, "the message names the issue");
 });
 
 test("a failed poll keeps the last questions and reports the error", async () => {

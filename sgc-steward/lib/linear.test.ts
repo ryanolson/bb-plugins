@@ -240,10 +240,10 @@ test("an issue past the reading limits is refused, not guessed", async () => {
       false,
     ),
   ]);
-  await assert.rejects(thread.client.listComments("issue-1"), (error: unknown) => {
+  await assert.rejects(thread.client.listComments("issue-1", undefined, "TEAM-7"), (error: unknown) => {
     assert.ok(error instanceof LinearError);
     assert.equal(error.kind, "limit");
-    assert.match(error.message, /more than 20 replies/);
+    assert.match(error.message, /thread on TEAM-7 has more than 20 replies/);
     return true;
   });
 
@@ -255,10 +255,10 @@ test("an issue past the reading limits is refused, not guessed", async () => {
     return { ok: true, status: 200, text: async () => JSON.stringify(next.json) };
   };
   const client = createLinearClient({ apiKey: KEY, fetch, maxCommentPages: 3 });
-  await assert.rejects(client.listComments("issue-1"), (error: unknown) => {
+  await assert.rejects(client.listComments("issue-1", undefined, "TEAM-7"), (error: unknown) => {
     assert.ok(error instanceof LinearError);
     assert.equal(error.kind, "limit");
-    assert.match(error.message, /more than 150 comments/);
+    assert.match(error.message, /^TEAM-7 has more than 150 comments/);
     return true;
   });
 });

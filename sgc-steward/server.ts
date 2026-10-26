@@ -367,7 +367,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           try {
             const cached = commentCache.get(issue.id);
             const comments =
-              !fullRefresh && cached?.updatedAt === issue.updatedAt ? cached.comments : await linear.listComments(issue.id, signal);
+              !fullRefresh && cached?.updatedAt === issue.updatedAt ? cached.comments : await linear.listComments(issue.id, signal, issue.identifier);
             commentCache.set(issue.id, { updatedAt: issue.updatedAt, comments });
             const kind = issueKind(issue);
             const blocks = openBlocks(kind, comments);
@@ -484,7 +484,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         }
         const kind = issueKind(issue);
         const blocks = issue.labels.some((label) => label.name === CHECKIN_LABEL || label.name === DECISION_LABEL)
-          ? openBlocks(kind, await linear.listComments(issue.id))
+          ? openBlocks(kind, await linear.listComments(issue.id, undefined, issue.identifier))
           : [];
         if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
         if (!sameBlocks(expected, blocks)) {
@@ -511,7 +511,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           // written. The label stays until nothing on the issue is open.
           let stillOpen: QuestionBlock[] | null = null;
           try {
-            stillOpen = openBlocks("needs-decision", await linear.listComments(issue.id));
+            stillOpen = openBlocks("needs-decision", await linear.listComments(issue.id, undefined, issue.identifier));
           } catch (error) {
             bb.log.warn(`could not re-read ${issue.identifier} after answering: ${redact(message(error), [linearApiKey])}`);
           }
