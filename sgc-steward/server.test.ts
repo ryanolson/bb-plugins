@@ -11,6 +11,8 @@ test("without a key the plugin asks for one and never calls Linear", async () =>
   const { linear, harness, refresh } = await setup({ key: null });
   assert.equal(harness.inspection.needsConfigurationMessages.length, 1);
   assert.match(harness.inspection.needsConfigurationMessages[0]!, /bb sgc key --api-key-stdin/);
+  // bb clears the notice only on the next load, so it says how to get one.
+  assert.match(harness.inspection.needsConfigurationMessages[0]!, /bb plugin reload sgc-steward/);
   const snapshot = await refresh();
   assert.equal(snapshot.configured, false);
   assert.deepEqual(snapshot.issues, []);
@@ -369,15 +371,21 @@ test("bb sgc answer refuses a signed text, an issue with nothing open, a relativ
 });
 
 test("bb sgc key stores the key without printing it, and the next poll uses it", async () => {
-  const { linear, harness, refresh } = await setup({ key: null });
+  const { linear, harness, refresh, factory } = await setup({ key: null });
   const cli = await harness.behavior.runCli(["key", "--api-key", " lin_api_fresh_key \n"]);
   assert.equal(cli.exitCode, 0, cli.stderr);
   assert.ok(!cli.stdout.includes("lin_api_fresh_key") && !cli.stderr.includes("lin_api_fresh_key"));
   assert.match(cli.stdout, /Saved the Linear API key/);
+  assert.match(cli.stdout, /bb plugin reload sgc-steward/, "saving does not clear the setup notice; a reload does");
   const snapshot = await refresh();
   assert.equal(snapshot.configured, true);
   assert.deepEqual(linear.keys, ["lin_api_fresh_key"]);
   assert.ok(!harness.inspection.logEntries.some((entry) => JSON.stringify(entry).includes("lin_api_fresh_key")));
+  const reloaded = await harness.lifecycle.reload(factory);
+  assert.deepEqual(reloaded.harness.inspection.needsConfigurationMessages, [], "a load with the key set raises no notice");
+  const again = await reloaded.harness.behavior.runCli(["key", "--api-key", "lin_api_next_key"]);
+  assert.ok(!again.stdout.includes("bb plugin reload"), "with no notice up, there is nothing to clear");
+  await reloaded.harness.lifecycle.dispose();
 });
 
 test("a key with a line break or a space is refused on save, and the refusal does not echo it", async () => {

@@ -66,6 +66,8 @@ const MAX_ANSWER_BYTES = 64 * 1024;
 const FULL_REFRESH_MS = 60 * 60 * 1000;
 const LABEL_ATTEMPTS = 3;
 const KEY_HINT = "Pipe the key in: <command that prints the key> | bb sgc key --api-key-stdin";
+/** bb clears a needs-configuration notice only when the plugin loads again; saving settings does not reload it. */
+const RELOAD_HINT = "Then run `bb plugin reload sgc-steward` to clear this notice.";
 
 type RefusalCode = "conflict" | "invalid" | "not_found";
 
@@ -161,7 +163,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
 
     const initial = await settings.get();
     if (!initial.linearApiKey) {
-      bb.status.needsConfiguration(`Set the Linear API key. ${KEY_HINT}`);
+      bb.status.needsConfiguration(`Set the Linear API key. ${KEY_HINT}. ${RELOAD_HINT}`);
     }
 
     const db = bb.storage.database();
@@ -889,7 +891,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               const problem = keyProblem(key);
               if (problem !== null) throw new PluginCliError(problem, { code: "invalid_key", hint: KEY_HINT });
               await settings.experimental_set({ linearApiKey: key });
-              return { exitCode: 0, stdout: "Saved the Linear API key. The next poll uses it." };
+              const notice = initial.linearApiKey ? "" : " bb plugin list shows the plugin as needing configuration until `bb plugin reload sgc-steward`.";
+              return { exitCode: 0, stdout: `Saved the Linear API key. The next poll uses it.${notice}` };
             },
           }),
         },

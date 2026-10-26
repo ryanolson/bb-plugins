@@ -7,9 +7,12 @@ Agents need decisions from you. A bb question dialog stops the asking thread unt
 ```
 bb plugin install git:https://github.com/ryanolson/bb-plugins.git --subdirectory sgc-steward
 <command that prints your Linear API key> | bb sgc key --api-key-stdin
+bb plugin reload sgc-steward
 ```
 
 The key goes to the plugin's secret settings on the bb server and is never printed. You can also paste it in Settings, Installed plugins, SGC Steward. Until the key is set, the plugin reads nothing and the page says how to set it.
+
+The next poll uses the key without a reload. But a plugin that loaded without a key stays marked as needing configuration in `bb plugin list` until it loads again, because saving a setting does not reload it. The reload clears that mark.
 
 ## Question format
 
