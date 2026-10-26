@@ -181,7 +181,7 @@ test("a question that Linear folds into the option above it still parses", () =>
   assert.equal(parsed(parseQuestionBlock(comment("c", unsignedHeader), "checkin")).questions[0]?.text, "Indented question?");
 });
 
-test("a block's revision follows its questions and options", () => {
+test("a block's revision follows its context, questions, and options", () => {
   const block = parsed(parseQuestionBlock(comment("c1", QUESTIONS), "checkin"));
   assert.match(block.revision, /^[0-9a-f]{12}$/);
   assert.equal(parsed(parseQuestionBlock(comment("c2", QUESTIONS), "checkin")).revision, block.revision, "same content, same revision");
@@ -189,6 +189,8 @@ test("a block's revision follows its questions and options", () => {
   assert.notEqual(parsed(parseQuestionBlock(comment("c1", swapped), "checkin")).revision, block.revision);
   const recommended = QUESTIONS.replace("- A (recommended): Powers of two.\n- B: Small, medium, large.", "- A: Powers of two.\n- B (recommended): Small, medium, large.");
   assert.notEqual(parsed(parseQuestionBlock(comment("c1", recommended), "checkin")).revision, block.revision);
+  const context = QUESTIONS.replace("Context line one.", "Context line two.");
+  assert.notEqual(parsed(parseQuestionBlock(comment("c1", context), "checkin")).revision, block.revision, "the context is part of what is answered");
   const rawOne = raw(parseQuestionBlock(comment("r1", "[agent:codex thr_x] Which key?"), "needs-decision"));
   const rawTwo = raw(parseQuestionBlock(comment("r1", "[agent:codex thr_x] Which tenant key?"), "needs-decision"));
   assert.notEqual(rawOne.revision, rawTwo.revision, "a raw block's revision follows its text");

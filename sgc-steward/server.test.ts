@@ -757,3 +757,57 @@ test("review F7: the questions CLI fails when the issue comments cannot be read"
   assert.equal(snapshot.issueErrors[0]?.identifier, "TEAM-1");
   assert.equal(result.exitCode, 1, "a failed comment read must not be reported as a successful questions check");
 });
+
+test("review F8: changing the target in a block's context refuses a saved approval", async () => {
+  const outcomes = [];
+  for (const caller of ["panel", "cli"] as const) {
+    const { linear, harness, refresh } = await setup();
+    const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+    linear.post(issue, "q1", [
+      "[agent:claude-code thr_test1] Questions 2026-01-05",
+      "",
+      "Target: the disposable staging project.",
+      "",
+      "Q1. May I delete the target project?",
+      "- A: Yes.",
+      "- B: No.",
+    ].join("\n"));
+    const shown = await refresh();
+    const block = shown.issues[0]!.blocks[0]!;
+    assert.equal(block.format, "parsed");
+    assert.equal(block.context, "Target: the disposable staging project.");
+    issue.comments[0]!.body = issue.comments[0]!.body.replace("disposable staging", "production");
+    issue.updatedAt = linear.tick();
+
+    let refused = false;
+    if (caller === "panel") {
+      try {
+        await harness.behavior.callRpc("questions.answer", {
+          issueId: issue.id,
+          blocks: [{ blockId: block.commentId, revision: block.revision, answers: [{ number: 1, option: "A", text: "" }] }],
+        });
+      } catch (error) {
+        refused = (error as { code?: string }).code === "conflict";
+      }
+    } else {
+      const text = "Q1. A: Yes.";
+      harness.inspection.sdk.stub("files.read", async () => ({
+        content: text, contentEncoding: "utf8", path: "/work/answer.md", sha256: "x", sizeBytes: text.length,
+      }));
+      const answer = await harness.behavior.runCli([
+        "answer", issue.identifier, "--block", `${block.commentId}@${block.revision}`, "--text-file", "/work/answer.md",
+      ]);
+      refused = answer.exitCode === 1 && /changed/.test(answer.stderr);
+    }
+    outcomes.push({
+      caller,
+      refused,
+      posts: linear.calls.filter((call) => call.startsWith("createComment")).length,
+      decisionStillOpen: issue.labels.some((label) => label.name === "needs-decision"),
+    });
+  }
+  assert.deepEqual(outcomes, [
+    { caller: "panel", refused: true, posts: 0, decisionStillOpen: true },
+    { caller: "cli", refused: true, posts: 0, decisionStillOpen: true },
+  ]);
+});
