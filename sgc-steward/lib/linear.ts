@@ -4,7 +4,7 @@
 // it, and they carry a kind so the server can tell "fix your key" from "try
 // again later".
 
-import { commentRole, type LinearComment } from "./questions.ts";
+import type { LinearComment } from "./questions.ts";
 
 export const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 export const CHECKIN_LABEL = "checkin";
@@ -24,7 +24,7 @@ export interface LinearIssue {
   labels: Array<{ id: string; name: string }>;
 }
 
-export type LinearErrorKind = "auth" | "rate-limit" | "graphql" | "http" | "network" | "timeout" | "aborted";
+export type LinearErrorKind = "auth" | "rate-limit" | "graphql" | "http" | "network" | "timeout" | "aborted" | "limit";
 
 export class LinearError extends Error {
   readonly kind: LinearErrorKind;
@@ -95,10 +95,19 @@ export const ISSUE_QUERY = `query SgcIssue($id: String!) {
   issue(id: $id) { ${ISSUE_FIELDS} }
 }`;
 
+const COMMENT_PAGE = 50;
+const REPLY_PAGE = 20;
+const COMMENT_FIELDS = `id body createdAt parentId user { id } botActor { type }`;
+
+// Replies are read through each comment's children as well: the issue's
+// comment connection is not documented to list them.
 export const COMMENTS_QUERY = `query SgcIssueComments($id: String!, $after: String) {
   issue(id: $id) {
-    comments(first: 50, after: $after, orderBy: createdAt) {
-      nodes { id body createdAt parentId user { id } botActor { type } }
+    comments(first: ${COMMENT_PAGE}, after: $after, orderBy: createdAt) {
+      nodes {
+        ${COMMENT_FIELDS}
+        children(first: ${REPLY_PAGE}) { nodes { ${COMMENT_FIELDS} } pageInfo { hasNextPage } }
+      }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -128,13 +137,17 @@ interface IssueNode {
   labels: { nodes: Array<{ id: string; name: string }> };
 }
 
-interface CommentNode {
+interface CommentFields {
   id: string;
   body: string;
   createdAt: string;
   parentId: string | null;
   user: { id: string } | null;
   botActor: { type: string } | null;
+}
+
+interface CommentNode extends CommentFields {
+  children?: { nodes: CommentFields[]; pageInfo: { hasNextPage: boolean } };
 }
 
 interface GraphQLError {
@@ -148,9 +161,10 @@ export interface LinearClient {
   /** One issue by UUID or identifier; null when Linear has no such issue. */
   getIssue(id: string, signal?: AbortSignal): Promise<LinearIssue | null>;
   /**
-   * The comments of one issue, replies included, in the order Linear returns
-   * them. Reads newest-first pages only until one holds an unsigned answer:
-   * nothing older can be an open question.
+   * Every comment of one issue, threaded replies included, oldest first.
+   * Reads every page whatever order Linear returns. Throws a "limit"
+   * LinearError past the page cap or past one page of replies in a thread,
+   * so the caller shows the issue as unreadable instead of guessing.
    */
   listComments(issueId: string, signal?: AbortSignal): Promise<LinearComment[]>;
   /** Post a comment with an id the caller chose, so a retried post cannot duplicate it. */
@@ -181,7 +195,7 @@ function toIssue(node: IssueNode): LinearIssue {
   };
 }
 
-function toComment(node: CommentNode): LinearComment {
+function toComment(node: CommentFields): LinearComment {
   return {
     id: node.id,
     body: node.body,
@@ -283,7 +297,7 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
     },
 
     async listComments(issueId, signal) {
-      const comments: LinearComment[] = [];
+      const byId = new Map<string, LinearComment>();
       let after: string | null = null;
       for (let page = 1; ; page += 1) {
         const data: { issue: { comments: { nodes: CommentNode[]; pageInfo: PageInfo } } | null } = await query(
@@ -292,15 +306,19 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
           signal,
         );
         if (data.issue === null) throw new LinearError("graphql", `Linear has no issue ${issueId}`);
-        comments.push(...data.issue.comments.nodes.map(toComment));
+        for (const node of data.issue.comments.nodes) {
+          byId.set(node.id, toComment(node));
+          if (node.children?.pageInfo.hasNextPage) {
+            throw new LinearError("limit", `a comment thread has more than ${REPLY_PAGE} replies, so the plugin does not guess which questions are open`);
+          }
+          for (const child of node.children?.nodes ?? []) byId.set(child.id, toComment(child));
+        }
         const { hasNextPage, endCursor } = data.issue.comments.pageInfo;
-        if (!hasNextPage || endCursor === null) return comments;
-        const newestFirst = comments.every(
-          (comment, index) => index === 0 || Date.parse(comments[index - 1]!.createdAt) >= Date.parse(comment.createdAt),
-        );
-        if (newestFirst && comments.some((comment) => commentRole(comment) === "answer")) return comments;
+        if (!hasNextPage || endCursor === null) {
+          return [...byId.values()].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id));
+        }
         if (page >= maxCommentPages) {
-          throw new LinearError("http", `issue ${issueId} has more than ${maxCommentPages} pages of comments since its last answer`);
+          throw new LinearError("limit", `the issue has more than ${maxCommentPages * COMMENT_PAGE} comments, so the plugin does not guess which questions are open`);
         }
         after = endCursor;
       }

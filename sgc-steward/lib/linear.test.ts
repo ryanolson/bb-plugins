@@ -161,28 +161,28 @@ test("comments: users and bots are told apart, replies keep their parent", async
   );
 });
 
-test("comments come newest first, so paging stops once a page holds an answer", async () => {
+test("every comment page is read, whatever the order, and comments come back oldest first", async () => {
+  // Newest first with an answer on page one: nothing may stop early.
   const { calls, client } = fakeLinear([
     commentsPage(
       [
         commentNode("c4", "2026-01-05T10:04:00.000Z", "[agent:codex thr_x] Questions"),
-        commentNode("c3", "2026-01-05T10:03:00.000Z", "[agent:codex thr_x] Run"),
+        commentNode("c3", "2026-01-05T10:03:00.000Z", "Use A."),
       ],
       true,
       "p1",
     ),
     commentsPage(
       [
-        commentNode("c2", "2026-01-05T10:02:00.000Z", "Use A."),
-        commentNode("c1", "2026-01-05T10:01:00.000Z", "[agent:codex thr_x] Questions"),
+        commentNode("c2", "2026-01-05T10:02:00.000Z", "[agent:codex thr_x] Questions"),
+        commentNode("c1", "2026-01-05T10:01:00.000Z", "[agent:codex thr_x] Run"),
       ],
-      true,
-      "p2",
+      false,
     ),
   ]);
   const comments = await client.listComments("issue-1");
-  assert.deepEqual(comments.map((comment) => comment.id), ["c4", "c3", "c2", "c1"]);
-  assert.equal(calls.length, 2, "the third page is older than the answer and is never fetched");
+  assert.deepEqual(comments.map((comment) => comment.id), ["c1", "c2", "c3", "c4"]);
+  assert.equal(calls.length, 2);
   assert.equal(calls[1]?.variables.after, "p1");
 });
 
@@ -202,7 +202,51 @@ test("comments that come oldest first are read to the end", async () => {
   assert.equal(calls.length, 2);
 });
 
-test("paging stops at the page limit", async () => {
+test("threaded replies are read through each comment's children, once each", async () => {
+  const reply = commentNode("r1", "2026-01-05T10:02:00.000Z", "Go with A.", { parentId: "c1" });
+  const onlyInChildren = commentNode("r2", "2026-01-05T10:03:00.000Z", "And B.", { parentId: "c1" });
+  const { calls, client } = fakeLinear([
+    commentsPage(
+      [
+        commentNode("c1", "2026-01-05T10:01:00.000Z", "[agent:codex thr_x] Questions", {
+          children: { nodes: [reply, onlyInChildren], pageInfo: { hasNextPage: false } },
+        }),
+        // The connection may list a reply at the top level too.
+        reply,
+      ],
+      false,
+    ),
+  ]);
+  const comments = await client.listComments("issue-1");
+  assert.deepEqual(
+    comments.map((comment) => [comment.id, comment.parentId]),
+    [
+      ["c1", null],
+      ["r1", "c1"],
+      ["r2", "c1"],
+    ],
+  );
+  assert.match(calls[0]?.query ?? "", /children\(first: 20\)/);
+});
+
+test("an issue past the reading limits is refused, not guessed", async () => {
+  const thread = fakeLinear([
+    commentsPage(
+      [
+        commentNode("c1", "2026-01-05T10:01:00.000Z", "[agent:codex thr_x] Questions", {
+          children: { nodes: [], pageInfo: { hasNextPage: true } },
+        }),
+      ],
+      false,
+    ),
+  ]);
+  await assert.rejects(thread.client.listComments("issue-1"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.equal(error.kind, "limit");
+    assert.match(error.message, /more than 20 replies/);
+    return true;
+  });
+
   const pages = Array.from({ length: 5 }, (_, page) =>
     commentsPage([commentNode(`c${page}`, `2026-01-05T10:0${page}:00.000Z`, "[agent:codex thr_x] Run")], true, `p${page}`),
   );
@@ -211,7 +255,12 @@ test("paging stops at the page limit", async () => {
     return { ok: true, status: 200, text: async () => JSON.stringify(next.json) };
   };
   const client = createLinearClient({ apiKey: KEY, fetch, maxCommentPages: 3 });
-  await assert.rejects(client.listComments("issue-1"), /more than 3 pages of comments/);
+  await assert.rejects(client.listComments("issue-1"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.equal(error.kind, "limit");
+    assert.match(error.message, /more than 150 comments/);
+    return true;
+  });
 });
 
 test("an issue that does not exist is null", async () => {

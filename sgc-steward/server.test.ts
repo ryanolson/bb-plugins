@@ -497,6 +497,24 @@ test("an answer stops a stalled poll instead of waiting behind it, and the polle
   await service.done;
 });
 
+test("an issue past the reading limits shows as unreadable, and the other issues still show", async () => {
+  const { linear, refresh } = await setup();
+  linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
+  linear.post(linear.addIssue("TEAM-2", ["checkin"]), "q2", QUESTIONS);
+  const listComments = linear.listComments.bind(linear);
+  linear.listComments = async (issueId: string) => {
+    if (issueId === "uuid-TEAM-1") {
+      throw new LinearError("limit", "the issue has more than 1000 comments, so the plugin does not guess which questions are open");
+    }
+    return listComments(issueId);
+  };
+  const snapshot = await refresh();
+  assert.equal(snapshot.error, null);
+  assert.deepEqual(snapshot.issues.map((issue) => issue.identifier), ["TEAM-2"]);
+  assert.deepEqual(snapshot.issueErrors.map((failed) => failed.identifier), ["TEAM-1"]);
+  assert.match(snapshot.issueErrors[0]!.message, /does not guess/);
+});
+
 test("a failed poll keeps the last questions and reports the error", async () => {
   const { linear, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
