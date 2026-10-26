@@ -461,6 +461,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const issue = await linear.getIssue(issueRef);
         if (issue === null) throw new AnswerRefusal("not_found", `Linear has no issue ${issueRef}.`);
         if (issue.teamKey !== teamKey) throw new AnswerRefusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
+        if (issue.state !== null && (issue.state.type === "completed" || issue.state.type === "canceled")) {
+          throw new AnswerRefusal("conflict", `${issue.identifier} is ${issue.state.type}, so it takes no answer.`);
+        }
         const kind = issueKind(issue);
         const blocks = issue.labels.some((label) => label.name === CHECKIN_LABEL || label.name === DECISION_LABEL)
           ? openBlocks(kind, await linear.listComments(issue.id))

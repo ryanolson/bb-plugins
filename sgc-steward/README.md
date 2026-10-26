@@ -68,7 +68,7 @@ A picked option gives its letter and its text, and a note goes on the next line.
 
 ## How it works
 
-A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. When Linear returns comments newest first, it stops at the first unsigned comment. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress instead of waiting for it. Each block has a revision, a hash of its questions and options. Before it posts, it reads the issue again and refuses when the open blocks or their revisions changed, so an answer never closes a question you did not see.
+A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. When Linear returns comments newest first, it stops at the first unsigned comment. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress instead of waiting for it. Each block has a revision, a hash of its questions and options. Before it posts, it reads the issue again. It refuses when the open blocks or their revisions changed, or when the issue is completed or canceled, so an answer never closes a question you did not see.
 
 ## Notifications
 

@@ -19,6 +19,8 @@ export interface LinearIssue {
   url: string;
   updatedAt: string;
   teamKey: string;
+  /** The workflow state's type: triage, backlog, unstarted, started, completed, or canceled. */
+  state: { type: string } | null;
   labels: Array<{ id: string; name: string }>;
 }
 
@@ -72,7 +74,7 @@ export function redact(text: string, secrets: readonly string[] = []): string {
 }
 
 // Nested page sizes stay small: Linear limits query complexity.
-const ISSUE_FIELDS = `id identifier title url updatedAt team { key } labels(first: 50) { nodes { id name } }`;
+const ISSUE_FIELDS = `id identifier title url updatedAt team { key } state { type } labels(first: 50) { nodes { id name } }`;
 
 export const ISSUES_QUERY = `query SgcQuestionIssues($teamKey: String!, $labels: [String!]!, $after: String) {
   issues(
@@ -122,6 +124,7 @@ interface IssueNode {
   url: string;
   updatedAt: string;
   team: { key: string } | null;
+  state: { type: string } | null;
   labels: { nodes: Array<{ id: string; name: string }> };
 }
 
@@ -173,6 +176,7 @@ function toIssue(node: IssueNode): LinearIssue {
     url: node.url,
     updatedAt: node.updatedAt,
     teamKey: node.team?.key ?? "",
+    state: node.state === null ? null : { type: node.state.type },
     labels: node.labels.nodes.map((label) => ({ id: label.id, name: label.name })),
   };
 }

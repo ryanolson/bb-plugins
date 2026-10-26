@@ -114,6 +114,7 @@ test("question issues: one team, both labels, open states, every page", async ()
     url: `https://linear.example/${id}`,
     updatedAt: "2026-01-05T10:00:00.000Z",
     team: { key: "TEAM" },
+    state: { type: id === "2" ? "unstarted" : "started" },
     labels: { nodes: labels.map((name) => ({ id: `label-${name}`, name })) },
   });
   const { calls, client } = fakeLinear([
@@ -128,6 +129,7 @@ test("question issues: one team, both labels, open states, every page", async ()
       ["TEAM-2", ["needs-decision", "area"]],
     ],
   );
+  assert.deepEqual(issues.map((found) => found.state), [{ type: "started" }, { type: "unstarted" }]);
   assert.equal(calls[0]?.url, "https://api.linear.app/graphql");
   assert.equal(calls[0]?.headers.authorization, KEY);
   assert.deepEqual(calls[0]?.variables, { teamKey: "TEAM", labels: ["checkin", "needs-decision"], after: null });
