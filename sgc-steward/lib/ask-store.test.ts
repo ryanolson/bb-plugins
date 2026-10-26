@@ -38,30 +38,38 @@ test("ids look like bbq_ and differ", () => {
   for (const id of ids) assert.match(id, /^bbq_[a-z0-9]{10}$/);
 });
 
-test("open questions list oldest first, with counts per thread and in all", () => {
+test("open questions list oldest first", () => {
   const { store } = open();
-  store.insert(ask("bbq_1"), false);
-  store.insert(ask("bbq_2", { threadId: "thr_b" }), false);
-  store.insert(ask("bbq_3"), false);
+  store.admit(ask("bbq_1"), false);
+  store.admit(ask("bbq_2", { threadId: "thr_b" }), false);
+  store.admit(ask("bbq_3"), false);
   assert.deepEqual(store.listOpen().map((row) => row.id), ["bbq_1", "bbq_2", "bbq_3"]);
-  assert.deepEqual(store.counts("thr_a"), { thread: 2, total: 3 });
   assert.deepEqual(store.get("bbq_2")?.options.map((option) => option.letter), ["A", "B"]);
   assert.equal(store.get("bbq_9"), null);
 });
 
-test("the same open question from the same thread is found again", () => {
+test("the same open question from the same thread is stored once", () => {
   const { store } = open();
   const first = ask("bbq_1", { issue: "TEAM-1" });
-  store.insert(first, false);
-  assert.equal(store.findOpen(first.threadId, first.question, first.options, first.issue), "bbq_1");
-  assert.equal(store.findOpen("thr_b", first.question, first.options, first.issue), null);
-  assert.equal(store.findOpen(first.threadId, first.question, first.options, null), null);
-  assert.equal(store.findOpen(first.threadId, first.question, first.options.slice(0, 1), first.issue), null);
+  assert.deepEqual(store.admit(first, false), { kind: "asked", id: "bbq_1" });
+  assert.deepEqual(store.admit({ ...first, id: "bbq_2" }, false), { kind: "existing", id: "bbq_1" });
+  assert.equal(store.admit({ ...first, id: "bbq_3", threadId: "thr_b" }, false).kind, "asked");
+  assert.equal(store.admit({ ...first, id: "bbq_4", issue: null }, false).kind, "asked");
+  assert.equal(store.admit({ ...first, id: "bbq_5", options: first.options.slice(0, 1) }, false).kind, "asked");
+});
+
+test("a full cap refuses a new question, but a repeat still gets its id", () => {
+  const { store } = open();
+  for (let n = 1; n <= 10; n += 1) store.admit(ask(`bbq_a${n}`), false);
+  assert.deepEqual(store.admit(ask("bbq_a11"), false), { kind: "full", scope: "thread", open: 10 });
+  assert.deepEqual(store.admit({ ...ask("bbq_x"), question: "Question bbq_a3?" }, false), { kind: "existing", id: "bbq_a3" });
+  for (let n = 11; n <= 50; n += 1) store.admit(ask(`bbq_b${n}`, { threadId: `thr_${Math.floor(n / 10)}` }), false);
+  assert.deepEqual(store.admit(ask("bbq_c", { threadId: "thr_new" }), false), { kind: "full", scope: "total", open: 50 });
 });
 
 test("only the asking thread withdraws, and only an open question", () => {
   const { store } = open();
-  store.insert(ask("bbq_1"), false);
+  store.admit(ask("bbq_1"), false);
   assert.equal(store.withdraw("bbq_1", "thr_b"), "not_yours");
   assert.equal(store.withdraw("bbq_9", "thr_a"), "not_found");
   assert.equal(store.withdraw("bbq_1", "thr_a"), "withdrawn");
@@ -72,7 +80,7 @@ test("only the asking thread withdraws, and only an open question", () => {
 
 test("an answer is saved once, with its delivery and its record, in one step", () => {
   const { store } = open();
-  store.insert(ask("bbq_1", { issue: "TEAM-1" }), false);
+  store.admit(ask("bbq_1", { issue: "TEAM-1" }), false);
   assert.equal(store.answer("bbq_1", { option: "B", text: "Wait." }, { message: "delivered text", label: "bbq_1" }, { issue: "TEAM-1", body: "record" }), "answered");
   const row = store.get("bbq_1")!;
   assert.equal(row.state, "answered");
@@ -131,7 +139,7 @@ test("a delivery is kept once per source, reference, and thread, and records its
 
 test("records that did not post are listed until they do", () => {
   const { store } = open();
-  store.insert(ask("bbq_1", { issue: "TEAM-1" }), false);
+  store.admit(ask("bbq_1", { issue: "TEAM-1" }), false);
   store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, { issue: "TEAM-1", body: "record" });
   store.markRecord("bbq_1", { ok: false, error: "no key" });
   assert.deepEqual(store.unposted().map((row) => [row.askId, row.state, row.error, row.attempts]), [["bbq_1", "failed", "no key", 1]]);
@@ -142,9 +150,9 @@ test("records that did not post are listed until they do", () => {
 
 test("each open question is handed out for a notification once", () => {
   const { store } = open();
-  store.insert(ask("bbq_1"), false);
-  store.insert(ask("bbq_2"), true);
-  store.insert(ask("bbq_3"), false);
+  store.admit(ask("bbq_1"), false);
+  store.admit(ask("bbq_2"), true);
+  store.admit(ask("bbq_3"), false);
   store.withdraw("bbq_3", "thr_a");
   assert.deepEqual(store.claim().map((row) => row.id), ["bbq_1"]);
   assert.deepEqual(store.claim(), []);
@@ -155,7 +163,7 @@ test("questions and their deliveries survive closing and reopening the database"
   try {
     const path = join(dir, "data.db");
     const first = open(path);
-    first.store.insert(ask("bbq_1"), false);
+    first.store.admit(ask("bbq_1"), false);
     first.store.hold(ANSWER, ["thr_a"]);
     first.store.hold({ ...ANSWER, ref: "c-2" }, ["thr_a"]);
     first.store.release("c-2");

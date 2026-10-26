@@ -5,7 +5,7 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { Ask, AskAnswer, AskOption } from "./asks.ts";
+import { ASK_LIMITS, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
 
 /** Appended after the plugin's earlier migrations; never reorder or edit. */
 export const ASK_MIGRATIONS: readonly string[] = [
@@ -112,6 +112,9 @@ export interface RecordRow {
 
 export type Outcome = { ok: true } | { ok: false; error: string };
 
+/** What happened to an asked question: stored, already open, or refused at a cap. */
+export type Admission = { kind: "asked" | "existing"; id: string } | { kind: "full"; scope: "thread" | "total"; open: number };
+
 function token(bytes: number): string {
   return [...randomBytes(bytes)].map((byte) => (byte % 36).toString(36)).join("");
 }
@@ -214,27 +217,30 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
   );
 
   return {
-    /** The id of an open question with the same thread, text, options, and issue. */
-    findOpen(threadId: string, question: string, options: readonly AskOption[], issue: string | null): string | null {
-      const row = db
-        .prepare("SELECT id FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND options = ? AND issue IS ?")
-        .get(threadId, question, JSON.stringify(options), issue) as { id: string } | undefined;
-      return row?.id ?? null;
-    },
-
-    counts(threadId: string): { thread: number; total: number } {
-      const row = db
-        .prepare("SELECT COUNT(*) AS total, SUM(thread_id = ?) AS thread FROM asks WHERE state = 'open'")
-        .get(threadId) as { total: number; thread: number | null };
-      return { thread: row.thread ?? 0, total: row.total };
-    },
-
-    /** `notified` stores the question as already announced, when notifications are off. */
-    insert(ask: Ask, notified: boolean): void {
-      db.prepare(
-        `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
-      ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, ask.askedAt, notified ? now() : null);
+    /**
+     * Store a question, unless the same one is open from the same thread, or
+     * a cap is full. The checks and the insert are one transaction, so two
+     * asks at once cannot both pass them. A repeat at a cap still gets its
+     * id. `notified` stores the question as already announced, when
+     * notifications are off.
+     */
+    admit(ask: Ask, notified: boolean): Admission {
+      return db.transaction((): Admission => {
+        const same = db
+          .prepare("SELECT id FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND options = ? AND issue IS ?")
+          .get(ask.threadId, ask.question, JSON.stringify(ask.options), ask.issue) as { id: string } | undefined;
+        if (same !== undefined) return { kind: "existing", id: same.id };
+        const open = db
+          .prepare("SELECT COUNT(*) AS total, COALESCE(SUM(thread_id = ?), 0) AS thread FROM asks WHERE state = 'open'")
+          .get(ask.threadId) as { total: number; thread: number };
+        if (open.thread >= ASK_LIMITS.openPerThread) return { kind: "full", scope: "thread", open: open.thread };
+        if (open.total >= ASK_LIMITS.openTotal) return { kind: "full", scope: "total", open: open.total };
+        db.prepare(
+          `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+        ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, ask.askedAt, notified ? now() : null);
+        return { kind: "asked", id: ask.id };
+      })();
     },
 
     get(id: string): AskRow | null {

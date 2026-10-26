@@ -850,23 +850,18 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
                     : `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`,
                 };
               };
-              const existing = asks.findOpen(threadId, question, options, issue);
-              if (existing !== null) return reply(existing, true);
-              const counts = asks.counts(threadId);
-              if (counts.thread >= ASK_LIMITS.openPerThread) {
-                throw new PluginCliError(`${threadId} already has ${counts.thread} open questions.`, {
+              // Read everything first: no other ask may run between the checks and the insert.
+              const { notify } = await settings.get();
+              const admitted = asks.admit({ id: createAskId(), threadId, threadTitle, question, options, issue, askedAt: Date.now() }, !notify);
+              if (admitted.kind === "full") {
+                const thread = admitted.scope === "thread";
+                throw new PluginCliError(thread ? `${threadId} already has ${admitted.open} open questions.` : `${admitted.open} questions are already open.`, {
                   code: "too_many",
-                  hint: "Wait for answers, or withdraw one with `bb sgc withdraw <id>`.",
+                  hint: thread ? "Wait for answers, or withdraw one with `bb sgc withdraw <id>`." : "Wait for the owner to answer some.",
                 });
               }
-              if (counts.total >= ASK_LIMITS.openTotal) {
-                throw new PluginCliError(`${counts.total} questions are already open.`, { code: "too_many", hint: "Wait for the owner to answer some." });
-              }
-              const { notify } = await settings.get();
-              const id = createAskId();
-              asks.insert({ id, threadId, threadTitle, question, options, issue, askedAt: Date.now() }, !notify);
-              publish(notify ? 1 : 0);
-              return reply(id, false);
+              if (admitted.kind === "asked") publish(notify ? 1 : 0);
+              return reply(admitted.id, admitted.kind === "existing");
             },
           }),
           withdraw: cliCommand({
