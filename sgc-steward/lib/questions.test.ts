@@ -135,6 +135,50 @@ test("continuation lines join the question or option above them", () => {
   assert.equal(block.questions[1]?.text, "Next?");
 });
 
+test("the blank-line form in the README parses to the same questions", () => {
+  const spaced = [
+    "[agent:claude-code thr_test1] Questions 2026-01-05",
+    "",
+    "Context line one.",
+    "",
+    "Q1. Which scale do estimates use?",
+    "- A (recommended): Powers of two.",
+    "- B: Small, medium, large.",
+    "",
+    "Q2. Which project goes first?",
+    "- A: The router.",
+    "- B (recommended): The cells.",
+    "- C: Both, in rank order.",
+    "",
+    "Q3. Anything else?",
+  ].join("\n");
+  const tight = parsed(parseQuestionBlock(comment("c1", QUESTIONS), "checkin"));
+  const block = parsed(parseQuestionBlock(comment("c2", spaced), "checkin"));
+  assert.equal(block.date, "2026-01-05");
+  assert.equal(block.context, tight.context);
+  assert.deepEqual(block.questions, tight.questions);
+});
+
+test("a question that Linear folds into the option above it still parses", () => {
+  // A line right under a list item is a lazy continuation of that item, so
+  // Linear can store it indented.
+  const body = ["[agent:a thr_x] Questions 2026-01-05", "Q1. Ship?", "  - A: Yes.", "  - B: No.", "  Q2. Anything else?"].join("\n");
+  const block = parsed(parseQuestionBlock(comment("c", body), "checkin"));
+  assert.deepEqual(block.questions, [
+    {
+      number: 1,
+      text: "Ship?",
+      options: [
+        { letter: "A", text: "Yes.", recommended: false },
+        { letter: "B", text: "No.", recommended: false },
+      ],
+    },
+    { number: 2, text: "Anything else?", options: [] },
+  ]);
+  const unsignedHeader = ["[agent:a thr_x] Run 2026-01-05", "- A: an option-like line", "  Q1. Indented question?"].join("\n");
+  assert.equal(parsed(parseQuestionBlock(comment("c", unsignedHeader), "checkin")).questions[0]?.text, "Indented question?");
+});
+
 test("bullets before Q1 are context, not options", () => {
   const body = ["[agent:claude-code thr_x] Questions 2026-01-05", "- A: not an option yet", "Q1. Go?"].join("\n");
   const block = parsed(parseQuestionBlock(comment("c", body), "checkin"));

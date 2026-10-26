@@ -61,9 +61,11 @@ export type QuestionBlock =
 
 const SIGNATURE = /^\[agent:([^\s\]]+)(?:[ \t]+([^\s\]]+))?[ \t]*\]/;
 const HEADER = /^\s*Questions(?:\s+(\d{4}-\d{2}-\d{2}))?\s*$/i;
-const QUESTION_LINE = /^Q(\d+)\.\s+(.*)$/;
-const ANY_QUESTION_LINE = /^Q\d+\.\s/m;
-const OPTION_LINE = /^[-*+]\s+([A-Z])(?:\s*\(([^)]*)\))?:\s*(.*)$/;
+// Leading whitespace is allowed: Linear stores comments as rich text and can
+// write a line that sat right under a list item back indented inside it.
+const QUESTION_LINE = /^\s*Q(\d+)\.\s+(.*)$/;
+const ANY_QUESTION_LINE = /^\s*Q\d+\.\s/;
+const OPTION_LINE = /^\s*[-*+]\s+([A-Z])(?:\s*\(([^)]*)\))?:\s*(.*)$/;
 
 export function parseSignature(body: string): Signature | null {
   const text = body.trimStart();

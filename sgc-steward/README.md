@@ -17,17 +17,22 @@ The steward writes each set of questions as one signed comment:
 
 ```
 [agent:claude-code thr_abc123] Questions 2026-01-05
+
 Optional context goes before the first question.
+
 Q1. Which scale do estimates use?
 - A (recommended): Powers of two: 1, 2, 4, 8.
 - B: Small, medium, large.
+
 Q2. Which project goes first?
 - A: The router.
 - B (recommended): The cells.
+
 Q3. Anything else before the next run?
 ```
 
 - The first line is the signature, then `Questions` and the date.
+- A blank line follows the first line, the context, and each question's options. Linear stores comments as rich text, and a line right under an option can come back as part of that option.
 - Each question starts a line with `Q1.`, `Q2.`, and so on, in order.
 - Options follow their question as `- A:`, `- B:`, and so on, in order. `*` and `+` bullets also work.
 - At most one option per question is marked `(recommended)`. The page shows it first.

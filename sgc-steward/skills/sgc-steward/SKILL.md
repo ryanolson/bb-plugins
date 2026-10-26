@@ -13,13 +13,17 @@ Post each set of questions as one signed comment on the check-in issue:
 
 ```
 [agent:<tool> <your thread id>] Questions YYYY-MM-DD
+
 Optional context goes before the first question.
+
 Q1. <question>
 - A (recommended): <option>
 - B: <option>
+
 Q2. <question with no options; the owner types the answer>
 ```
 
+- Leave a blank line after the first line, after the context, and after each question's options. Linear stores comments as rich text and can fold a line that sits right under an option into that option.
 - Start each question on its own line with `Q1.`, `Q2.`, and so on, in order.
 - List options under their question as `- A:`, `- B:`, and so on, in order.
 - Mark at most one option per question `(recommended)`.
