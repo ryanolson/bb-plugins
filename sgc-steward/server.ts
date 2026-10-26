@@ -7,7 +7,6 @@
 // Linear runs under one lock, so a poll can never resurrect a block that an
 // answer just closed, and two answers to one issue cannot both post.
 import { posix } from "node:path";
-import { randomUUID } from "node:crypto";
 import {
   PluginCliError,
   cliCommand,
@@ -19,7 +18,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
-import { commentRole, composeAnswer, composeTextAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
+import { answerCommentId, commentRole, composeAnswer, composeTextAnswer, openBlocks, type BlockAnswer, type BlockRef, type IssueKind, type LinearComment, type QuestionBlock } from "./lib/questions.ts";
 
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
@@ -134,8 +133,6 @@ class AnswerRefusal extends Error {
 export interface SgcStewardOptions {
   /** Stand-in for Linear in tests. */
   createClient?: (apiKey: string) => LinearClient;
-  /** Id for each posted answer comment. */
-  newId?: () => string;
   /** Pause between label removal attempts. */
   retryDelayMs?: number;
 }
@@ -218,7 +215,6 @@ function formatSnapshot(snapshot: Snapshot): string {
 }
 
 export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
-  const newId = options.newId ?? randomUUID;
   const retryDelayMs = options.retryDelayMs ?? 1000;
   const makeClient = options.createClient ?? ((apiKey: string) => createLinearClient({ apiKey }));
 
@@ -414,15 +410,30 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return error instanceof LinearError && (error.kind === "network" || error.kind === "http" || error.kind === "timeout");
     }
 
-    /** Post once: after an unclear failure, look for our own comment id before trying again with it. */
+    /**
+     * Post an answer under the id derived from it. A comment with that id is
+     * this same answer, from an earlier try or submission, so finding one
+     * after a failure counts as success. Only an unclear failure is tried a
+     * second time, with the same id.
+     */
     async function postComment(linear: LinearClient, issueId: string, body: string): Promise<string> {
-      const commentId = newId();
+      const commentId = answerCommentId(issueId, body);
+      const landed = () =>
+        linear.listComments(issueId).then(
+          (comments) => comments.some((comment) => comment.id === commentId),
+          () => false,
+        );
       try {
         return await linear.createComment({ issueId, body, commentId });
       } catch (error) {
+        if (await landed()) return commentId;
         if (!unclear(error)) throw error;
-        if ((await linear.listComments(issueId)).some((comment) => comment.id === commentId)) return commentId;
+      }
+      try {
         return await linear.createComment({ issueId, body, commentId });
+      } catch (error) {
+        if (await landed()) return commentId;
+        throw error;
       }
     }
 

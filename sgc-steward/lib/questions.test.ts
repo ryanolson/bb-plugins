@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  answerCommentId,
   answeredBlocks,
   commentRole,
   composeAnswer,
@@ -391,6 +392,16 @@ test("a typed answer from the CLI gets headers that name every block it answers"
   ]);
   assert.equal(commentRole({ body: both, author: "user" }), "answer");
   assert.throws(() => composeTextAnswer([block], " \n "), /the answer is empty/);
+});
+
+test("an answer's comment id comes from the issue and the answer, as a UUID v4", () => {
+  const body = "Answers to the questions of 2026-01-05 (block q1 rev 0123456789ab)\n\nQ1. A";
+  const id = answerCommentId("issue-1", body);
+  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(answerCommentId("issue-1", body), id, "a retry or a resubmission of the same answer reuses the id");
+  assert.notEqual(answerCommentId("issue-1", body.replace("Q1. A", "Q1. B")), id);
+  assert.notEqual(answerCommentId("issue-1", body.replace("rev 0123456789ab", "rev 0123456789ac")), id);
+  assert.notEqual(answerCommentId("issue-2", body), id);
 });
 
 test("composeAnswer refuses answers that do not fit the open blocks", () => {

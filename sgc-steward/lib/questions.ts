@@ -281,6 +281,21 @@ export function answerHeader(block: QuestionBlock, posted: boolean): string {
 }
 
 /**
+ * The Linear comment id for an answer, derived from the issue and the whole
+ * answer body, which names each block and revision it answers. A write that
+ * timed out can still commit later, so every retry and every resubmission of
+ * the same answer must reuse its id: Linear then keeps at most one copy.
+ * Shaped as a UUID v4, the form Linear accepts for a caller-chosen id.
+ */
+export function answerCommentId(issueId: string, body: string): string {
+  const bytes = createHash("sha256").update(`${issueId}\n${body}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Buffer.from(bytes).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
  * A typed answer, as `bb sgc answer` posts it: one header line per block it
  * answers, then the text as written.
  */

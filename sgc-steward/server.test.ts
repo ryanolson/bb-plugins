@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createSgcStewardPlugin, type Snapshot } from "./server.ts";
 import { createLinearClient, LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
-import type { LinearComment } from "./lib/questions.ts";
+import { answerCommentId, type LinearComment } from "./lib/questions.ts";
 
 const KEY = "lin_api_test_not_a_real_key";
 
@@ -109,13 +109,11 @@ class FakeLinear implements LinearClient {
 
 async function setup(options: { key?: string | null } = {}) {
   const linear = new FakeLinear();
-  let ids = 0;
   const plugin = createSgcStewardPlugin({
     createClient: (apiKey) => {
       linear.keys.push(apiKey);
       return linear;
     },
-    newId: () => `posted-${++ids}`,
     retryDelayMs: 0,
   });
   const settings: Record<string, string> = options.key === null ? { teamKey: "TEAM" } : { linearApiKey: options.key ?? KEY, teamKey: "TEAM" };
@@ -236,7 +234,9 @@ test("answering posts one unsigned comment numbered to match and closes the bloc
     issueId: "uuid-TEAM-1",
     blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null });
+  const posted = checkin.comments.at(-1)!;
+  assert.deepEqual(result, { identifier: "TEAM-1", commentId: posted.id, labelRemoved: null, warning: null });
+  assert.equal(posted.id, answerCommentId("uuid-TEAM-1", posted.body), "the id comes from the answer");
   assert.equal(
     checkin.comments.at(-1)?.body,
     [`Answers to the questions of 2026-01-05 (block q1 rev ${revisionOf(shown, "q1")})`, "", "Q1. A: Powers of two.", "", "Q2. No answer."].join("\n"),
@@ -255,7 +255,7 @@ test("answering a needs-decision issue also removes the label", async () => {
     issueId: "uuid-TEAM-2",
     blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "Yes, use the org id." }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-2", commentId: "posted-1", labelRemoved: true, warning: null });
+  assert.deepEqual(result, { identifier: "TEAM-2", commentId: decision.comments.at(-1)!.id, labelRemoved: true, warning: null });
   assert.deepEqual(decision.labels, []);
   assert.equal(decision.comments.at(-1)!.body, `Answer to the question of 2026-01-05 (block d1 rev ${revisionOf(shown, "d1")})\n\nYes, use the org id.`);
 });
@@ -286,7 +286,7 @@ test("a removal whose response was lost is seen as done", async () => {
     issueId: "uuid-TEAM-2",
     blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [], text: "The org id." }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-2", commentId: "posted-1", labelRemoved: true, warning: null });
+  assert.deepEqual(result, { identifier: "TEAM-2", commentId: decision.comments.at(-1)!.id, labelRemoved: true, warning: null });
   assert.equal(linear.calls.filter((call) => call.startsWith("removeLabel")).length, 1);
 });
 
@@ -302,15 +302,74 @@ test("a post whose response was lost is found by its id and never posted twice",
       issueId: "uuid-TEAM-1",
       blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
     });
-    assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null }, fault);
+    const posted = checkin.comments.at(-1)!;
+    assert.deepEqual(result, { identifier: "TEAM-1", commentId: posted.id, labelRemoved: null, warning: null }, fault);
     assert.deepEqual(
       checkin.comments.map((comment) => comment.id),
-      ["q1", "posted-1"],
+      ["q1", posted.id],
       fault,
     );
     const posts = linear.calls.filter((call) => call.startsWith("createComment"));
-    assert.deepEqual(posts, fault === "lost" ? ["createComment uuid-TEAM-1 posted-1"] : ["createComment uuid-TEAM-1 posted-1", "createComment uuid-TEAM-1 posted-1"], fault);
+    const post = `createComment uuid-TEAM-1 ${posted.id}`;
+    assert.deepEqual(posts, fault === "lost" ? [post] : [post, post], fault);
   }
+});
+
+test("a resubmission that meets its own earlier write counts as posted, once", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const input = {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  };
+  const createComment = linear.createComment.bind(linear);
+  let pending: Parameters<typeof linear.createComment>[0] | null = null;
+  let timeouts = 2;
+  linear.createComment = async (args) => {
+    if (timeouts > 0) {
+      timeouts -= 1;
+      pending = args;
+      throw new LinearError("timeout", "Linear did not answer within 30 s.");
+    }
+    // The timed-out write commits just before this one reaches Linear.
+    if (pending !== null) {
+      await createComment(pending);
+      pending = null;
+    }
+    return createComment(args);
+  };
+  await rejection(harness.behavior.callRpc("questions.answer", input));
+  const result = (await harness.behavior.callRpc("questions.answer", input)) as { commentId: string; warning: string | null };
+  const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
+  assert.equal(answers.length, 1);
+  assert.equal(result.commentId, answers[0]!.id);
+  assert.equal(result.warning, null);
+});
+
+test("a second try that meets the first, late write counts as posted, once", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const createComment = linear.createComment.bind(linear);
+  let pending: Parameters<typeof linear.createComment>[0] | null = null;
+  linear.createComment = async (args) => {
+    if (pending === null) {
+      pending = args;
+      throw new LinearError("timeout", "Linear did not answer within 30 s.");
+    }
+    // The first write lands after the lookup and before the second try.
+    await createComment(pending);
+    return createComment(args);
+  };
+  const result = (await harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  })) as { commentId: string };
+  const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
+  assert.deepEqual(answers.map((comment) => comment.id), [result.commentId]);
 });
 
 test("an answer is refused when the questions changed or were already answered", async () => {
@@ -486,7 +545,7 @@ test("an answer stops a stalled poll instead of waiting behind it, and the polle
     issueId: issue.id,
     blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
   });
-  assert.deepEqual(result, { identifier: "TEAM-1", commentId: "posted-1", labelRemoved: null, warning: null });
+  assert.deepEqual(result, { identifier: "TEAM-1", commentId: issue.comments.at(-1)!.id, labelRemoved: null, warning: null });
   for (let attempt = 0; attempt < 200 && linear.calls.filter((call) => call === "listQuestionIssues TEAM").length < 2; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -810,4 +869,39 @@ test("review F8: changing the target in a block's context refuses a saved approv
     { caller: "panel", refused: true, posts: 0, decisionStillOpen: true },
     { caller: "cli", refused: true, posts: 0, decisionStillOpen: true },
   ]);
+});
+
+test("review F9: retrying an unclear answer cannot create a second comment while the first write is pending", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const input = {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  };
+  const createComment = linear.createComment.bind(linear);
+  const pending = new Map<string, Parameters<typeof linear.createComment>[0]>();
+  let timeouts = 2;
+  linear.createComment = async (args) => {
+    if (timeouts > 0) {
+      timeouts -= 1;
+      // A client deadline ends the wait, not the server's pending mutation.
+      pending.set(args.commentId, args);
+      throw new LinearError("timeout", "Linear did not answer within 30 s.");
+    }
+    return createComment(args);
+  };
+
+  const first = await rejection(harness.behavior.callRpc("questions.answer", input));
+  assert.match(first.message, /did not answer within/);
+  assert.equal(pending.size, 1, "the internal retry correctly reuses its comment id");
+  assert.equal(issue.comments.length, 1, "the timed-out write has not committed or become visible yet");
+
+  await harness.behavior.callRpc("questions.answer", input).catch(() => undefined);
+  for (const args of pending.values()) {
+    if (!issue.comments.some((comment) => comment.id === args.commentId)) await createComment(args);
+  }
+  const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
+  assert.equal(answers.length, 1, `retrying while the original mutation was pending posted ${answers.map((comment) => comment.id).join(", ")}`);
 });
