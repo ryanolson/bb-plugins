@@ -846,3 +846,44 @@ test("review F9: retrying an unclear answer cannot create a second comment while
   const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
   assert.equal(answers.length, 1, `retrying while the original mutation was pending posted ${answers.map((comment) => comment.id).join(", ")}`);
 });
+
+test("review F10: an answer also bypasses a poll already waiting for the lock", { skip: "F10: stopping the active poll leaves queued polls ahead of the answer, holding its lock" }, async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const list = linear.listQuestionIssues.bind(linear);
+  let started!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+  let queuedStarted!: () => void;
+  const queuedPollStarted = new Promise<"queued poll">((resolve) => { queuedStarted = () => resolve("queued poll"); });
+  let releaseQueued!: () => void;
+  const queuedCanFinish = new Promise<void>((resolve) => { releaseQueued = resolve; });
+  let count = 0;
+  linear.listQuestionIssues = async (team, signal?: AbortSignal) => {
+    count += 1;
+    if (count === 1) {
+      started();
+      return new Promise<LinearIssue[]>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new LinearError("aborted", "stopped")), { once: true });
+      });
+    }
+    if (count === 2) {
+      queuedStarted();
+      await queuedCanFinish;
+    }
+    return list(team);
+  };
+  const activePoll = refresh();
+  await firstStarted;
+  const queuedPoll = refresh();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const answer = harness.behavior.callRpc("questions.answer", {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  });
+  const next = await Promise.race([queuedPollStarted, answer.then(() => "answer" as const)]);
+  releaseQueued();
+  await Promise.all([activePoll, queuedPoll, answer]);
+  assert.equal(next, "answer", "the queued poll starts a new request and holds the answer until that request finishes");
+});
