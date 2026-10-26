@@ -346,3 +346,13 @@ test("queue review F12: a restart after posting a Linear answer keeps its unsent
   assert.deepEqual(after.issues, [], "the posted answer closed its question block");
   assert.deepEqual(after.undelivered.map((row) => row.threadId), ["thr_test1"], "the unsent answer must remain available for manual delivery");
 });
+
+test("queue review F13: a caller cannot withdraw another thread's question through --thread", { skip: "F13: --thread bypasses the withdrawal ownership check" }, async () => {
+  const { harness } = await setup();
+  const id = await askId(harness, ["--question", "Keep this question open?"], "thr_asker");
+  const ordinary = await harness.behavior.runCli(["withdraw", id], { threadId: "thr_other" });
+  assert.equal(ordinary.exitCode, 1, "a different calling thread is refused without the override");
+  const forged = await harness.behavior.runCli(["withdraw", id, "--thread", "thr_asker"], { threadId: "thr_other" });
+  assert.equal(forged.exitCode, 1, "--thread must not replace the known calling thread");
+  assert.deepEqual((await list(harness)).asks.map((row) => row.id), [id]);
+});
