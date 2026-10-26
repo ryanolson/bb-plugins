@@ -198,18 +198,26 @@ export interface BlockRef {
 
 const ANSWER_HEADER = /^\s*Answers? to the questions? of /;
 const BLOCK_REFERENCE = /\(block ([^\s)]+) rev ([0-9a-f]{12})\)/g;
+/** The first words of the record of an answered bb question. */
+export const RECORD_HEADER = "Answer to bb question";
 
 /**
- * The blocks an answer names in its header lines, or null for a plain answer
- * that names none.
+ * The blocks a plugin answer names in its header lines, or null for a plain
+ * answer, which names none and so closes every block before it. The record of
+ * a bb question is a plugin answer that names no block: it closes nothing.
  */
 export function answeredBlocks(body: string): BlockRef[] | null {
   const refs: BlockRef[] = [];
+  let pluginAnswer = false;
   for (const line of body.replace(/\r\n?/g, "\n").split("\n")) {
+    if (line.trimStart().startsWith(`${RECORD_HEADER} `)) pluginAnswer = true;
     if (!ANSWER_HEADER.test(line)) continue;
-    for (const match of line.matchAll(BLOCK_REFERENCE)) refs.push({ blockId: match[1]!, revision: match[2]! });
+    for (const match of line.matchAll(BLOCK_REFERENCE)) {
+      refs.push({ blockId: match[1]!, revision: match[2]! });
+      pluginAnswer = true;
+    }
   }
-  return refs.length === 0 ? null : refs;
+  return pluginAnswer ? refs : null;
 }
 
 /**

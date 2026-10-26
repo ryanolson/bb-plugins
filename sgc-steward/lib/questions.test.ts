@@ -301,6 +301,18 @@ test("an answer that names its blocks closes only those blocks, at their revisio
   assert.equal(answeredBlocks(mention.body), null, "only answer header lines name blocks");
 });
 
+test("a record of a bb question answers no Linear block", () => {
+  const record = ["Answer to bb question bbq_test1 from thread thr_test9 (asked 2026-01-05 10:00 UTC)", "", "Question:", "Ship it?", "", "Answer:", "A: Yes."].join("\n");
+  assert.equal(commentRole({ body: record, author: "user" }), "answer");
+  assert.deepEqual(answeredBlocks(record), [], "a plugin answer that names no blocks");
+
+  const block = comment("q1", QUESTIONS);
+  assert.deepEqual(openBlocks("checkin", [block, comment("r1", record)]).map((open) => open.commentId), ["q1"]);
+  const decision = comment("d1", "[agent:codex thr_x] Which tenant key?");
+  assert.deepEqual(openBlocks("needs-decision", [decision, comment("r2", record)]).map((open) => open.commentId), ["d1"]);
+  assert.deepEqual(openBlocks("checkin", [comment("q2", QUESTIONS), comment("a1", "Go with A.")]), [], "a plain answer still closes every block");
+});
+
 test("a needs-decision question stays open when the answer names an older block", () => {
   const older = comment("d1", "[agent:codex thr_x] Which tenant key?");
   const newer = comment("d2", "[agent:codex thr_x] May I drop the old table?");
