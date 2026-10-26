@@ -811,3 +811,38 @@ test("review F8: changing the target in a block's context refuses a saved approv
     { caller: "cli", refused: true, posts: 0, decisionStillOpen: true },
   ]);
 });
+
+test("review F9: retrying an unclear answer cannot create a second comment while the first write is pending", { skip: "F9: an RPC retry chooses a new comment id while a timed-out mutation can still commit" }, async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["needs-decision"]);
+  linear.post(issue, "q1", QUESTIONS);
+  const shown = await refresh();
+  const input = {
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }],
+  };
+  const createComment = linear.createComment.bind(linear);
+  const pending = new Map<string, Parameters<typeof linear.createComment>[0]>();
+  let timeouts = 2;
+  linear.createComment = async (args) => {
+    if (timeouts > 0) {
+      timeouts -= 1;
+      // A client deadline ends the wait, not the server's pending mutation.
+      pending.set(args.commentId, args);
+      throw new LinearError("timeout", "Linear did not answer within 30 s.");
+    }
+    return createComment(args);
+  };
+
+  const first = await rejection(harness.behavior.callRpc("questions.answer", input));
+  assert.match(first.message, /did not answer within/);
+  assert.equal(pending.size, 1, "the internal retry correctly reuses its comment id");
+  assert.equal(issue.comments.length, 1, "the timed-out write has not committed or become visible yet");
+
+  await harness.behavior.callRpc("questions.answer", input).catch(() => undefined);
+  for (const args of pending.values()) {
+    if (!issue.comments.some((comment) => comment.id === args.commentId)) await createComment(args);
+  }
+  const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
+  assert.equal(answers.length, 1, `retrying while the original mutation was pending posted ${answers.map((comment) => comment.id).join(", ")}`);
+});
