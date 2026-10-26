@@ -872,11 +872,15 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           withdraw: cliCommand({
             summary: "Withdraw a question the calling thread asked",
             positionals: [{ name: "id", description: "Question id, like bbq_k3x9mz2p4q", required: true }],
-            options: { thread: { type: "string", description: "The asking thread; default the calling thread" }, json },
+            options: { thread: { type: "string", description: "The asking thread, when not called from a thread" }, json },
             async run(input, ctx) {
-              const threadId = input.options.thread ?? ctx.threadId;
+              // A thread withdraws only its own questions; --thread is for the owner's terminal.
+              const threadId = ctx.threadId ?? input.options.thread;
               if (threadId === undefined) {
                 throw new PluginCliError("No asking thread.", { code: "no_thread", hint: "Run it from the thread that asked, or pass --thread <id>." });
+              }
+              if (input.options.thread !== undefined && input.options.thread !== threadId) {
+                throw new PluginCliError(`${threadId} cannot withdraw for ${input.options.thread}.`, { code: "forbidden", hint: "A thread withdraws only its own questions." });
               }
               const id = input.positionals.id;
               const outcome = asks.withdraw(id, threadId);

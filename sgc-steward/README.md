@@ -101,7 +101,7 @@ bb sgc key --api-key-stdin
 ```
 
 - `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. The same open question from the same thread returns its id again. A thread can have 10 open questions, and all threads 50.
-- `withdraw` closes a question. Only the thread that asked it can withdraw it.
+- `withdraw` closes a question. Only the thread that asked it can withdraw it. `--thread` names that thread when you run the command outside a thread.
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name every open block of the issue, as `questions` prints it. It refuses when the open blocks or their revisions differ, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.

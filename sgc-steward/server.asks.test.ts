@@ -112,6 +112,17 @@ test("only the asking thread withdraws its question, and only while it is open",
   assert.equal(answered.code, "conflict");
 });
 
+test("outside a thread, --thread names the asking thread; inside one, it must name the caller", async () => {
+  const { harness } = await setup();
+  const first = await askId(harness, ["--question", "First?"]);
+  const second = await askId(harness, ["--question", "Second?"]);
+  const own = await harness.behavior.runCli(["withdraw", first, "--thread", "thr_asker"], { threadId: "thr_asker" });
+  assert.equal(own.exitCode, 0, own.stderr);
+  const terminal = await harness.behavior.runCli(["withdraw", second, "--thread", "thr_asker"], {});
+  assert.equal(terminal.exitCode, 0, terminal.stderr);
+  assert.deepEqual((await list(harness)).asks, []);
+});
+
 test("an answer goes to the asking thread as a queued message quoting the question and the answer", async () => {
   const { harness, sends } = await setup();
   const id = await askId(harness, ["--question", "Ship it?\nIt touches `the router`.", "--option", "Yes.", "--option", "No."]);
@@ -426,4 +437,14 @@ test("queue review F12: a restart after posting a Linear answer keeps its unsent
   await replacement.harness.lifecycle.dispose();
   assert.deepEqual(after.issues, [], "the posted answer closed its question block");
   assert.deepEqual(after.undelivered.map((row) => row.threadId), ["thr_test1"], "the unsent answer must remain available for manual delivery");
+});
+
+test("queue review F13: a caller cannot withdraw another thread's question through --thread", async () => {
+  const { harness } = await setup();
+  const id = await askId(harness, ["--question", "Keep this question open?"], "thr_asker");
+  const ordinary = await harness.behavior.runCli(["withdraw", id], { threadId: "thr_other" });
+  assert.equal(ordinary.exitCode, 1, "a different calling thread is refused without the override");
+  const forged = await harness.behavior.runCli(["withdraw", id, "--thread", "thr_asker"], { threadId: "thr_other" });
+  assert.equal(forged.exitCode, 1, "--thread must not replace the known calling thread");
+  assert.deepEqual((await list(harness)).asks.map((row) => row.id), [id]);
 });

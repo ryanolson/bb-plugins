@@ -20,7 +20,7 @@ bb sgc ask --question "<question>" --option "<your recommendation>" --option "<a
 - Put your recommendation first: option A is marked recommended. Pass `--recommend B` to mark another, or `--recommend none`.
 - Use `--question-file <file>` for a long question.
 - Name an issue with `--issue` when the answer is a ruling that belongs in Linear. The plugin then posts a comment there that records the question and the answer.
-- Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`.
+- Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`, from the thread that asked it.
 - A thread can have 10 open questions at a time.
 
 ## Asking on a Linear check-in issue
