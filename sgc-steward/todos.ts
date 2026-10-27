@@ -57,12 +57,13 @@ export interface TodoDeps {
   log(text: string): void;
 }
 
-/** What undoing one Done puts back. */
+/** What undoing one Done puts back, and what the Done left, so Undo can tell that the issue changed since. */
 interface Undo {
   issueId: string;
   identifier: string;
   title: string;
   restore: { change: TodoAction["change"]; id: string };
+  after: { stateId: string | null; labelIds: string[] };
   at: number;
 }
 
@@ -88,6 +89,21 @@ function refusal(error: unknown): never {
 /** A Done takes the issue off the list, and an Undo puts it back. Anything else that does the same counts too. */
 function landed(action: Pick<TodoAction, "kind">, issue: TodoIssue): boolean {
   return action.kind === "done" ? !isTodo(issue) : isTodo(issue);
+}
+
+/** The state and labels a Done leaves on the issue it reads, as Undo expects to find them. */
+function leftBy(action: Pick<TodoAction, "change" | "targetId">, issue: TodoIssue): Undo["after"] {
+  const labelIds = issue.labels.map((label) => label.id);
+  return action.change === "state"
+    ? { stateId: action.targetId, labelIds }
+    : { stateId: issue.state?.id ?? null, labelIds: labelIds.filter((id) => id !== action.targetId) };
+}
+
+/** Whether the issue is as its Done left it: the same state and the same labels. */
+function unchangedSince(issue: TodoIssue, after: Undo["after"]): boolean {
+  const labels = issue.labels.map((label) => label.id).sort();
+  const expected = [...after.labelIds].sort();
+  return (issue.state?.id ?? null) === after.stateId && labels.length === expected.length && labels.every((id, index) => id === expected[index]);
 }
 
 function messageLabel(action: Pick<TodoAction, "kind" | "identifier">): string {
@@ -259,7 +275,7 @@ export function createTodos(deps: TodoDeps) {
       throw new Refusal("invalid", message(error));
     }
     const steward = await deps.steward();
-    const { action, released, others, resumed } = await deps.write(async (linear, teamKey) => {
+    const { action, released, others, resumed, after } = await deps.write(async (linear, teamKey) => {
       const issue = await linear.getTodoIssue(issueRef);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${issueRef}.`);
       if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
@@ -298,13 +314,14 @@ export function createTodos(deps: TodoDeps) {
       const released = await carry(linear, action, issue);
       todos = todos.filter((todo) => todo.id !== issue.id);
       deps.publish();
-      return { action, released, others, resumed };
+      return { action, released, others, resumed, after: leftBy(action, issue) };
     });
     remember(action.id, {
       issueId: action.issueId,
       identifier: action.identifier,
       title: action.title,
       restore: { change: action.change, id: action.restoreId! },
+      after,
       at: Date.now(),
     });
     const told = await sendAll(released);
@@ -330,7 +347,10 @@ export function createTodos(deps: TodoDeps) {
         store.attempt(action.id);
         holdFor(action, steward);
       } else {
-        if (isTodo(issue)) throw new Refusal("conflict", `${issue.identifier} is on the todo list already.`);
+        // Undo reverses its own Done only: a later change by anyone else, a cancellation say, stays.
+        if (!unchangedSince(issue, undo.after)) {
+          throw new Refusal("conflict", `${issue.identifier} changed after it was marked done, so Undo leaves it alone. Reopen it in Linear.`);
+        }
         const begun: Omit<TodoAction, "attemptedAt"> = {
           id: randomUUID(),
           kind: "reopen",
