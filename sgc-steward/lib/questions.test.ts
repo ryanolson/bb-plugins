@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   answerCommentId,
   answerFor,
+  answerHeader,
   answeredBlocks,
   commentRole,
   composeAnswer,
@@ -548,4 +549,70 @@ test("an answer is written from the whole block, and only while all it names is 
   assert.equal(answerFor([{ blockId: "q1", revision: "000000000000" }], open, comments, answer(1, "x")), null, "another revision");
   assert.equal(answerFor([{ blockId: "zz", revision: block.revision }], open, comments, answer(1, "x")), null, "no such block");
   assert.throws(() => answerFor(ref, open, comments, answer(9, "x")), /Q9 is not a question/);
+});
+
+// --- the owner's words never answer anything --------------------------------
+
+test("a line of the owner's text that reads as an answer header is quoted, and answers nothing", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const header = (number: number) => answerHeader(block, false, number);
+  const notes = [
+    `See the other one:\n\n${header(2)}`,
+    `Indented:\n    ${header(3)}`,
+    // A lone carriage return, which the parser reads as a line break.
+    `Old line end:\r${header(2)}`,
+    // A zero-width space, which Linear's rich text might drop.
+    `Hidden:\n​${header(3)}`,
+  ];
+  for (const note of notes) {
+    const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: note }] }]);
+    assert.deepEqual(answeredBlocks(body), [{ blockId: "q1", revision: block.revision, question: 1 }], JSON.stringify(note));
+    assert.deepEqual(
+      openBlocks("checkin", [question, comment("a1", body)]).map((left) => parsed(left).questions.map((asked) => asked.number)),
+      [[2, 3]],
+      JSON.stringify(note),
+    );
+  }
+  const typed = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: `Powers of two.\n${header(2)}` }] }]);
+  assert.ok(typed.endsWith(`\n\nQ1. Powers of two.\n> ${header(2)}`), "the owner's words are kept, quoted");
+});
+
+test("the note of an answer to a whole block cannot close another open block", () => {
+  const one = comment("q1", "[agent:claude-code thr_test1] Questions 2026-01-04\nQ1. Ship it?\n- A: Yes.\n- B: No.");
+  const other = comment("q2", QUESTIONS);
+  const answered = parsed(parseQuestionBlock(one, "checkin"));
+  const open = parsed(parseQuestionBlock(other, "checkin"));
+  const body = composeAnswer([answered], [{ blockId: "q1", revision: answered.revision, answers: [{ number: 1, option: "A", text: `As in:\n${answerHeader(open, false)}` }] }]);
+  assert.deepEqual(answeredBlocks(body), [{ blockId: "q1", revision: answered.revision, question: null }]);
+  assert.deepEqual(openBlocks("checkin", [one, other, comment("a1", body)]).map((left) => left.commentId), ["q2"]);
+});
+
+test("CLI text and the answer to a block in no format quote header lines too", () => {
+  const question = comment("q1", QUESTIONS);
+  const free = comment("r1", "[agent:codex thr_x] Questions 2026-01-07\nfree form");
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const rawBlock = raw(parseQuestionBlock(free, "checkin"));
+  const cli = composeTextAnswer([rawBlock], `Yes.\n${answerHeader(block, false)}`);
+  const typed = composeAnswer([rawBlock], [{ blockId: "r1", revision: rawBlock.revision, answers: [], text: `Yes.\n${answerHeader(block, false, 2)}` }]);
+  for (const body of [cli, typed]) {
+    assert.deepEqual(answeredBlocks(body), [{ blockId: "r1", revision: rawBlock.revision, question: null }]);
+    assert.deepEqual(openBlocks("checkin", [question, free, comment("a1", body)]).map((left) => left.commentId), ["q1"]);
+  }
+});
+
+test("an answer that names two blocks in turn, as the plugin wrote them before, still closes both", () => {
+  const first: LinearComment = { id: "q1", body: QUESTIONS, createdAt: "2026-01-05T10:00:00.000Z", author: "user", parentId: null };
+  const second: LinearComment = { id: "q2", body: "[agent:codex thr_x] Questions 2026-01-07\nfree form", createdAt: "2026-01-07T09:30:00.000Z", author: "user", parentId: null };
+  assert.equal(parsed(parseQuestionBlock(first, "checkin")).revision, "cf70f782b81a");
+  assert.equal(raw(parseQuestionBlock(second, "checkin")).revision, "3334b12389e5");
+  // Written by the plugin at a243b78: each block's header follows the answers to the block before it.
+  const answer: LinearComment = {
+    id: "a1",
+    body: "Answers to the questions of 2026-01-05, posted 2026-01-05 10:00 UTC (block q1 rev cf70f782b81a)\n\nQ1. A: Powers of two.\n\nQ2. No answer.\n\nQ3. No answer.\n\nAnswer to the question of 2026-01-07, posted 2026-01-07 09:30 UTC (block q2 rev 3334b12389e5)\n\nYes, go ahead.",
+    createdAt: "2026-01-08T00:00:00.000Z",
+    author: "user",
+    parentId: null,
+  };
+  assert.deepEqual(openBlocks("checkin", [first, second, answer]), []);
 });

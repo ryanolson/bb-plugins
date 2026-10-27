@@ -320,6 +320,37 @@ function postedAt(block: QuestionBlock): string {
 }
 
 /**
+ * The owner's own words for an answer, with every line that would read as an
+ * answer header quoted, so nothing the owner writes, fenced or not, can name
+ * a block or a question: only the headers the plugin writes do. Lines break
+ * where the parser breaks them, and a line counts with its invisible format
+ * characters taken out, in case Linear's rich text drops them.
+ */
+function ownWords(text: string): string {
+  return text
+    .replace(/\r\n?|[\u2028\u2029]/g, "\n")
+    .split("\n")
+    .map((line) => (ANSWER_HEADER.test(line.replace(/\p{Cf}/gu, "")) ? `> ${line}` : line))
+    .join("\n");
+}
+
+/**
+ * The body, once it names exactly what its writer meant to answer, no more
+ * and no fewer: a question closes only when it was submitted. Throws
+ * otherwise, so a gap in the quoting refuses the answer instead of closing a
+ * question nobody answered.
+ */
+function namingOnly(body: string, meant: readonly AnswerRef[]): string {
+  const key = (ref: AnswerRef) => `${ref.blockId}@${ref.revision}#${ref.question ?? "all"}`;
+  const named = (answeredBlocks(body) ?? []).map(key).sort();
+  const expected = meant.map(key).sort();
+  if (named.length !== expected.length || named.some((value, index) => value !== expected[index])) {
+    throw new Error("the answer text holds a line that reads as an answer header; reword it");
+  }
+  return body;
+}
+
+/**
  * The header line that names one block, or one question of it: its date,
  * and the comment id, revision, and question number that `answeredBlocks`
  * reads back. `posted` adds the time, which tells apart two blocks of the
@@ -425,7 +456,10 @@ export function postedBefore(
 export function composeTextAnswer(blocks: readonly QuestionBlock[], text: string): string {
   const body = text.trim();
   if (body === "") throw new Error("the answer is empty");
-  return `${blocks.map((block) => answerHeader(block, blocks.length > 1)).join("\n")}\n\n${body}`;
+  return namingOnly(
+    `${blocks.map((block) => answerHeader(block, blocks.length > 1)).join("\n")}\n\n${ownWords(body)}`,
+    blocks.map((block) => ({ blockId: block.commentId, revision: block.revision, question: null })),
+  );
 }
 
 /**
@@ -449,13 +483,15 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
   if (missing.length > 0) throw new Error(`missing answers for block ${missing.join(", ")}`);
 
   const posted = blocks.length > 1;
+  const meant: AnswerRef[] = [];
   const sections = blocks.map((block) => {
     const answer = byBlock.get(block.commentId)!;
     if (block.format === "raw") {
       if (answer.answers.length > 0) throw new Error(`block ${block.commentId} is not in the question format; answer it with text`);
       const text = answer.text?.trim() ?? "";
       if (text === "") throw new Error(`nothing to post for block ${block.commentId}: the answer is empty`);
-      return `${answerHeader(block, posted)}\n\n${text}`;
+      meant.push({ blockId: block.commentId, revision: block.revision, question: null });
+      return `${answerHeader(block, posted)}\n\n${ownWords(text)}`;
     }
     const byNumber = new Map<number, QuestionAnswer>();
     for (const item of answer.answers) {
@@ -475,16 +511,17 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
       const option = question.options.find((candidate) => candidate.letter === item?.option);
       if (option === undefined && note === "") continue;
       answered.push(question.number);
-      if (option === undefined) lines.push(`Q${question.number}. ${note}`);
+      if (option === undefined) lines.push(`Q${question.number}. ${ownWords(note)}`);
       else {
         const picked = `Q${question.number}. ${option.letter}: ${option.text.replace(/\n/g, " ")}`;
-        lines.push(note === "" ? picked : `${picked}\n${note}`);
+        lines.push(note === "" ? picked : `${picked}\n${ownWords(note)}`);
       }
     }
     if (answered.length === 0) throw new Error(`nothing to post for block ${block.commentId}: every answer is empty`);
-    const headers =
-      answered.length === block.questions.length ? [answerHeader(block, posted)] : answered.map((number) => answerHeader(block, posted, number));
+    const whole = answered.length === block.questions.length;
+    for (const number of whole ? [null] : answered) meant.push({ blockId: block.commentId, revision: block.revision, question: number });
+    const headers = whole ? [answerHeader(block, posted)] : answered.map((number) => answerHeader(block, posted, number));
     return [headers.join("\n"), ...lines].join("\n\n");
   });
-  return sections.join("\n\n");
+  return namingOnly(sections.join("\n\n"), meant);
 }

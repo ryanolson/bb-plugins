@@ -78,6 +78,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 ## Reading a Linear answer
 
 - An answer from the SGC Steward page or `bb sgc answer` names what it answers in its header lines. `(block <comment id> rev <revision>)` answers that whole block, at that revision. `(block <comment id> rev <revision>), Q2` answers only question 2 of it: the block stays open until each of its questions has an answer, in this comment or a later one. Ask again about any block it does not name.
+- A header line that starts with `>` is the owner's own text, quoted by the plugin. It answers nothing.
 - To see what is still open, run `bb sgc questions`. It lists only the questions that have no answer yet.
 - A comment that starts with `Answer to bb question` records the answer to a bb question, or its withdrawal. It answers no Linear block.
 - A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo done or open again. It answers no Linear block either.
