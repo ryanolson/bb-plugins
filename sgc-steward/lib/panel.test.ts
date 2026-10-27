@@ -2,19 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PANEL_TABS,
-  answerProgress,
   announcement,
   askAnswerInput,
   noticeTab,
   orderCards,
+  questionAnswerInput,
   questionBadge,
   sendsFor,
   tabBadges,
   tabOf,
   tabPath,
-  toAnswerBlocks,
   withDone,
-  type BlockDraft,
 } from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
 
@@ -31,59 +29,22 @@ const parsed = block(
 );
 const raw = block("q2", "[agent:codex thr_test2] Questions 2026-01-06\nfree form", "2026-01-06T09:30:00.000Z");
 
-test("the panel's drafts become the answer the server composes", () => {
-  const drafts: Record<string, BlockDraft> = {
-    q1: { options: { 1: "B" }, texts: { 1: "  ", 2: "Ship Friday." }, raw: "" },
-    q2: { options: {}, texts: {}, raw: "Yes." },
-  };
-  const blocks = toAnswerBlocks([parsed, raw], drafts);
-  assert.deepEqual(blocks, [
-    {
-      blockId: "q1",
-      revision: parsed.revision,
-      answers: [
-        { number: 1, option: "B", text: "  " },
-        { number: 2, option: null, text: "Ship Friday." },
-      ],
-    },
-    { blockId: "q2", revision: raw.revision, answers: [], text: "Yes." },
-  ]);
+test("one card's answer names its block, its revision, and its one question", () => {
+  assert.equal(questionAnswerInput("uuid-1", parsed, 2, { option: null, text: "  " }), null, "nothing picked or typed");
+  assert.deepEqual(questionAnswerInput("uuid-1", parsed, 1, { option: "B", text: "" }), {
+    issueId: "uuid-1",
+    blocks: [{ blockId: "q1", revision: parsed.revision, answers: [{ number: 1, option: "B", text: "" }] }],
+  });
+  assert.deepEqual(questionAnswerInput("uuid-1", raw, null, { option: null, text: "Yes." }), {
+    issueId: "uuid-1",
+    blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes." }],
+  });
+  const typed = questionAnswerInput("uuid-1", parsed, 2, { option: null, text: "Ship Friday." });
+  assert.ok(typed);
   assert.equal(
-    composeAnswer([parsed, raw], blocks),
-    [
-      `Answers to the questions of 2026-01-05, posted 2026-01-05 10:00 UTC (block q1 rev ${parsed.revision})`,
-      "",
-      "Q1. B: Sizes.",
-      "",
-      "Q2. Ship Friday.",
-      "",
-      `Answer to the question of 2026-01-06, posted 2026-01-06 09:30 UTC (block q2 rev ${raw.revision})`,
-      "",
-      "Yes.",
-    ].join("\n"),
-  );
-});
-
-test("a draft keeps the revision it was written against, so an edit since is refused", () => {
-  const edited = block(
-    "q1",
-    ["[agent:claude-code thr_test1] Questions 2026-01-05", "Q1. Scale?", "- A (recommended): Sizes.", "- B: Powers of two.", "Q2. Anything else?"].join("\n"),
-    "2026-01-05T10:00:00.000Z",
-  );
-  assert.notEqual(edited.revision, parsed.revision);
-  const drafts: Record<string, BlockDraft> = { q1: { options: { 1: "A" }, texts: {}, raw: "", revision: parsed.revision } };
-  const blocks = toAnswerBlocks([edited], drafts);
-  assert.equal(blocks[0]?.revision, parsed.revision, "the draft's revision, not the block's new one");
-  assert.throws(() => composeAnswer([edited], blocks), /changed after the answers were written/);
-  assert.equal(toAnswerBlocks([edited], {})[0]?.revision, edited.revision, "an untouched block sends its own revision");
-});
-
-test("untouched questions are left out, and progress counts what has an answer", () => {
-  assert.deepEqual(toAnswerBlocks([parsed], {}), [{ blockId: "q1", revision: parsed.revision, answers: [] }]);
-  assert.deepEqual(answerProgress([parsed, raw], {}), { answered: 0, total: 3 });
-  assert.deepEqual(
-    answerProgress([parsed, raw], { q1: { options: {}, texts: { 2: "x" }, raw: "" }, q2: { options: {}, texts: {}, raw: " " } }),
-    { answered: 1, total: 3 },
+    composeAnswer([parsed], typed.blocks),
+    `Answer to the questions of 2026-01-05 (block q1 rev ${parsed.revision}), Q2\n\nQ2. Ship Friday.`,
+    "the server names the question, and the block stays open for Q1",
   );
 });
 
@@ -106,7 +67,7 @@ test("one new question names its issue or its thread; several are summed up in o
   });
 });
 
-test("cards from Linear issues and bb questions come oldest first", () => {
+test("every open question is its own card, beside raw blocks and bb questions, oldest first", () => {
   const issues = [
     { id: "i2", blocks: [raw] },
     { id: "i1", blocks: [parsed, raw] },
@@ -115,10 +76,9 @@ test("cards from Linear issues and bb questions come oldest first", () => {
     { id: "bbq_late", askedAt: Date.parse("2026-01-07T00:00:00Z") },
     { id: "bbq_early", askedAt: Date.parse("2026-01-04T00:00:00Z") },
   ];
-  assert.deepEqual(
-    orderCards(issues, asks).map((card) => (card.kind === "issue" ? card.issue.id : card.ask.id)),
-    ["bbq_early", "i1", "i2", "bbq_late"],
-  );
+  const name = (card: ReturnType<typeof orderCards<(typeof issues)[number], (typeof asks)[number]>>[number]) =>
+    card.kind === "question" ? `${card.issue.id}:${card.block.commentId}:Q${card.question.number}` : card.kind === "raw" ? `${card.issue.id}:${card.block.commentId}` : card.ask.id;
+  assert.deepEqual(orderCards(issues, asks).map(name), ["bbq_early", "i1:q1:Q1", "i1:q1:Q2", "i2:q2", "i1:q2", "bbq_late"]);
 });
 
 test("a bb question's answer is a picked option, typed text, or both", () => {

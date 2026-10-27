@@ -23,21 +23,19 @@ import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, Rec
 import type { QuestionBlock } from "./lib/questions.ts";
 import {
   announcement,
-  answerProgress,
   askAnswerInput,
-  EMPTY_DRAFT,
   noticeTab,
   orderCards,
   PANEL_TABS,
+  questionAnswerInput,
   questionBadge,
   sendsFor,
   tabBadges,
   tabOf,
   tabPath,
-  toAnswerBlocks,
   withDone,
   type AskDraft,
-  type BlockDraft,
+  type Card,
   type PanelTab,
   type TabBadge,
 } from "./lib/panel.ts";
@@ -135,125 +133,79 @@ function BlockHeader({ block }: { block: QuestionBlock }) {
   );
 }
 
-function ParsedBlock({
-  block,
+/** Pick an option, type an answer, or both: the fields of every question card. */
+function AnswerFields({
+  name,
+  label,
+  options,
   draft,
   onChange,
 }: {
-  block: Extract<QuestionBlock, { format: "parsed" }>;
-  draft: BlockDraft;
-  onChange: (next: BlockDraft) => void;
+  name: string;
+  label: string;
+  options: ReadonlyArray<{ letter: string; text: string; recommended: boolean }>;
+  draft: AskDraft;
+  onChange: (next: AskDraft) => void;
 }) {
   return (
-    <div className="space-y-4">
-      <BlockHeader block={block} />
-      {block.context === "" ? null : <Markdown content={block.context} className="text-sm text-muted-foreground" />}
-      {block.questions.map((question) => {
-        const picked = draft.options[question.number];
-        const text = draft.texts[question.number] ?? "";
-        const name = `${block.commentId}-q${question.number}`;
-        return (
-          <fieldset key={question.number} className="space-y-2">
-            <legend className="flex w-full items-start gap-2 text-sm font-medium">
-              <span className="shrink-0">Q{question.number}.</span>
-              <Markdown content={question.text} className="min-w-0 flex-1" />
-            </legend>
-            {question.options.length === 0 ? null : (
-              <div className="space-y-1.5 pl-6">
-                {question.options.map((option) => (
-                  <label
-                    key={option.letter}
-                    className={cn(
-                      "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
-                      picked === option.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name={name}
-                      className="mt-0.5"
-                      checked={picked === option.letter}
-                      onChange={() => onChange({ ...draft, options: { ...draft.options, [question.number]: option.letter } })}
-                    />
-                    <span className="font-mono">{option.letter}</span>
-                    <span className="min-w-0 flex-1 whitespace-pre-wrap">{option.text}</span>
-                    {option.recommended ? (
-                      <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span>
-                    ) : null}
-                  </label>
-                ))}
-                {picked === undefined ? null : (
-                  <button
-                    type="button"
-                    className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                    onClick={() => {
-                      const options = { ...draft.options };
-                      delete options[question.number];
-                      onChange({ ...draft, options });
-                    }}
-                  >
-                    Clear choice
-                  </button>
-                )}
-              </div>
-            )}
-            <div className="pl-6">
-              <textarea
-                className={textareaClass()}
-                value={text}
-                aria-label={`Answer to Q${question.number}`}
-                placeholder={
-                  question.options.length === 0 ? "Type your answer" : picked === undefined ? "Or type your own answer" : "Add a note (optional)"
-                }
-                onChange={(event) => onChange({ ...draft, texts: { ...draft.texts, [question.number]: event.target.value } })}
-              />
-            </div>
-          </fieldset>
-        );
-      })}
-    </div>
-  );
-}
-
-function RawBlock({
-  block,
-  draft,
-  onChange,
-}: {
-  block: Extract<QuestionBlock, { format: "raw" }>;
-  draft: BlockDraft;
-  onChange: (next: BlockDraft) => void;
-}) {
-  return (
-    <div className="space-y-2">
-      <BlockHeader block={block} />
-      <p className="text-xs text-muted-foreground">Not in the question format ({block.problem}), so it is shown as written.</p>
-      <div className="rounded-md bg-secondary/40 px-3 py-2">
-        <Markdown content={block.body} className="text-sm" />
-      </div>
+    <>
+      {options.length === 0 ? null : (
+        <div className="space-y-1.5">
+          {options.map((option) => (
+            <label
+              key={option.letter}
+              className={cn(
+                "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
+                draft.option === option.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
+              )}
+            >
+              <input type="radio" name={name} className="mt-0.5" checked={draft.option === option.letter} onChange={() => onChange({ ...draft, option: option.letter })} />
+              <span className="font-mono">{option.letter}</span>
+              <span className="min-w-0 flex-1 whitespace-pre-wrap">{option.text}</span>
+              {option.recommended ? <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span> : null}
+            </label>
+          ))}
+          {draft.option === null ? null : (
+            <button
+              type="button"
+              className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              onClick={() => onChange({ ...draft, option: null })}
+            >
+              Clear choice
+            </button>
+          )}
+        </div>
+      )}
       <textarea
         className={textareaClass()}
-        value={draft.raw}
-        aria-label="Answer"
-        placeholder="Type your answer"
-        onChange={(event) => onChange({ ...draft, raw: event.target.value })}
+        value={draft.text}
+        aria-label={label}
+        placeholder={options.length === 0 ? "Type your answer" : draft.option === null ? "Or type your own answer" : "Add a note (optional)"}
+        onChange={(event) => onChange({ ...draft, text: event.target.value })}
       />
-    </div>
+    </>
   );
 }
 
-function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => void }) {
+/**
+ * One open question of a Linear block, or a block not in the question
+ * format, answered on its own. The answer names the block and the question,
+ * so the block's other questions stay open, each on its own card.
+ */
+function LinearCard({ card, onAnswered }: { card: Extract<Card<IssueView, AskView>, { kind: "question" | "raw" }>; onAnswered: () => void }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [drafts, setDrafts] = useState<Record<string, BlockDraft>>({});
+  const [draft, setDraft] = useState<AskDraft>({ option: null, text: "" });
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { answered, total } = answerProgress(issue.blocks, drafts);
+  const { issue, block } = card;
+  const input = questionAnswerInput(issue.id, block, card.kind === "question" ? card.question.number : null, draft);
 
   async function submit() {
+    if (input === null) return;
     setPosting(true);
     setError(null);
     try {
-      const result = await rpc.call("questions.answer", { issueId: issue.id, blocks: toAnswerBlocks(issue.blocks, drafts) });
+      const result = await rpc.call("questions.answer", input);
       toast.success(`Posted the answer to ${result.identifier}`, result.warning === null ? {} : { description: result.warning });
       onAnswered();
     } catch (cause) {
@@ -264,7 +216,7 @@ function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => 
   }
 
   return (
-    <section className="space-y-4 rounded-lg border border-border bg-card p-4">
+    <section className="space-y-3 rounded-lg border border-border bg-card p-4">
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <UrlLink href={issue.url} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
           {issue.identifier}
@@ -274,32 +226,43 @@ function IssueCard({ issue, onAnswered }: { issue: IssueView; onAnswered: () => 
           {issue.kind === "checkin" ? "check-in" : "needs decision"}
         </span>
       </header>
-      {issue.blocks.map((block) => {
-        const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-        // The first edit pins the revision the answers are written against.
-        const onChange = (next: BlockDraft) =>
-          setDrafts((current) => ({ ...current, [block.commentId]: { ...next, revision: current[block.commentId]?.revision ?? block.revision } }));
-        return block.format === "parsed" ? (
-          <ParsedBlock key={block.commentId} block={block} draft={draft} onChange={onChange} />
-        ) : (
-          <RawBlock key={block.commentId} block={block} draft={draft} onChange={onChange} />
-        );
-      })}
+      <BlockHeader block={block} />
+      {card.kind === "raw" ? (
+        <>
+          <p className="text-xs text-muted-foreground">Not in the question format ({card.block.problem}), so it is shown as written.</p>
+          <div className="rounded-md bg-secondary/40 px-3 py-2">
+            <Markdown content={card.block.body} className="text-sm" />
+          </div>
+          <AnswerFields name={block.commentId} label="Answer" options={[]} draft={draft} onChange={setDraft} />
+        </>
+      ) : (
+        <>
+          {card.block.context === "" ? null : <Markdown content={card.block.context} className="text-sm text-muted-foreground" />}
+          <div className="flex items-start gap-2 text-sm font-medium">
+            <span className="shrink-0">Q{card.question.number}.</span>
+            <Markdown content={card.question.text} className="min-w-0 flex-1" />
+          </div>
+          <AnswerFields
+            name={`${block.commentId}-q${card.question.number}`}
+            label={`Answer to Q${card.question.number}`}
+            options={card.question.options}
+            draft={draft}
+            onChange={setDraft}
+          />
+        </>
+      )}
       {error === null ? null : (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}
       <footer className="flex flex-wrap items-center gap-3">
-        <Button disabled={posting || answered === 0} onClick={() => void submit()}>
+        <Button disabled={posting || input === null} onClick={() => void submit()}>
           {posting ? "Posting…" : "Post answer to Linear"}
         </Button>
-        <span className="text-xs text-muted-foreground">
-          {answered} of {total} answered.
-          {issue.blocks.length > 1 ? " One comment answers every block above." : ""}
-          {answered > 0 && answered < total ? " The rest are posted as “No answer.”" : ""}
-          {issue.kind === "needs-decision" ? " Posting also removes the needs-decision label when no newer question is open." : ""}
-        </span>
+        {issue.kind === "needs-decision" ? (
+          <span className="text-xs text-muted-foreground">Answering the last open question also removes the needs-decision label.</span>
+        ) : null}
       </footer>
     </section>
   );
@@ -349,48 +312,7 @@ function AskCard({ ask, onAnswered }: { ask: AskView; onAnswered: () => void }) 
         {ask.issue === null ? null : <span className="text-xs text-muted-foreground">issue {ask.issue}</span>}
       </header>
       <Markdown content={ask.question} className="text-sm" />
-      {options.length === 0 ? null : (
-        <div className="space-y-1.5">
-          {options.map((option) => (
-            <label
-              key={option.letter}
-              className={cn(
-                "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
-                draft.option === option.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
-              )}
-            >
-              <input
-                type="radio"
-                name={ask.id}
-                className="mt-0.5"
-                checked={draft.option === option.letter}
-                onChange={() => setDraft({ ...draft, option: option.letter })}
-              />
-              <span className="font-mono">{option.letter}</span>
-              <span className="min-w-0 flex-1 whitespace-pre-wrap">{option.text}</span>
-              {option.recommended ? (
-                <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span>
-              ) : null}
-            </label>
-          ))}
-          {draft.option === null ? null : (
-            <button
-              type="button"
-              className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              onClick={() => setDraft({ ...draft, option: null })}
-            >
-              Clear choice
-            </button>
-          )}
-        </div>
-      )}
-      <textarea
-        className={textareaClass()}
-        value={draft.text}
-        aria-label={`Answer to ${ask.id}`}
-        placeholder={options.length === 0 ? "Type your answer" : draft.option === null ? "Or type your own answer" : "Add a note (optional)"}
-        onChange={(event) => setDraft({ ...draft, text: event.target.value })}
-      />
+      <AnswerFields name={ask.id} label={`Answer to ${ask.id}`} options={options} draft={draft} onChange={setDraft} />
       {error === null ? null : (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -729,14 +651,15 @@ function SgcPage({ subPath }: { subPath: string }) {
           {snapshot === null
             ? null
             : orderCards(snapshot.issues, snapshot.asks).map((card) =>
-                card.kind === "issue" ? (
-                  <IssueCard
-                    key={`${card.issue.id}:${card.issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
-                    issue={card.issue}
+                card.kind === "ask" ? (
+                  <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
+                ) : (
+                  // An edit to the block changes its revision, which starts the card afresh on the new text.
+                  <LinearCard
+                    key={`${card.block.commentId}@${card.block.revision}#${card.kind === "question" ? card.question.number : "raw"}`}
+                    card={card}
                     onAnswered={load}
                   />
-                ) : (
-                  <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
                 ),
               )}
         </TabPanel>

@@ -19,12 +19,14 @@ import { z } from "zod";
 import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, postComment, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
 import {
   answerCommentId,
+  answerFor,
+  answeredBlocks,
+  closeAnswered,
   commentRole,
   composeAnswer,
   composeTextAnswer,
   openBlocks,
   postedBefore,
-  sameBlocks,
   type BlockAnswer,
   type BlockRef,
   type IssueKind,
@@ -526,11 +528,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     }
 
     /**
-     * Post one unsigned comment that answers every open block on an issue,
-     * then send it to the threads that signed the blocks. Reads the issue
-     * fresh first; `expected` is the blocks and revisions the caller saw, and
-     * any difference refuses, so an answer never lands on a question nobody
-     * read or on an option whose text changed.
+     * Post one unsigned comment that answers the named blocks, or some of
+     * their questions, then send it to the threads that signed them. Reads
+     * the issue fresh first; `expected` is the blocks and revisions the
+     * caller saw, and each must still be open at that revision, with every
+     * question the answer names, so an answer never lands on a question
+     * nobody read or on an option whose text changed.
      */
     async function postAnswer(issueRef: string, expected: BlockRef[], compose: (blocks: QuestionBlock[]) => string): Promise<AnswerResult> {
       writeFirst();
@@ -547,7 +550,13 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         const kind = issueKind(issue);
         const comments = await linear.listComments(issue.id, undefined, issue.identifier);
         const blocks = issue.labels.some((label) => label.name === CHECKIN_LABEL || label.name === DECISION_LABEL) ? openBlocks(kind, comments) : [];
-        const earlier = sameBlocks(expected, blocks) ? null : postedBefore(issue.id, comments, expected, compose);
+        let fresh: ReturnType<typeof answerFor>;
+        try {
+          fresh = answerFor(expected, blocks, comments, compose);
+        } catch (error) {
+          throw new Refusal("invalid", message(error));
+        }
+        const earlier = fresh === null ? postedBefore(issue.id, comments, expected, compose) : null;
 
         let commentId: string;
         let body: string;
@@ -557,21 +566,17 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           holdDeliveries(issue, commentId, body, answered);
         } else {
           if (blocks.length === 0) throw new Refusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
-          if (!sameBlocks(expected, blocks)) {
-            throw new Refusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
+          if (fresh === null) {
+            throw new Refusal("conflict", `The questions on ${issue.identifier} changed or were answered since you loaded them. Refresh and answer again.`);
           }
-          try {
-            body = compose(blocks);
-          } catch (error) {
-            throw new Refusal("invalid", message(error));
-          }
+          body = fresh.body;
           if (body.trim() === "") throw new Refusal("invalid", "The answer is empty.");
           if (Buffer.byteLength(body) > MAX_ANSWER_BYTES) throw new Refusal("invalid", `The answer is over ${MAX_ANSWER_BYTES} bytes.`);
           if (commentRole({ body, author: "user" }) !== "answer") {
             throw new Refusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
           }
           commentId = answerCommentId(issue.id, body);
-          answered = blocks;
+          answered = fresh.blocks;
           // Kept before the post, so a restart while it is in flight cannot
           // lose them. A failed post leaves them held for settleHeld.
           holdDeliveries(issue, commentId, body, answered);
@@ -598,7 +603,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             warning =
               stillOpen === null
                 ? `The answer is posted. ${issue.identifier} could not be read again, so the needs-decision label stays. Remove it in Linear if no question is open.`
-                : `The answer is posted. A newer question is open on ${issue.identifier}, so the needs-decision label stays.`;
+                : `The answer is posted. A question is still open on ${issue.identifier}, so the needs-decision label stays.`;
           } else {
             const failure = await removeLabel(linear, issue.id, label.id);
             labelRemoved = failure === null;
@@ -609,10 +614,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           }
         }
 
-        // The answer closed these blocks: drop them now rather than at the
-        // next poll, and never notify about them.
+        // Drop what the answer closed now rather than at the next poll, keep
+        // what it left open, and never notify about the blocks it answered.
+        const left = earlier !== null ? blocks : closeAnswered(blocks, answeredBlocks(body) ?? []);
         commentCache.delete(issue.id);
-        snapshot = { ...snapshot, issues: snapshot.issues.filter((open) => open.id !== issue.id) };
+        snapshot = { ...snapshot, issues: snapshot.issues.flatMap((open) => (open.id !== issue.id ? [open] : left.length === 0 ? [] : [{ ...open, blocks: left }])) };
         const mark = db.prepare("UPDATE seen_blocks SET notified_at = COALESCE(notified_at, ?) WHERE block_id = ?");
         for (const block of answered) mark.run(Date.now(), block.commentId);
         publish(0);

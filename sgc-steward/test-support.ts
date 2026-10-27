@@ -17,6 +17,15 @@ export const QUESTIONS = [
   "- B: Small, medium, large.",
 ].join("\n");
 
+/** A block of two questions, as older blocks hold them. */
+export const TWO_QUESTIONS = [
+  "[agent:claude-code thr_test1] Questions 2026-01-06",
+  "Q1. Which scale do estimates use?",
+  "- A (recommended): Powers of two.",
+  "- B: Small, medium, large.",
+  "Q2. Which project goes first?",
+].join("\n");
+
 export interface FakeIssue extends LinearIssue {
   state: { id: string; type: string } | null;
   description: string;

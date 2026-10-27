@@ -2,64 +2,7 @@
 // React code so it can be tested without a DOM.
 
 import type { DeliveryView } from "./contract.ts";
-import type { BlockAnswer, QuestionBlock } from "./questions.ts";
-
-/** What the user picked or typed for one block, keyed by question number. */
-export interface BlockDraft {
-  options: Record<number, string>;
-  texts: Record<number, string>;
-  /** The answer to a block that is not in the question format. */
-  raw: string;
-  /**
-   * The block's revision when the draft was first edited. Sent with the
-   * answer, so an edit to the block since then is refused, not answered.
-   */
-  revision?: string;
-}
-
-export const EMPTY_DRAFT: BlockDraft = { options: {}, texts: {}, raw: "" };
-
-function hasAnswer(draft: BlockDraft, number: number): boolean {
-  return draft.options[number] !== undefined || (draft.texts[number] ?? "").trim() !== "";
-}
-
-/** The answer blocks for `questions.answer`; untouched questions are left out. */
-export function toAnswerBlocks(blocks: readonly QuestionBlock[], drafts: Readonly<Record<string, BlockDraft>>): BlockAnswer[] {
-  return blocks.map((block) => {
-    const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-    const revision = draft.revision ?? block.revision;
-    if (block.format === "raw") return { blockId: block.commentId, revision, answers: [], text: draft.raw };
-    return {
-      blockId: block.commentId,
-      revision,
-      answers: block.questions
-        .filter((question) => hasAnswer(draft, question.number))
-        .map((question) => ({
-          number: question.number,
-          option: draft.options[question.number] ?? null,
-          text: draft.texts[question.number] ?? "",
-        })),
-    };
-  });
-}
-
-export function answerProgress(blocks: readonly QuestionBlock[], drafts: Readonly<Record<string, BlockDraft>>): { answered: number; total: number } {
-  let answered = 0;
-  let total = 0;
-  for (const block of blocks) {
-    const draft = drafts[block.commentId] ?? EMPTY_DRAFT;
-    if (block.format === "raw") {
-      total += 1;
-      if (draft.raw.trim() !== "") answered += 1;
-      continue;
-    }
-    for (const question of block.questions) {
-      total += 1;
-      if (hasAnswer(draft, question.number)) answered += 1;
-    }
-  }
-  return { answered, total };
-}
+import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
 
 /** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
 export interface Notice {
@@ -89,18 +32,31 @@ export function announcement(notes: readonly Notice[]): { title: string; body: s
   };
 }
 
-/** A card on the page: an issue with open Linear blocks, or an open bb question. */
-export type Card<I, A> = { kind: "issue"; at: number; issue: I } | { kind: "ask"; at: number; ask: A };
+type ParsedBlock = Extract<QuestionBlock, { format: "parsed" }>;
+type RawBlock = Extract<QuestionBlock, { format: "raw" }>;
 
-/** Issues and bb questions in one list, oldest first; an issue counts from its oldest open block. */
-export function orderCards<I extends { blocks: readonly Pick<QuestionBlock, "createdAt">[] }, A extends { askedAt: number }>(
-  issues: readonly I[],
-  asks: readonly A[],
-): Array<Card<I, A>> {
-  const cards: Array<Card<I, A>> = [
-    ...issues.map((issue) => ({ kind: "issue" as const, at: Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt))), issue })),
-    ...asks.map((ask) => ({ kind: "ask" as const, at: ask.askedAt, ask })),
-  ];
+/**
+ * A card on the page, each answered on its own: one open question of a
+ * Linear block, a Linear block not in the question format, or an open bb
+ * question.
+ */
+export type Card<I, A> =
+  | { kind: "question"; at: number; issue: I; block: ParsedBlock; question: Question }
+  | { kind: "raw"; at: number; issue: I; block: RawBlock }
+  | { kind: "ask"; at: number; ask: A };
+
+/** Every open question its own card, with the bb questions, oldest first; a block's questions in their order. */
+export function orderCards<I extends { blocks: readonly QuestionBlock[] }, A extends { askedAt: number }>(issues: readonly I[], asks: readonly A[]): Array<Card<I, A>> {
+  const cards: Array<Card<I, A>> = [];
+  for (const issue of issues) {
+    for (const block of issue.blocks) {
+      const at = Date.parse(block.createdAt);
+      if (block.format === "raw") cards.push({ kind: "raw", at, issue, block });
+      else for (const question of block.questions) cards.push({ kind: "question", at, issue, block, question });
+    }
+  }
+  for (const ask of asks) cards.push({ kind: "ask", at: ask.askedAt, ask });
+  // A stable sort keeps a block's questions in their order.
   return cards.sort((a, b) => a.at - b.at);
 }
 
@@ -108,6 +64,25 @@ export function orderCards<I extends { blocks: readonly Pick<QuestionBlock, "cre
 export interface AskDraft {
   option: string | null;
   text: string;
+}
+
+/**
+ * The `questions.answer` input for one card: one question of a block, or a
+ * block not in the question format (`question` null). Null when the draft
+ * says nothing yet. The revision is the one the card shows.
+ */
+export function questionAnswerInput(
+  issueId: string,
+  block: QuestionBlock,
+  question: number | null,
+  draft: AskDraft,
+): { issueId: string; blocks: BlockAnswer[] } | null {
+  if (draft.option === null && draft.text.trim() === "") return null;
+  const answer: BlockAnswer =
+    question === null
+      ? { blockId: block.commentId, revision: block.revision, answers: [], text: draft.text }
+      : { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
+  return { issueId, blocks: [answer] };
 }
 
 /** The `asks.answer` input, or null when the draft says nothing yet. */

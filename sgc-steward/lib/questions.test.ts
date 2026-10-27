@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   answerCommentId,
+  answerFor,
   answeredBlocks,
   commentRole,
   composeAnswer,
@@ -290,7 +291,7 @@ test("an answer that names its blocks closes only those blocks, at their revisio
   const second = comment("q2", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
   const answered = parsed(parseQuestionBlock(first, "checkin"));
   const reply = comment("a1", `Answers to the questions of 2026-01-05 (block q1 rev ${answered.revision})\n\nQ1. A`);
-  assert.deepEqual(answeredBlocks(reply.body), [{ blockId: "q1", revision: answered.revision }]);
+  assert.deepEqual(answeredBlocks(reply.body), [{ blockId: "q1", revision: answered.revision, question: null }]);
   assert.deepEqual(openBlocks("checkin", [first, second, reply]).map((block) => block.commentId), ["q2"]);
 
   const stale = comment("a2", "Answers to the questions of 2026-01-05 (block q2 rev 000000000000)\n\nQ1. A");
@@ -301,6 +302,46 @@ test("an answer that names its blocks closes only those blocks, at their revisio
   assert.deepEqual(openBlocks("checkin", [first, second, plain]), [], "a plain answer closes every block before it");
   const mention = comment("a4", "I saw (block q2 rev 000000000000) in a header once.");
   assert.equal(answeredBlocks(mention.body), null, "only answer header lines name blocks");
+});
+
+test("an answer can name one question of a block, which stays open until each question has an answer", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const second = comment("a1", `Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q2\n\nQ2. B: The cells.`);
+  assert.deepEqual(answeredBlocks(second.body), [{ blockId: "q1", revision: block.revision, question: 2 }]);
+  const open = openBlocks("checkin", [question, second]);
+  assert.deepEqual(open.map((left) => [left.commentId, left.revision, parsed(left).questions.map((asked) => asked.number)]), [["q1", block.revision, [1, 3]]]);
+
+  const rest = comment(
+    "a2",
+    [
+      `Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q1`,
+      `Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q3`,
+      "",
+      "Q1. A: Powers of two.",
+      "",
+      "Q3. No.",
+    ].join("\n"),
+  );
+  assert.deepEqual(openBlocks("checkin", [question, second, rest]), [], "every question has an answer");
+  assert.deepEqual(openBlocks("checkin", [question, second, comment("a3", "Go with A.")]), [], "a plain answer still closes the whole block");
+});
+
+test("an edit reopens the questions answered before it, and a raw block has no numbered questions", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const answer = comment("a1", `Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q2\n\nQ2. B: The cells.`);
+  const edited = { ...question, body: QUESTIONS.replace("Anything else?", "Anything else at all?") };
+  assert.deepEqual(
+    openBlocks("checkin", [edited, answer]).map((left) => parsed(left).questions.map((asked) => asked.number)),
+    [[1, 2, 3]],
+    "the answer names the old revision",
+  );
+
+  const free = comment("r1", "[agent:codex thr_x] Questions 2026-01-07\nfree form");
+  const rawBlock = raw(parseQuestionBlock(free, "checkin"));
+  const numbered = comment("a2", `Answer to the questions of 2026-01-07 (block r1 rev ${rawBlock.revision}), Q1\n\nQ1. Yes.`);
+  assert.deepEqual(openBlocks("checkin", [free, numbered]).map((left) => left.commentId), ["r1"]);
 });
 
 test("a todo marked done or reopened answers no Linear block, but only as the first line", () => {
@@ -338,7 +379,7 @@ test("a needs-decision question stays open when the answer names an older block"
 
 // --- composing the answer ------------------------------------------------
 
-test("the answer is one unsigned comment numbered to match the questions", () => {
+test("an answer to every question of a block names the block, numbered to match", () => {
   const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
   const body = composeAnswer(
     [block],
@@ -349,6 +390,7 @@ test("the answer is one unsigned comment numbered to match the questions", () =>
         answers: [
           { number: 1, option: "A", text: "" },
           { number: 2, option: "B", text: "Start with the cells project." },
+          { number: 3, option: null, text: "No." },
         ],
       },
     ],
@@ -363,9 +405,34 @@ test("the answer is one unsigned comment numbered to match the questions", () =>
       "Q2. B: The cells.",
       "Start with the cells project.",
       "",
-      "Q3. No answer.",
+      "Q3. No.",
     ].join("\n"),
   );
+});
+
+test("an answer to some questions of a block names each one, and says nothing of the rest", () => {
+  const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
+  const one = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 2, option: "B", text: "Start with the cells project." }] }]);
+  assert.equal(one, [`Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q2`, "", "Q2. B: The cells.", "Start with the cells project."].join("\n"));
+  const two = composeAnswer(
+    [block],
+    [
+      {
+        blockId: "q1",
+        revision: block.revision,
+        answers: [
+          { number: 3, option: null, text: "No." },
+          { number: 1, option: "A", text: "" },
+          { number: 2, option: null, text: "  " },
+        ],
+      },
+    ],
+  );
+  assert.deepEqual(answeredBlocks(two), [
+    { blockId: "q1", revision: block.revision, question: 1 },
+    { blockId: "q1", revision: block.revision, question: 3 },
+  ]);
+  assert.match(two, /\n\nQ1\. A: Powers of two\.\n\nQ3\. No\.$/);
 });
 
 test("a typed answer needs no option, and raw blocks take free text", () => {
@@ -382,11 +449,7 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
   assert.equal(
     body,
     [
-      `Answers to the questions of 2026-01-05, posted ${at(block.createdAt)} (block q1 rev ${block.revision})`,
-      "",
-      "Q1. No answer.",
-      "",
-      "Q2. No answer.",
+      `Answer to the questions of 2026-01-05, posted ${at(block.createdAt)} (block q1 rev ${block.revision}), Q3`,
       "",
       "Q3. Ship it",
       "on Friday.",
@@ -403,7 +466,7 @@ test("a composed answer always reads as unsigned, even when the text starts with
   const block = parsed(parseQuestionBlock(question, "checkin"));
   const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: "[agent:x] sneaky" }] }]);
   assert.equal(commentRole({ body, author: "user" }), "answer");
-  assert.deepEqual(openBlocks("checkin", [question, comment("a1", body)]), []);
+  assert.deepEqual(openBlocks("checkin", [question, comment("a1", body)]).map((left) => parsed(left).questions.map((asked) => asked.number)), [[2, 3]]);
 });
 
 test("a typed answer from the CLI gets headers that name every block it answers", () => {
@@ -413,8 +476,8 @@ test("a typed answer from the CLI gets headers that name every block it answers"
   assert.equal(one, `Answers to the questions of 2026-01-05 (block q1 rev ${block.revision})\n\nQ1. A\nQ2. The cells.`);
   const both = composeTextAnswer([block, other], "Q1. A");
   assert.deepEqual(answeredBlocks(both), [
-    { blockId: "q1", revision: block.revision },
-    { blockId: "q2", revision: other.revision },
+    { blockId: "q1", revision: block.revision, question: null },
+    { blockId: "q2", revision: other.revision, question: null },
   ]);
   assert.equal(commentRole({ body: both, author: "user" }), "answer");
   assert.throws(() => composeTextAnswer([block], " \n "), /the answer is empty/);
@@ -454,5 +517,35 @@ test("composeAnswer refuses answers that do not fit the open blocks", () => {
     /Q1 is answered twice/,
   );
   assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: "  " }] }]), /nothing to post/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [] }]), /nothing to post/);
+  assert.throws(() => composeAnswer([rawBlock], [{ blockId: "q2", revision: rawBlock.revision, answers: [], text: " " }]), /nothing to post/);
   assert.throws(() => composeAnswer([rawBlock], [{ blockId: "q2", revision: rawBlock.revision, answers: [{ number: 1, option: null, text: "x" }] }]), /block q2 is not in the question format/);
+});
+
+// --- answering what is still open ------------------------------------------
+
+test("an answer is written from the whole block, and only while all it names is open", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const ref = [{ blockId: "q1", revision: block.revision }];
+  const answer = (number: number, text: string) => (blocks: QuestionBlock[]) =>
+    composeAnswer(blocks, [{ blockId: "q1", revision: block.revision, answers: [{ number, option: null, text }] }]);
+
+  const first = answerFor(ref, openBlocks("checkin", [question]), [question], answer(1, "Powers of two."));
+  assert.ok(first);
+  assert.deepEqual(first.blocks.map((named) => named.commentId), ["q1"]);
+  const second = comment("a1", answer(2, "The cells.")([block]));
+  const third = comment("a2", answer(3, "No.")([block]));
+  const comments = [question, second, third];
+  const open = openBlocks("checkin", comments);
+  assert.deepEqual(open.map((left) => parsed(left).questions.map((asked) => asked.number)), [[1]]);
+
+  const last = answerFor(ref, open, comments, answer(1, "Powers of two."));
+  assert.ok(last);
+  assert.equal(last.body, answer(1, "Powers of two.")([block]), "the last open question still names itself, as a retry would write it");
+  assert.equal(parsed(last.blocks[0]!).questions.length, 3, "composed from the whole block");
+  assert.equal(answerFor(ref, open, comments, answer(2, "The router.")), null, "Q2 has an answer already");
+  assert.equal(answerFor([{ blockId: "q1", revision: "000000000000" }], open, comments, answer(1, "x")), null, "another revision");
+  assert.equal(answerFor([{ blockId: "zz", revision: block.revision }], open, comments, answer(1, "x")), null, "no such block");
+  assert.throws(() => answerFor(ref, open, comments, answer(9, "x")), /Q9 is not a question/);
 });

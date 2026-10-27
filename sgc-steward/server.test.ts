@@ -5,7 +5,7 @@ import { createSgcStewardPlugin } from "./server.ts";
 import type { Snapshot } from "./lib/contract.ts";
 import { createLinearClient, LinearError, type LinearIssue } from "./lib/linear.ts";
 import { answerCommentId } from "./lib/questions.ts";
-import { KEY, QUESTIONS, rejection, revisionOf, setup } from "./test-support.ts";
+import { KEY, QUESTIONS, TWO_QUESTIONS, rejection, revisionOf, setup } from "./test-support.ts";
 
 test("without a key the plugin asks for one and never calls Linear", async () => {
   const { linear, harness, refresh } = await setup({ key: null });
@@ -261,23 +261,114 @@ test("a second try that meets the first, late write counts as posted, once", asy
   assert.deepEqual(answers.map((comment) => comment.id), [result.commentId]);
 });
 
-test("an answer is refused when the questions changed or were already answered", async () => {
+test("an answer to one block posts while another is open; a question answered already is refused", async () => {
   const { linear, harness, refresh } = await setup();
   const checkin = linear.addIssue("TEAM-1", ["checkin"]);
   linear.post(checkin, "q1", QUESTIONS);
   const shown = await refresh();
-  const answer = { issueId: "uuid-TEAM-1", blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }] };
+  const answer = (option: string) => ({ issueId: "uuid-TEAM-1", blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option, text: "" }] }] });
 
-  linear.post(checkin, "q2", QUESTIONS);
-  const changed = await rejection(harness.behavior.callRpc("questions.answer", answer));
-  assert.equal(changed.code, "conflict");
-  assert.match(changed.message, /questions on TEAM-1 changed/);
+  // A block that arrives after the page loaded is not this answer's business.
+  linear.post(checkin, "q2", QUESTIONS.replace("Which scale do estimates use?", "May I delete the project?"));
+  await harness.behavior.callRpc("questions.answer", answer("A"));
+  assert.deepEqual((await refresh()).issues.flatMap((issue) => issue.blocks.map((block) => block.commentId)), ["q2"]);
+
+  const twice = await rejection(harness.behavior.callRpc("questions.answer", answer("B")));
+  assert.equal(twice.code, "conflict");
+  assert.match(twice.message, /questions on TEAM-1 changed or were answered/);
 
   linear.post(checkin, "a1", "Answered in Linear.");
-  const answered = await rejection(harness.behavior.callRpc("questions.answer", answer));
+  const answered = await rejection(harness.behavior.callRpc("questions.answer", answer("B")));
   assert.equal(answered.code, "conflict");
   assert.match(answered.message, /TEAM-1 has no open questions/);
-  assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 0);
+  assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 1);
+});
+
+test("one question of a block is answered on its own, and the block stays open until each one is", async () => {
+  const { linear, harness, refresh, sends } = await setup();
+  const checkin = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(checkin, "q1", TWO_QUESTIONS);
+  const shown = await refresh();
+  const revision = revisionOf(shown, "q1");
+  const answer = (number: number, option: string | null, text: string) => ({
+    issueId: checkin.id,
+    blocks: [{ blockId: "q1", revision, answers: [{ number, option, text }] }],
+  });
+  const open = (snapshot: Snapshot) =>
+    snapshot.issues.map((issue) => issue.blocks.map((block) => [block.commentId, block.format === "parsed" ? block.questions.map((asked) => asked.number) : []]));
+
+  await harness.behavior.callRpc("questions.answer", answer(2, null, "The cells."));
+  assert.equal(checkin.comments.at(-1)?.body, `Answer to the questions of 2026-01-06 (block q1 rev ${revision}), Q2\n\nQ2. The cells.`);
+  assert.deepEqual(open((await harness.behavior.callRpc("questions.list", null)) as Snapshot), [[["q1", [1]]]], "the issue stays, with its open question");
+  assert.deepEqual(open(await refresh()), [[["q1", [1]]]]);
+  assert.match(sends.at(-1)!.input[0]!.text, /Answer to your questions on TEAM-1[\s\S]*\nQ2\. The cells\.$/);
+  const listed = await harness.behavior.runCli(["questions"]);
+  assert.match(listed.stdout, /Q1\. Which scale do estimates use\?/);
+  assert.doesNotMatch(listed.stdout, /Q2\./);
+
+  const again = await rejection(harness.behavior.callRpc("questions.answer", answer(2, null, "The router.")));
+  assert.equal(again.code, "conflict");
+
+  await harness.behavior.callRpc("questions.answer", answer(1, "A", ""));
+  assert.equal(checkin.comments.at(-1)?.body, `Answer to the questions of 2026-01-06 (block q1 rev ${revision}), Q1\n\nQ1. A: Powers of two.`);
+  assert.deepEqual(((await harness.behavior.callRpc("questions.list", null)) as Snapshot).issues, []);
+  assert.deepEqual((await refresh()).issues, []);
+  assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 2);
+});
+
+test("a needs-decision label stays until the last question of the block has an answer", async () => {
+  const { linear, harness, refresh } = await setup();
+  const decision = linear.addIssue("TEAM-2", ["needs-decision"]);
+  linear.post(decision, "d1", TWO_QUESTIONS);
+  const shown = await refresh();
+  const answer = (number: number, text: string) => ({
+    issueId: decision.id,
+    blocks: [{ blockId: "d1", revision: revisionOf(shown, "d1"), answers: [{ number, option: null, text }] }],
+  });
+  const first = (await harness.behavior.callRpc("questions.answer", answer(1, "Powers of two."))) as { labelRemoved: boolean | null; warning: string | null };
+  assert.deepEqual([first.labelRemoved, first.warning], [false, "The answer is posted. A question is still open on TEAM-2, so the needs-decision label stays."]);
+  assert.deepEqual(decision.labels.map((label) => label.name), ["needs-decision"]);
+  const last = (await harness.behavior.callRpc("questions.answer", answer(2, "The cells."))) as { labelRemoved: boolean | null; warning: string | null };
+  assert.deepEqual([last.labelRemoved, last.warning], [true, null]);
+  assert.deepEqual(decision.labels, []);
+});
+
+test("a lost reply on a block's last open question is found again, and posted once", async () => {
+  const { linear, harness, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "q1", TWO_QUESTIONS);
+  const shown = await refresh();
+  const answer = (number: number, option: string | null, text: string) => ({
+    issueId: issue.id,
+    blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number, option, text }] }],
+  });
+  await harness.behavior.callRpc("questions.answer", answer(1, "A", ""));
+
+  // The last answer lands, but its reply is lost, and so are the reads that would find it.
+  const createComment = linear.createComment.bind(linear);
+  const listComments = linear.listComments.bind(linear);
+  let landed = false;
+  let blind = 0;
+  linear.createComment = async (args) => {
+    if (landed) return createComment(args);
+    landed = true;
+    await createComment(args);
+    throw new LinearError("network", "socket hang up");
+  };
+  linear.listComments = async (issueId) => {
+    if (landed && blind < 2) {
+      blind += 1;
+      throw new LinearError("network", "could not reach Linear");
+    }
+    return listComments(issueId);
+  };
+  await rejection(harness.behavior.callRpc("questions.answer", answer(2, null, "The cells.")));
+  const retried = (await harness.behavior.callRpc("questions.answer", answer(2, null, "The cells."))) as { commentId: string };
+  const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
+  assert.equal(answers.length, 2);
+  assert.equal(retried.commentId, answers[1]!.id);
+  assert.match(answers[1]!.body, /\), Q2\n\nQ2\. The cells\.$/);
+  assert.deepEqual((await refresh()).issues, []);
 });
 
 test("answers that do not fit the questions are refused before anything is posted", async () => {

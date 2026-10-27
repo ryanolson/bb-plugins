@@ -67,7 +67,8 @@ Q2. <question with no options; the owner types the answer>
 - Mark at most one option per question `(recommended)`.
 - Put every option on one line. Indent a line that continues an option.
 - Put context before `Q1.`, not after the options.
-- Put your bb thread id in the signature. The answer is then also sent to your thread, as a message that starts with `[sgc-steward] Answer to your questions on <issue>`.
+- Ask one question per block. The owner answers each question on its own card, and a block with several stays open until each has an answer.
+- Put your bb thread id in the signature. The answer is then also sent to your thread, as a message that starts with `[sgc-steward] Answer to your questions on <issue>`. A block with several questions gets one such message per answer, each with only the questions it answers.
 - Do not edit a block after you post it. Post a new block instead. An edit changes the block's revision, so an answer to the old text no longer closes it, and the owner is notified again.
 
 A comment that breaks a rule is still shown, but as plain text without option buttons.
@@ -76,11 +77,12 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 ## Reading a Linear answer
 
-- An answer from the SGC Steward page or `bb sgc answer` names the blocks it answers in its header lines, as `(block <comment id> rev <revision>)`. It answers only those blocks, at that revision. Ask again about any block it does not name.
+- An answer from the SGC Steward page or `bb sgc answer` names what it answers in its header lines. `(block <comment id> rev <revision>)` answers that whole block, at that revision. `(block <comment id> rev <revision>), Q2` answers only question 2 of it: the block stays open until each of its questions has an answer, in this comment or a later one. Ask again about any block it does not name.
+- To see what is still open, run `bb sgc questions`. It lists only the questions that have no answer yet.
 - A comment that starts with `Answer to bb question` records the answer to a bb question, or its withdrawal. It answers no Linear block.
 - A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo done or open again. It answers no Linear block either.
 - Any other unsigned comment from the owner answers every block before it.
-- The page writes `Q1. A: <option text>` for a picked option, `Q2. <text>` for a typed answer, and `Q3. No answer.` for a skipped question. A note can follow on the next line.
+- The page answers one question per comment. It writes `Q1. A: <option text>` for a picked option and `Q2. <text>` for a typed answer. A note can follow on the next line. An older answer can hold `Q3. No answer.` for a question the owner skipped.
 - Ask again in a new block for every question marked `No answer.` that still matters.
 
 ## Commands
@@ -95,7 +97,7 @@ bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <nam
 ```
 
 - `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`.
-- `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text. Pass every open block of the issue, as `bb sgc questions` prints it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
+- `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.
 - `bb sgc todo done` marks a todo done as the owner, and the steward treats its message as the owner's word. Run it only to relay the owner's own word that the action is done, never on your own judgment.

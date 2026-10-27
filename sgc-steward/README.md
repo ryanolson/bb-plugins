@@ -47,7 +47,7 @@ The page shows a comment that breaks these rules as written, with the reason, an
 ## When a question is open
 
 - A signed comment starts with `[agent:`. Any other comment from a user is your answer. Comments from integrations are neither.
-- An answer from this plugin names each block it answers, as `(block <comment id> rev <revision>)` in a header line. It closes only those blocks, at that revision. Any other answer closes every block before it.
+- An answer from this plugin names what it answers in a header line: `(block <comment id> rev <revision>)` for a whole block, or `(block <comment id> rev <revision>), Q2` for one question of it. It closes only those, at that revision, and a block closes once each of its questions has an answer. Any other answer closes every block before it.
 - A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo. It is yours, but it answers no question, so it closes no block.
 - On a check-in issue (label `checkin`), a signed comment is a question block when it has a `Q1.` line or a bare `Questions` header. Run reports and digests stay out. A block is open until an answer closes it. A reply in a comment thread counts.
 - On a needs-decision issue (label `needs-decision`), the latest signed comment is the question, in any shape. It is open while the issue has the label and no answer closed it.
@@ -55,20 +55,24 @@ The page shows a comment that breaks these rules as written, with the reason, an
 
 ## Answer format
 
-One comment answers every open block on the issue. The page writes it like this:
+Each question is a card on the page, and each answer is one comment. An answer to a block's only question, or to every question of a block, names the block:
 
 ```
 Answers to the questions of 2026-01-05 (block 4f1c2e9a-5b6d-4c8e-9f0a-1b2c3d4e5f60 rev 3fa2c9d01b7e)
 
 Q1. A: Powers of two: 1, 2, 4, 8.
+```
+
+An answer to one question of a block that holds several names the question after the block. The block stays open until each of its questions has an answer:
+
+```
+Answer to the questions of 2026-01-05 (block 4f1c2e9a-5b6d-4c8e-9f0a-1b2c3d4e5f60 rev 3fa2c9d01b7e), Q2
 
 Q2. B: The cells.
 Start with the cells project.
-
-Q3. No answer.
 ```
 
-A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. When one comment answers several blocks, each block gets its own header, with the time the block was posted. Answering a needs-decision issue also removes the label, unless a newer question is open on the issue. A question posted in the one request between the plugin's last read and the label removal loses the label. This is a known limit.
+A picked option gives its letter and its text, and a note goes on the next line. A typed answer follows the number. The question number follows the block reference, not inside it, so a reader that knows only whole-block answers takes it for an answer to that one block, not to every block before it. When one comment answers several blocks, as `bb sgc answer` can, each block gets its own header, with the time the block was posted. Answering the last open question of a needs-decision issue also removes the label, unless a newer question is open on the issue. A question posted in the one request between the plugin's last read and the label removal loses the label. This is a known limit.
 
 ## bb questions
 
@@ -94,7 +98,7 @@ Two Done clicks at once act once: the plugin reads the issue again under its loc
 
 ## How it works
 
-A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the open blocks or their revisions changed, or when the issue is completed or canceled, so an answer never closes a question you did not see. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
+A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
 
 ## Notifications
 
@@ -120,7 +124,7 @@ bb sgc key --api-key-stdin
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
-- `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name every open block of the issue, as `questions` prints it. It refuses when the open blocks or their revisions differ, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
+- `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name each block the text answers, as `questions` prints it; it answers each one whole. It refuses when a named block changed or closed, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `key` reads the API key from stdin and stores it.

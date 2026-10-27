@@ -202,8 +202,16 @@ export interface BlockRef {
   revision: string;
 }
 
+/** What one header line of an answer answers: one question of a block, or, with no question, the whole block. */
+export interface AnswerRef extends BlockRef {
+  question: number | null;
+}
+
 const ANSWER_HEADER = /^\s*Answers? to the questions? of /;
-const BLOCK_REFERENCE = /\(block ([^\s)]+) rev ([0-9a-f]{12})\)/g;
+// The question follows the reference, not inside it, so a reader that knows
+// only whole-block answers takes it for an answer to that one block, not for
+// a plain answer, which would close every block before it.
+const BLOCK_REFERENCE = /\(block ([^\s)]+) rev ([0-9a-f]{12})\)(?:, Q(\d+))?/g;
 /** The first words of the record of an answered or withdrawn bb question. */
 export const RECORD_HEADER = "Answer to bb question";
 /** The first line of the comment that marks a todo done. */
@@ -212,32 +220,58 @@ export const TODO_DONE_HEADER = "Done (from the SGC page)";
 export const TODO_REOPENED_HEADER = "Reopened (from the SGC page)";
 
 /**
- * The blocks a plugin answer names in its header lines, or null for a plain
- * answer, which names none and so closes every block before it. The record of
- * a bb question starts with the record header and names no block, whatever
- * else it holds: the question it records can quote an answer header. A
- * comment that marks a todo done or reopened names no block either: it is
- * the owner's comment, but not an answer.
+ * What a plugin answer names in its header lines, or null for a plain
+ * answer, which names nothing and so closes every block before it. The
+ * record of a bb question starts with the record header and names no block,
+ * whatever else it holds: the question it records can quote an answer
+ * header. A comment that marks a todo done or reopened names no block
+ * either: it is the owner's comment, but not an answer.
  */
-export function answeredBlocks(body: string): BlockRef[] | null {
+export function answeredBlocks(body: string): AnswerRef[] | null {
   const lines = body.replace(/\r\n?/g, "\n").split("\n");
   const first = (lines.find((line) => line.trim() !== "") ?? "").trim();
   if (first.startsWith(`${RECORD_HEADER} `) || first === TODO_DONE_HEADER || first === TODO_REOPENED_HEADER) return [];
-  const refs: BlockRef[] = [];
+  const refs: AnswerRef[] = [];
   for (const line of lines) {
     if (!ANSWER_HEADER.test(line)) continue;
-    for (const match of line.matchAll(BLOCK_REFERENCE)) refs.push({ blockId: match[1]!, revision: match[2]! });
+    for (const match of line.matchAll(BLOCK_REFERENCE)) {
+      refs.push({ blockId: match[1]!, revision: match[2]!, question: match[3] === undefined ? null : Number(match[3]) });
+    }
   }
   return refs.length > 0 ? refs : null;
 }
 
 /**
- * The question blocks on one issue that still wait for an answer.
+ * The open blocks after one plugin answer. A reference to a whole block
+ * closes it. A reference to one question closes that question, and the block
+ * once every question has an answer. Only the revision named counts, so an
+ * edit to a block opens again the questions answered before it. A block that
+ * is not in the question format has no numbered question to answer.
+ */
+export function closeAnswered(open: readonly QuestionBlock[], refs: readonly AnswerRef[]): QuestionBlock[] {
+  const left: QuestionBlock[] = [];
+  for (const block of open) {
+    const named = refs.filter((ref) => ref.blockId === block.commentId && ref.revision === block.revision);
+    if (named.some((ref) => ref.question === null)) continue;
+    if (block.format === "raw" || named.length === 0) {
+      left.push(block);
+      continue;
+    }
+    const questions = block.questions.filter((question) => !named.some((ref) => ref.question === question.number));
+    if (questions.length > 0) left.push({ ...block, questions });
+  }
+  return left;
+}
+
+/**
+ * The question blocks on one issue that still wait for an answer, each with
+ * only its questions that have none yet.
  *
- * An answer written by this plugin names the blocks it answers and closes
- * only those, at the revision it names. Any other unsigned comment closes
- * every block before it, as the Charter has it. Naming the blocks keeps a
- * question that lands while an answer is being posted open.
+ * An answer written by this plugin names the blocks, or the questions of a
+ * block, it answers and closes only those, at the revision it names. Any
+ * other unsigned comment closes every block before it, as the Charter has
+ * it. Naming them keeps a question that lands while an answer is being
+ * posted open.
  *
  * Check-in: every question block. needs-decision: only the latest signed
  * comment; the caller checks the label itself.
@@ -252,10 +286,7 @@ export function openBlocks(kind: IssueKind, comments: readonly LinearComment[]):
       else if (block !== null) open.push(block);
     } else if (role === "answer") {
       const refs = answeredBlocks(comment.body);
-      open =
-        refs === null
-          ? []
-          : open.filter((block) => !refs.some((ref) => ref.blockId === block.commentId && ref.revision === block.revision));
+      open = refs === null ? [] : closeAnswered(open, refs);
     }
   }
   return open;
@@ -289,14 +320,15 @@ function postedAt(block: QuestionBlock): string {
 }
 
 /**
- * The header line that names one block: its date, and the comment id and
- * revision that `answeredBlocks` reads back. `posted` adds the time, which
- * tells apart two blocks of the same day.
+ * The header line that names one block, or one question of it: its date,
+ * and the comment id, revision, and question number that `answeredBlocks`
+ * reads back. `posted` adds the time, which tells apart two blocks of the
+ * same day.
  */
-export function answerHeader(block: QuestionBlock, posted: boolean): string {
-  const noun = block.format === "raw" ? "Answer to the question" : "Answers to the questions";
+export function answerHeader(block: QuestionBlock, posted: boolean, question: number | null = null): string {
+  const noun = question !== null ? "Answer to the questions" : block.format === "raw" ? "Answer to the question" : "Answers to the questions";
   const when = posted ? `, posted ${postedAt(block)}` : "";
-  return `${noun} of ${blockDay(block)}${when} (block ${block.commentId} rev ${block.revision})`;
+  return `${noun} of ${blockDay(block)}${when} (block ${block.commentId} rev ${block.revision})${question === null ? "" : `, Q${question}`}`;
 }
 
 /**
@@ -314,12 +346,48 @@ export function answerCommentId(issueId: string, body: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Whether an answer's block references name exactly the open blocks, at their revisions. */
-export function sameBlocks(sent: readonly BlockRef[], open: readonly QuestionBlock[]): boolean {
-  const key = (id: string, revision: string) => `${id}@${revision}`;
-  const a = sent.map((ref) => key(ref.blockId, ref.revision)).sort();
-  const b = open.map((block) => key(block.commentId, block.revision)).sort();
-  return a.length === b.length && a.every((value, index) => value === b[index]);
+/** The block that a comment holds, read whole: every question, whatever answers came since. */
+function wholeBlock(comments: readonly LinearComment[], ref: BlockRef): QuestionBlock | null {
+  const comment = comments.find((candidate) => candidate.id === ref.blockId);
+  // The id and revision pin the block, so any signed comment may be read as one.
+  const block = comment === undefined ? null : parseQuestionBlock(comment, "needs-decision");
+  return block === null || block.revision !== ref.revision ? null : block;
+}
+
+function byBlockTime(a: QuestionBlock, b: QuestionBlock): number {
+  return Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.commentId.localeCompare(b.commentId);
+}
+
+/**
+ * Compose an answer to the blocks the owner saw, while each is open at that
+ * revision and so is every question the answer names. It is written from
+ * each whole block, so a retry writes the same text whatever closed since,
+ * and finds the earlier copy by its id. Null when something it names is no
+ * longer open: then only an earlier copy of this same answer can finish it.
+ * Throws when the answers do not fit the blocks.
+ */
+export function answerFor(
+  expected: readonly BlockRef[],
+  open: readonly QuestionBlock[],
+  comments: readonly LinearComment[],
+  compose: (blocks: QuestionBlock[]) => string,
+): { body: string; blocks: QuestionBlock[] } | null {
+  const blocks: QuestionBlock[] = [];
+  for (const ref of expected) {
+    const block = open.some((candidate) => candidate.commentId === ref.blockId && candidate.revision === ref.revision) ? wholeBlock(comments, ref) : null;
+    if (block === null) return null;
+    blocks.push(block);
+  }
+  blocks.sort(byBlockTime);
+  const body = compose(blocks);
+  const still = (ref: AnswerRef) =>
+    open.some(
+      (block) =>
+        block.commentId === ref.blockId &&
+        block.revision === ref.revision &&
+        (ref.question === null || (block.format === "parsed" && block.questions.some((question) => question.number === ref.question))),
+    );
+  return (answeredBlocks(body) ?? []).every(still) ? { body, blocks } : null;
 }
 
 /**
@@ -333,16 +401,13 @@ export function postedBefore(
   expected: readonly BlockRef[],
   compose: (blocks: QuestionBlock[]) => string,
 ): { commentId: string; body: string; blocks: QuestionBlock[] } | null {
-  const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const blocks: QuestionBlock[] = [];
   for (const ref of expected) {
-    const comment = byId.get(ref.blockId);
-    // The id and revision pin the block, so any signed comment may be read as one.
-    const block = comment === undefined ? null : parseQuestionBlock(comment, "needs-decision");
-    if (block === null || block.revision !== ref.revision) return null;
+    const block = wholeBlock(comments, ref);
+    if (block === null) return null;
     blocks.push(block);
   }
-  blocks.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.commentId.localeCompare(b.commentId));
+  blocks.sort(byBlockTime);
   let body: string;
   try {
     body = compose(blocks);
@@ -350,7 +415,7 @@ export function postedBefore(
     return null;
   }
   const commentId = answerCommentId(issueId, body);
-  return byId.has(commentId) ? { commentId, body, blocks } : null;
+  return comments.some((comment) => comment.id === commentId) ? { commentId, body, blocks } : null;
 }
 
 /**
@@ -364,11 +429,13 @@ export function composeTextAnswer(blocks: readonly QuestionBlock[], text: string
 }
 
 /**
- * Write the one unsigned comment that answers every open block on an issue,
- * numbered to match. Each block gets a header that names it, so the answer
- * closes those blocks and no other. The header comes first, so the answer can
- * never read as signed. Throws when the answers do not fit the blocks or say
- * nothing.
+ * Write the one unsigned comment that answers the named blocks, numbered to
+ * match. It answers each block as a whole when it answers every question of
+ * it, under one header that names the block, as before. Otherwise each header
+ * names one question it answers, and the block stays open for the rest: a
+ * question with nothing picked or typed is left out, not posted as an
+ * answer. The headers come first, so the answer can never read as signed.
+ * Throws when the answers do not fit the blocks or say nothing for one.
  */
 export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonly BlockAnswer[]): string {
   const byBlock = new Map<string, BlockAnswer>();
@@ -381,15 +448,14 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
   const missing = blocks.filter((block) => !byBlock.has(block.commentId)).map((block) => block.commentId);
   if (missing.length > 0) throw new Error(`missing answers for block ${missing.join(", ")}`);
 
-  let said = false;
+  const posted = blocks.length > 1;
   const sections = blocks.map((block) => {
     const answer = byBlock.get(block.commentId)!;
-    const header = answerHeader(block, blocks.length > 1);
     if (block.format === "raw") {
       if (answer.answers.length > 0) throw new Error(`block ${block.commentId} is not in the question format; answer it with text`);
       const text = answer.text?.trim() ?? "";
-      if (text !== "") said = true;
-      return `${header}\n\n${text === "" ? "No answer." : text}`;
+      if (text === "") throw new Error(`nothing to post for block ${block.commentId}: the answer is empty`);
+      return `${answerHeader(block, posted)}\n\n${text}`;
     }
     const byNumber = new Map<number, QuestionAnswer>();
     for (const item of answer.answers) {
@@ -401,18 +467,24 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
       }
       byNumber.set(item.number, item);
     }
-    const lines = block.questions.map((question) => {
+    const lines: string[] = [];
+    const answered: number[] = [];
+    for (const question of block.questions) {
       const item = byNumber.get(question.number);
       const note = item?.text.trim() ?? "";
       const option = question.options.find((candidate) => candidate.letter === item?.option);
-      if (option === undefined && note === "") return `Q${question.number}. No answer.`;
-      said = true;
-      if (option === undefined) return `Q${question.number}. ${note}`;
-      const picked = `Q${question.number}. ${option.letter}: ${option.text.replace(/\n/g, " ")}`;
-      return note === "" ? picked : `${picked}\n${note}`;
-    });
-    return [header, ...lines].join("\n\n");
+      if (option === undefined && note === "") continue;
+      answered.push(question.number);
+      if (option === undefined) lines.push(`Q${question.number}. ${note}`);
+      else {
+        const picked = `Q${question.number}. ${option.letter}: ${option.text.replace(/\n/g, " ")}`;
+        lines.push(note === "" ? picked : `${picked}\n${note}`);
+      }
+    }
+    if (answered.length === 0) throw new Error(`nothing to post for block ${block.commentId}: every answer is empty`);
+    const headers =
+      answered.length === block.questions.length ? [answerHeader(block, posted)] : answered.map((number) => answerHeader(block, posted, number));
+    return [headers.join("\n"), ...lines].join("\n\n");
   });
-  if (!said) throw new Error("nothing to post: every answer is empty");
   return sections.join("\n\n");
 }
