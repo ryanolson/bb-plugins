@@ -204,18 +204,25 @@ export interface BlockRef {
 
 const ANSWER_HEADER = /^\s*Answers? to the questions? of /;
 const BLOCK_REFERENCE = /\(block ([^\s)]+) rev ([0-9a-f]{12})\)/g;
-/** The first words of the record of an answered bb question. */
+/** The first words of the record of an answered or withdrawn bb question. */
 export const RECORD_HEADER = "Answer to bb question";
+/** The first line of the comment that marks a todo done. */
+export const TODO_DONE_HEADER = "Done (from the SGC page)";
+/** The first line of the comment that reopens a todo marked done by mistake. */
+export const TODO_REOPENED_HEADER = "Reopened (from the SGC page)";
 
 /**
  * The blocks a plugin answer names in its header lines, or null for a plain
  * answer, which names none and so closes every block before it. The record of
  * a bb question starts with the record header and names no block, whatever
- * else it holds: the question it records can quote an answer header.
+ * else it holds: the question it records can quote an answer header. A
+ * comment that marks a todo done or reopened names no block either: it is
+ * the owner's comment, but not an answer.
  */
 export function answeredBlocks(body: string): BlockRef[] | null {
   const lines = body.replace(/\r\n?/g, "\n").split("\n");
-  if ((lines.find((line) => line.trim() !== "") ?? "").trimStart().startsWith(`${RECORD_HEADER} `)) return [];
+  const first = (lines.find((line) => line.trim() !== "") ?? "").trim();
+  if (first.startsWith(`${RECORD_HEADER} `) || first === TODO_DONE_HEADER || first === TODO_REOPENED_HEADER) return [];
   const refs: BlockRef[] = [];
   for (const line of lines) {
     if (!ANSWER_HEADER.test(line)) continue;

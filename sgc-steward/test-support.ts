@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createSgcStewardPlugin } from "./server.ts";
 import type { Snapshot } from "./lib/contract.ts";
-import { LinearError, type LinearClient, type LinearIssue } from "./lib/linear.ts";
+import { HUMAN_LABEL, LinearError, TODO_LABEL, type LinearClient, type LinearIssue, type TodoIssue } from "./lib/linear.ts";
 import type { LinearComment } from "./lib/questions.ts";
 
 export const KEY = "lin_api_test_not_a_real_key";
@@ -18,6 +18,9 @@ export const QUESTIONS = [
 ].join("\n");
 
 export interface FakeIssue extends LinearIssue {
+  state: { id: string; type: string } | null;
+  description: string;
+  assignedToMe: boolean;
   comments: LinearComment[];
 }
 
@@ -30,6 +33,11 @@ export class FakeLinear implements LinearClient {
   createFaults: Array<"lost" | "dropped"> = [];
   createFaultKind: "network" | "timeout" = "network";
   removeLabelFaults: Array<"lost" | "dropped"> = [];
+  /** The team's workflow states, as Linear lists them. */
+  states = [
+    { id: "state-started", name: "In Progress", type: "started" },
+    { id: "state-done", name: "Done", type: "completed" },
+  ];
   private clock = Date.parse("2026-01-05T10:00:00Z");
 
   tick(): string {
@@ -37,7 +45,7 @@ export class FakeLinear implements LinearClient {
     return new Date(this.clock).toISOString();
   }
 
-  addIssue(identifier: string, labels: string[], teamKey = "TEAM"): FakeIssue {
+  addIssue(identifier: string, labels: string[], teamKey = "TEAM", extra: Partial<Pick<FakeIssue, "description" | "assignedToMe" | "state">> = {}): FakeIssue {
     const issue: FakeIssue = {
       id: `uuid-${identifier}`,
       identifier,
@@ -45,9 +53,12 @@ export class FakeLinear implements LinearClient {
       url: `https://linear.example/${identifier}`,
       updatedAt: this.tick(),
       teamKey,
-      state: { type: "started" },
+      state: { id: "state-started", type: "started" },
       labels: labels.map((name) => ({ id: `label-${name}`, name })),
+      description: "",
+      assignedToMe: false,
       comments: [],
+      ...extra,
     };
     this.issues.push(issue);
     return issue;
@@ -95,6 +106,45 @@ export class FakeLinear implements LinearClient {
     if (fault !== "dropped") this.post(issue, commentId, body);
     if (fault !== undefined) throw new LinearError(this.createFaultKind, "could not reach Linear: socket hang up");
     return commentId;
+  }
+
+  todo(issue: FakeIssue): TodoIssue {
+    const { id, identifier, title, url, description, teamKey, labels, assignedToMe } = issue;
+    return structuredClone({ id, identifier, title, url, description, teamKey, state: issue.state, labels, assignedToMe });
+  }
+
+  async listTodoIssues(teamKey: string) {
+    this.calls.push(`listTodoIssues ${teamKey}`);
+    return this.issues
+      .filter((issue) => issue.teamKey === teamKey && issue.labels.some((label) => [TODO_LABEL, HUMAN_LABEL].includes(label.name)))
+      .filter((issue) => issue.state?.type !== "completed" && issue.state?.type !== "canceled")
+      .map((issue) => this.todo(issue));
+  }
+
+  async getTodoIssue(id: string) {
+    this.calls.push(`getTodoIssue ${id}`);
+    const issue = this.find(id);
+    return issue === undefined ? null : this.todo(issue);
+  }
+
+  async doneStateId(teamKey: string) {
+    this.calls.push(`doneStateId ${teamKey}`);
+    return this.states.find((state) => state.type === "completed")?.id ?? null;
+  }
+
+  async setState({ issueId, stateId }: { issueId: string; stateId: string }) {
+    this.calls.push(`setState ${issueId} ${stateId}`);
+    const issue = this.find(issueId)!;
+    const state = this.states.find((candidate) => candidate.id === stateId)!;
+    issue.state = { id: state.id, type: state.type };
+    issue.updatedAt = this.tick();
+  }
+
+  async addLabel({ issueId, labelId }: { issueId: string; labelId: string }) {
+    this.calls.push(`addLabel ${issueId} ${labelId}`);
+    const issue = this.find(issueId)!;
+    if (!issue.labels.some((label) => label.id === labelId)) issue.labels.push({ id: labelId, name: labelId.replace(/^label-/, "") });
+    issue.updatedAt = this.tick();
   }
 
   async removeLabel({ issueId, labelId }: { issueId: string; labelId: string }) {

@@ -303,6 +303,14 @@ test("an answer that names its blocks closes only those blocks, at their revisio
   assert.equal(answeredBlocks(mention.body), null, "only answer header lines name blocks");
 });
 
+test("a todo marked done or reopened answers no Linear block, but only as the first line", () => {
+  for (const body of ["Done (from the SGC page)", "Done (from the SGC page)\n\nLogged in.", "Reopened (from the SGC page)"]) {
+    assert.deepEqual(answeredBlocks(body), [], body);
+    assert.deepEqual(openBlocks("checkin", [comment("q1", QUESTIONS), comment("d1", body)]).map((open) => open.commentId), ["q1"]);
+  }
+  assert.equal(answeredBlocks("Go with A.\n\nDone (from the SGC page)"), null, "a plain answer that quotes the marker still answers");
+});
+
 test("a record of a bb question answers no Linear block", () => {
   const record = ["Answer to bb question bbq_test1 from thread thr_test9 (asked 2026-01-05 10:00 UTC)", "", "Question:", "Ship it?", "", "Answer:", "A: Yes."].join("\n");
   assert.equal(commentRole({ body: record, author: "user" }), "answer");

@@ -309,3 +309,75 @@ test("failures become LinearError with a kind, and never carry the key", async (
     });
   }
 });
+
+function todoNode(id: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    identifier: `TEAM-${id}`,
+    title: `Todo ${id}`,
+    url: `https://linear.example/${id}`,
+    description: "- [ ] Log in",
+    team: { key: "TEAM" },
+    state: { id: `state-${id}`, type: "started" },
+    assignee: { isMe: true },
+    labels: { nodes: [{ id: "label-human", name: "human" }] },
+    ...extra,
+  };
+}
+
+test("todo issues: one team, the todo and human labels, open states, every page, with missing fields made safe", async () => {
+  const { calls, client } = fakeLinear([
+    { json: { data: { issues: { nodes: [todoNode("1")], pageInfo: { hasNextPage: true, endCursor: "c1" } } } } },
+    { json: { data: { issues: { nodes: [todoNode("2", { description: null, assignee: null })], pageInfo: { hasNextPage: false, endCursor: null } } } } },
+  ]);
+  const issues = await client.listTodoIssues("TEAM");
+  assert.deepEqual(
+    issues.map((found) => [found.identifier, found.description, found.assignedToMe, found.state, found.teamKey]),
+    [
+      ["TEAM-1", "- [ ] Log in", true, { id: "state-1", type: "started" }, "TEAM"],
+      ["TEAM-2", "", false, { id: "state-2", type: "started" }, "TEAM"],
+    ],
+  );
+  assert.deepEqual(calls[0]?.variables, { teamKey: "TEAM", labels: ["waiting:ryan-action", "human"], after: null });
+  assert.equal(calls[1]?.variables.after, "c1");
+  assert.match(calls[0]?.query ?? "", /state: \{ type: \{ nin: \["completed", "canceled"\] \} \}/);
+  assert.match(calls[0]?.query ?? "", /assignee \{ isMe \}/);
+});
+
+test("one issue is read as a todo by id, and one that does not exist is null", async () => {
+  const { calls, client } = fakeLinear([
+    { json: { data: { issue: todoNode("7") } } },
+    { json: { data: null, errors: [{ message: "Entity not found: Issue", extensions: { code: "INVALID_INPUT" } }] } },
+  ]);
+  assert.equal((await client.getTodoIssue("TEAM-7"))?.identifier, "TEAM-7");
+  assert.deepEqual(calls[0]?.variables, { id: "TEAM-7" });
+  assert.equal(await client.getTodoIssue("TEAM-404"), null);
+});
+
+test("the team's Done state is its completed state named Done, else the first completed state", async () => {
+  const { calls, client } = fakeLinear([
+    { json: { data: { workflowStates: { nodes: [{ id: "s-shipped", name: "Shipped", position: 1 }, { id: "s-done", name: "Done", position: 3 }] } } } },
+    { json: { data: { workflowStates: { nodes: [{ id: "s-closed", name: "Closed", position: 5 }, { id: "s-finished", name: "Finished", position: 2 }] } } } },
+    { json: { data: { workflowStates: { nodes: [] } } } },
+  ]);
+  assert.equal(await client.doneStateId("TEAM"), "s-done");
+  assert.equal(await client.doneStateId("TEAM"), "s-finished");
+  assert.equal(await client.doneStateId("TEAM"), null);
+  assert.deepEqual(calls[0]?.variables, { teamKey: "TEAM" });
+  assert.match(calls[0]?.query ?? "", /type: \{ eq: "completed" \}/);
+});
+
+test("moving an issue to a state and adding a label report failure", async () => {
+  const { calls, client } = fakeLinear([
+    { json: { data: { issueUpdate: { success: true } } } },
+    { json: { data: { issueUpdate: { success: false } } } },
+    { json: { data: { issueAddLabel: { success: true } } } },
+    { json: { data: { issueAddLabel: { success: false } } } },
+  ]);
+  await client.setState({ issueId: "issue-1", stateId: "s-done" });
+  assert.deepEqual(calls[0]?.variables, { id: "issue-1", stateId: "s-done" });
+  await assert.rejects(client.setState({ issueId: "issue-1", stateId: "s-done" }), /Linear did not change the issue's state/);
+  await client.addLabel({ issueId: "issue-1", labelId: "label-1" });
+  assert.deepEqual(calls[2]?.variables, { id: "issue-1", labelId: "label-1" });
+  await assert.rejects(client.addLabel({ issueId: "issue-1", labelId: "label-1" }), /Linear did not add the label/);
+});
