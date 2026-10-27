@@ -24,7 +24,8 @@ A service on the bb server polls Linear every five minutes for the team's issues
 - When Done posts its comment but then cannot change the state or the label, the todo stays on the list, and a second Done posts a second comment.
 - Undo works only for a Done from the page in this plugin load, for an hour. After a reload or an update, reopen the issue in Linear.
 - The first poll after the update announces every todo open then, in one notification.
-- Any agent can change plugin settings: every agent runs as you, with full access, and bb has no setting that only you can change. So an agent can name itself in `stewardThread` and then withdraw the questions of other threads. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
+- The plugin cannot tell a Done by you from one an agent ran with `bb sgc todo done`: the CLI does not verify its caller. The skill tells agents to run it only to relay your own word that the action is done.
+- Any agent can change plugin settings: every agent runs as you, with full access, and bb has no setting that only you can change. So an agent can name itself in `stewardThread`, then withdraw the questions of other threads and get the messages about your todos. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
 - The `bb sgc` CLI takes the calling thread from `BB_THREAD_ID`, which the bb CLI forwards without checking. So `withdraw` and `ask --thread` trust it, and a process that sets it can withdraw another thread's question or ask for another thread. Withdrawing any thread's question is therefore not in the CLI. It is only in the `sgc_withdraw_question` agent tool. The bb plugin SDK hands that tool, for each call, the thread of the agent session that made the call, and no argument or environment variable sets it.
 
 ## For agents

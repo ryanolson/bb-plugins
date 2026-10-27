@@ -39,7 +39,7 @@ export const SETTINGS = {
   stewardThread: {
     type: "string",
     label: "Steward thread",
-    description: `The bb thread id of the steward, which may withdraw any open bb question, with a reason, through the ${WITHDRAW_TOOL} agent tool. Unset, each thread withdraws only its own.`,
+    description: `The bb thread id of the steward, which may withdraw any open bb question, with a reason, through the ${WITHDRAW_TOOL} agent tool, and which gets a message when the owner marks a todo done or reopens it. Unset, each thread withdraws only its own, and no todo messages are sent.`,
     experimental_schema: z.string().regex(/^thr_[a-z0-9]+$/, "Use a bb thread id, like thr_abc123"),
   },
 } satisfies Record<string, PluginSettingDescriptor>;

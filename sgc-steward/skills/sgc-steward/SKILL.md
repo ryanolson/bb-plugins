@@ -90,6 +90,7 @@ bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--re
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached]
 bb sgc todos [--json] [--cached]
+bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 ```
 
@@ -97,3 +98,4 @@ bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <nam
 - `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text. Pass every open block of the issue, as `bb sgc questions` prints it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.
+- `bb sgc todo done` marks a todo done as the owner, and the steward treats its message as the owner's word. Run it only to relay the owner's own word that the action is done, never on your own judgment.
