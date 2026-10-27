@@ -45,7 +45,7 @@ import {
   withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
-import { ASK_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered } from "./lib/ask-store.ts";
+import { STORE_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered } from "./lib/ask-store.ts";
 import {
   rpcContract,
   type AnswerResult,
@@ -150,7 +150,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         first_seen_at INTEGER NOT NULL,
         notified_at INTEGER
       )`,
-      ...ASK_MIGRATIONS,
+      ...STORE_MIGRATIONS,
     ]);
     const asks = createAskStore(db);
 

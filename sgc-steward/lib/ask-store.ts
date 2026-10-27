@@ -7,8 +7,12 @@ import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { ASK_LIMITS, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
 
-/** Appended after the plugin's earlier migrations; never reorder or edit. */
-export const ASK_MIGRATIONS: readonly string[] = [
+/**
+ * Every migration after seen_blocks, in order: the plugin's one migration
+ * list. The host keys each statement by its index and refuses an edited one,
+ * so only append; never reorder or edit.
+ */
+export const STORE_MIGRATIONS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS asks (
     id TEXT PRIMARY KEY,
     thread_id TEXT NOT NULL,

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { ASK_MIGRATIONS, createAskId, createAskStore } from "./ask-store.ts";
+import { STORE_MIGRATIONS, createAskId, createAskStore } from "./ask-store.ts";
 import type { Ask } from "./asks.ts";
 
 let clock = Date.parse("2026-01-05T10:00:00Z");
@@ -20,7 +20,7 @@ function migrate(db: Database.Database, statements: readonly string[]) {
 
 function open(path = ":memory:") {
   const db = new Database(path);
-  migrate(db, ASK_MIGRATIONS);
+  migrate(db, STORE_MIGRATIONS);
   return { db, store: createAskStore(db, now) };
 }
 
@@ -47,17 +47,18 @@ function own(thread: string) {
 
 test("the shipped migration statements never change, because the host refuses a changed one", () => {
   const hash = (statement: string) => createHash("sha256").update(statement).digest("hex").slice(0, 16);
-  assert.deepEqual(ASK_MIGRATIONS.slice(0, 3).map(hash), ["201efed5e3e033d1", "00e4f9328a580a32", "b6975aa10840e9c7"]);
+  const shipped = ["201efed5e3e033d1", "00e4f9328a580a32", "b6975aa10840e9c7", "3d3eefa6d3eb3097", "8bf1acf89069b93d", "3e5eaeeb41357d9c"];
+  assert.deepEqual(STORE_MIGRATIONS.slice(0, shipped.length).map(hash), shipped);
 });
 
 test("a database from before the withdrawal columns upgrades, and its questions can be withdrawn", () => {
   const db = new Database(":memory:");
-  migrate(db, ASK_MIGRATIONS.slice(0, 3));
+  migrate(db, STORE_MIGRATIONS.slice(0, 3));
   db.prepare(
     `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
      VALUES ('bbq_old', 'thr_a', 'Thread A', 'Old?', '[]', NULL, 1, 'open', NULL)`,
   ).run();
-  migrate(db, ASK_MIGRATIONS);
+  migrate(db, STORE_MIGRATIONS);
   const store = createAskStore(db, now);
   const before = store.get("bbq_old")!;
   assert.deepEqual([before.state, before.withdrawnBy, before.withdrawReason, before.withdrawnAt], ["open", null, null, null]);
