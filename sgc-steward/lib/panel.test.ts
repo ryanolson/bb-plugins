@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerProgress, announcement, askAnswerInput, orderCards, questionBadge, toAnswerBlocks, type BlockDraft } from "./panel.ts";
+import { answerProgress, announcement, askAnswerInput, orderCards, questionBadge, toAnswerBlocks, withDone, type BlockDraft } from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
 
 function block(id: string, body: string, createdAt: string): QuestionBlock {
@@ -120,4 +120,11 @@ test("the badge counts open questions, then flags answers that did not go out, t
   assert.deepEqual(questionBadge({ ...base, undelivered: [{}], unposted: [{}] }), { tone: "critical", label: "2 answers did not go out" });
   assert.deepEqual(questionBadge({ ...base, configured: false }), { tone: "critical", label: "SGC Steward needs a Linear API key" });
   assert.deepEqual(questionBadge({ ...base, error: "boom" }), { tone: "critical", label: "SGC Steward cannot read Linear" });
+});
+
+test("a new Done of an issue replaces the page's Undo for its earlier Done", () => {
+  const first = { issueId: "uuid-1", undo: "t-1" };
+  const other = { issueId: "uuid-2", undo: "t-2" };
+  const newer = { issueId: "uuid-1", undo: "t-3" };
+  assert.deepEqual(withDone(withDone(withDone([], first), other), newer), [other, newer]);
 });

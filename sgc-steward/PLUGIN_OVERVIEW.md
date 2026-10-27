@@ -17,7 +17,7 @@ A todo's Done or Undo is kept in the same database before it writes to Linear. I
 
 - Each Done or Undo is one row that holds its message, and the steward thread it goes to, from the start. A retry changes neither.
 - Finishing that row and keeping its message to send are one transaction, so the steward hears once, after Linear holds the change. Giving up an action is one delete, before any message exists.
-- Every Undo, a retry included, checks the issue against what its Done left. It writes nothing to an issue that changed since.
+- Every Undo, a retry included, first checks that its Done is the latest on the issue, and that the issue is as that Done left it. Otherwise it writes nothing.
 - Messages go out one at a time, in the order their actions finished. On one issue, an action finishes or is given up before the next one begins, so its messages first go out in the order you took them.
 
 ## Known limits
@@ -27,7 +27,8 @@ A todo's Done or Undo is kept in the same database before it writes to Linear. I
 - An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
 - An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
 - Only a signature with a bb thread id, like `thr_abc123`, gets the answer sent to a thread.
-- Undo works only for a Done from the page in this plugin load, for an hour. After a reload or an update, reopen the issue in Linear.
+- Undo works only for a Done from the page in this plugin load, for an hour, and only for the latest Done of its issue. After a reload or an update, reopen the issue in Linear.
+- The plugin knows only its own Dones. If someone reopens an issue in Linear and completes it there again, with the same state and labels, Undo of the plugin's earlier Done still passes its checks and puts back the state from before that Done.
 - A todo message that failed to send, or whose send a restart cut short, waits for your retry on the page. So the steward can get it after a later message about the same issue. When two messages about one issue disagree, the issue in Linear decides.
 - An Undo posts its `Reopened (from the SGC page)` comment before it changes the issue. When it cannot finish, because the issue changed since the Done or no page can retry it any more, the plugin gives it up, and the comment stays without the change.
 - The first poll after the update announces every todo open then, in one notification.

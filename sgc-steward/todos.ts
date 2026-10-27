@@ -13,8 +13,9 @@
 //   to, from the start. A retry changes neither.
 // - Finishing the row and keeping its message to send are one transaction.
 //   Giving it up is one delete, before any message exists.
-// - Every Undo attempt checks the issue against what its Done left, and
-//   writes nothing to an issue that changed since.
+// - Every Undo attempt first checks that its Done is the latest on the
+//   issue, and that the issue is as that Done left it. Otherwise it writes
+//   nothing.
 // - Messages go out one at a time, in the order their actions finished. On
 //   one issue, an action finishes or is given up before the next begins. A
 //   send that fails waits for the owner's retry, so it can arrive late.
@@ -141,6 +142,9 @@ export function createTodos(deps: TodoDeps) {
         : null,
     )();
     deps.forget(action.issueId);
+    // Undo reverses the latest Done of an issue only, so each Done, however it
+    // finished, retires the undos of the Dones before it.
+    if (action.kind === "done") for (const [token, undo] of undos) if (undo.issueId === action.issueId) undos.delete(token);
     return { told: kept === null ? Promise.resolve<StewardTold>("skipped") : send(kept) };
   }
 
@@ -277,7 +281,7 @@ export function createTodos(deps: TodoDeps) {
       throw new Refusal("invalid", message(error));
     }
     const steward = await deps.steward();
-    const { action, told, resumed, after } = await deps.write(async (linear, teamKey) => {
+    const { action, told, resumed } = await deps.write(async (linear, teamKey) => {
       const issue = await linear.getTodoIssue(issueRef);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${issueRef}.`);
       if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
@@ -313,27 +317,33 @@ export function createTodos(deps: TodoDeps) {
         action = { ...begun, attemptedAt: Date.now() };
       }
       const { told } = await carry(linear, action, issue);
+      // Under the lock, right after the finish retired the older undos.
+      remember(action.id, {
+        issueId: action.issueId,
+        identifier: action.identifier,
+        title: action.title,
+        restore: { change: action.change, id: action.restoreId! },
+        after: leftBy(action, issue),
+        at: Date.now(),
+      });
       todos = todos.filter((todo) => todo.id !== issue.id);
       deps.publish();
-      return { action, told, resumed, after: leftBy(action, issue) };
-    });
-    remember(action.id, {
-      issueId: action.issueId,
-      identifier: action.identifier,
-      title: action.title,
-      restore: { change: action.change, id: action.restoreId! },
-      after,
-      at: Date.now(),
+      return { action, told, resumed };
     });
     return { identifier: action.identifier, commentId: action.id, change: action.change, steward: await told, undo: action.id, resumed };
   }
 
+  /** The undo of a token: one of the last hour, for the latest Done of its issue. Null once retired or expired. */
+  function undoFor(token: string): Undo | null {
+    const undo = undos.get(token);
+    return undo === undefined || Date.now() - undo.at > UNDO_MS ? null : undo;
+  }
+
   /** Undo a Done of this plugin load: one comment from the owner, then the state or the todo label back. */
   async function reopen(token: string) {
-    const undo = undos.get(token);
-    if (undo === undefined || Date.now() - undo.at > UNDO_MS) {
-      throw new Refusal("not_found", "That Done can no longer be undone here. Reopen the issue in Linear.");
-    }
+    const gone = () => new Refusal("not_found", "That Done can no longer be undone here. Reopen the issue in Linear.");
+    const undo = undoFor(token);
+    if (undo === null) throw gone();
     const steward = await deps.steward();
     const { told } = await deps.write(async (linear, teamKey) => {
       const issue = await linear.getTodoIssue(undo.issueId);
@@ -342,6 +352,9 @@ export function createTodos(deps: TodoDeps) {
       if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}, so this plugin does not reopen it.`);
       // An earlier Done finishes, or is given up, before this Undo begins.
       await resolve(linear, issue, "done");
+      // Checked again before any write: a newer Done, finished while this
+      // call waited for the lock or by resolve just now, retired this undo.
+      if (undoFor(token) === null) throw gone();
       let finished: { told: Promise<StewardTold> } | null;
       if (!unchangedSince(issue, undo.after)) {
         // Undo reverses its own Done only, so it writes nothing once the issue

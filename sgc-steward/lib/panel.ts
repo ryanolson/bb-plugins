@@ -138,3 +138,11 @@ export function questionBadge(view: BadgeInput): { count?: number; tone: "warnin
   if (view.error !== null) return { tone: "critical", label: "SGC Steward cannot read Linear" };
   return null;
 }
+
+/**
+ * The page's undoable Dones after a new one. Undo applies to the latest Done
+ * of an issue only, so a new Done replaces the entry of an earlier one.
+ */
+export function withDone<T extends { issueId: string }>(list: readonly T[], entry: T): T[] {
+  return [...list.filter((candidate) => candidate.issueId !== entry.issueId), entry];
+}

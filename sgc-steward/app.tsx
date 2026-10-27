@@ -28,6 +28,7 @@ import {
   orderCards,
   questionBadge,
   toAnswerBlocks,
+  withDone,
   type AskDraft,
   type BlockDraft,
 } from "./lib/panel.ts";
@@ -472,6 +473,7 @@ function Undelivered({ undelivered, unposted }: { undelivered: DeliveryView[]; u
 
 /** A Done from this page that can still be undone. */
 interface DoneHere {
+  issueId: string;
   identifier: string;
   title: string;
   undo: string;
@@ -495,7 +497,7 @@ function TodoCard({ todo, onDone }: { todo: TodoView; onDone: (entry: DoneHere) 
     try {
       const result = await rpc.call("todos.done", { issue: todo.id, note });
       stewardToast(result.resumed ? "Finished the earlier Done, with its own note, of" : "Marked done", todo.identifier, result.steward);
-      onDone({ identifier: todo.identifier, title: todo.title, undo: result.undo });
+      onDone({ issueId: todo.id, identifier: todo.identifier, title: todo.title, undo: result.undo });
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -575,7 +577,7 @@ function Todos({ todos, todoError }: { todos: TodoView[]; todoError: string | nu
       ) : (
         <ul className="space-y-2">
           {todos.map((todo) => (
-            <TodoCard key={todo.id} todo={todo} onDone={(entry) => setDoneHere((current) => [...current, entry])} />
+            <TodoCard key={todo.id} todo={todo} onDone={(entry) => setDoneHere((current) => withDone(current, entry))} />
           ))}
         </ul>
       )}

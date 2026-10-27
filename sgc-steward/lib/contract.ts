@@ -172,7 +172,7 @@ export const rpcContract = defineRpcContract({
       commentId: z.string(),
       change: z.enum(["state", "label"]),
       steward: z.enum(["sent", "failed", "skipped"]),
-      /** Hand it to todos.reopen to undo this Done, while the plugin stays loaded. */
+      /** Hand it to todos.reopen to undo this Done, while the plugin stays loaded and no newer Done of the issue finishes. */
       undo: z.string(),
       /** This finished an earlier Done of the issue that had not finished, with that Done's own comment and note. */
       resumed: z.boolean(),

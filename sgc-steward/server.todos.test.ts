@@ -478,3 +478,63 @@ test("an Undo that finished reports success even when the read after it fails", 
   assert.deepEqual(issue.labels.map((label) => label.name), [ACTION]);
   assert.equal(sends.length, 2);
 });
+
+/** The next Done's state change lands, but its reply is lost, and so is the read after it, so that Done stays unfinished. */
+function loseNextDone(linear: Fake): void {
+  const setState = linear.setState.bind(linear);
+  const getTodoIssue = linear.getTodoIssue.bind(linear);
+  let lost = false;
+  linear.setState = async (args) => {
+    await setState(args);
+    linear.setState = setState;
+    lost = true;
+    throw new LinearError("network", "Linear took the state, but its reply was lost");
+  };
+  linear.getTodoIssue = async (id) => {
+    if (!lost) return getTodoIssue(id);
+    lost = false;
+    linear.getTodoIssue = getTodoIssue;
+    throw new LinearError("network", "could not reach Linear");
+  };
+}
+
+/** A human todo done once, reopened in Linear, and done again by a Done that landed but did not finish. */
+async function doneTwice(harness: Harness, linear: Fake) {
+  linear.states.push({ id: "state-review", name: "In Review", type: "started" });
+  const issue = linear.addIssue("TEAM-1", ["human"], "TEAM", { assignedToMe: true });
+  const { undo } = await done(harness, "TEAM-1");
+  issue.state = { id: "state-review", type: "started" };
+  loseNextDone(linear);
+  assert.match((await rejection(done(harness, "TEAM-1"))).message, /Press Done again/);
+  assert.deepEqual(issue.state, { id: "state-done", type: "completed" });
+  return { issue, undo };
+}
+
+test("a Done that the poll finishes retires the Undo of the Done before it", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const { issue, undo } = await doneTwice(harness, linear);
+  await refresh(harness);
+  assert.equal(sends.length, 2, "the poll finished the second Done");
+  linear.calls.length = 0;
+  assert.equal((await rejection(harness.behavior.callRpc("todos.reopen", { undo }))).code, "not_found");
+  assert.deepEqual(writes(linear), []);
+  assert.deepEqual(issue.state, { id: "state-done", type: "completed" });
+  assert.equal(sends.length, 2);
+});
+
+test("an Undo refuses, without a write, once the newer Done it finds unfinished turns out to have landed", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const { issue, undo } = await doneTwice(harness, linear);
+  linear.calls.length = 0;
+  assert.equal((await rejection(harness.behavior.callRpc("todos.reopen", { undo }))).code, "not_found");
+  assert.deepEqual(writes(linear), [], "the check runs before any write");
+  assert.deepEqual(issue.state, { id: "state-done", type: "completed" });
+  assert.equal(issue.comments.length, 2, "no Reopened comment");
+  await refresh(harness);
+  assert.deepEqual(sends.map((send) => send.input[0]!.text), [
+    "[sgc-steward] Todo done TEAM-1: Title of TEAM-1",
+    "[sgc-steward] Todo done TEAM-1: Title of TEAM-1",
+  ]);
+});
