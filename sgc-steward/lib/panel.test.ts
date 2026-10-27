@@ -1,6 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerProgress, announcement, askAnswerInput, orderCards, questionBadge, toAnswerBlocks, withDone, type BlockDraft } from "./panel.ts";
+import {
+  PANEL_TABS,
+  answerProgress,
+  announcement,
+  askAnswerInput,
+  noticeTab,
+  orderCards,
+  questionBadge,
+  sendsFor,
+  tabBadges,
+  tabOf,
+  tabPath,
+  toAnswerBlocks,
+  withDone,
+  type BlockDraft,
+} from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
 
 function block(id: string, body: string, createdAt: string): QuestionBlock {
@@ -127,4 +142,41 @@ test("a new Done of an issue replaces the page's Undo for its earlier Done", () 
   const other = { issueId: "uuid-2", undo: "t-2" };
   const newer = { issueId: "uuid-1", undo: "t-3" };
   assert.deepEqual(withDone(withDone(withDone([], first), other), newer), [other, newer]);
+});
+
+test("each tab has its own route, and a route the page does not know shows Questions", () => {
+  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos"]);
+  assert.equal(tabOf(""), "questions");
+  assert.equal(tabOf("todos"), "todos");
+  assert.equal(tabOf("todos/extra"), "todos");
+  assert.equal(tabOf("ideas"), "questions");
+  for (const tab of PANEL_TABS) assert.equal(tabOf(tabPath(tab.id)), tab.id);
+});
+
+test("a notification of new todos only opens Todos; one with any question opens Questions", () => {
+  assert.equal(noticeTab([{ source: "todo" }, { source: "todo" }]), "todos");
+  assert.equal(noticeTab([{ source: "todo" }, { source: "ask" }]), "questions");
+  assert.equal(noticeTab([{ source: "linear" }]), "questions");
+  assert.equal(noticeTab([]), "questions");
+});
+
+test("the steward's todo messages are listed on Todos, every other send on Questions", () => {
+  const rows = [{ source: "ask" }, { source: "todo" }, { source: "linear" }, { source: "withdrawal" }] as const;
+  assert.deepEqual(sendsFor("questions", rows).map((row) => row.source), ["ask", "linear", "withdrawal"]);
+  assert.deepEqual(sendsFor("todos", rows).map((row) => row.source), ["todo"]);
+});
+
+test("each tab's badge counts what is open on it, and flags a failure there", () => {
+  const base = { issues: [], asks: [], issueErrors: [], undelivered: [], unposted: [], todos: [], todoError: null };
+  const quiet = { count: 0, alert: false };
+  assert.deepEqual(tabBadges(base), { questions: quiet, todos: quiet });
+  assert.deepEqual(tabBadges({ ...base, issues: [{ blocks: [parsed, raw] }], asks: [{}], todos: [{}, {}] }), {
+    questions: { count: 4, alert: false },
+    todos: { count: 2, alert: false },
+  });
+  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "todo" }] }), { questions: quiet, todos: { count: 0, alert: true } });
+  assert.deepEqual(tabBadges({ ...base, todoError: "label filter" }).todos, { count: 0, alert: true });
+  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "linear" }] }), { questions: { count: 0, alert: true }, todos: quiet });
+  assert.deepEqual(tabBadges({ ...base, unposted: [{}] }).questions, { count: 0, alert: true });
+  assert.deepEqual(tabBadges({ ...base, issueErrors: [{}] }).questions, { count: 0, alert: true });
 });

@@ -1,7 +1,8 @@
-// SGC Steward frontend: the Questions page, its sidebar badge, and the
-// notifier that tells you, once per question or todo, that new ones came. The
-// page holds two kinds of question, Linear blocks and bb questions agents
-// asked with `bb sgc ask`, and your todos from Linear.
+// SGC Steward frontend: the SGC page, its sidebar badge, and the notifier
+// that tells you, once per question or todo, that new ones came. The page has
+// a tab per list, each at its own route: Questions holds the two kinds of
+// question, Linear blocks and bb questions agents asked with `bb sgc ask`, and
+// Todos holds your todos from Linear.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
@@ -25,12 +26,20 @@ import {
   answerProgress,
   askAnswerInput,
   EMPTY_DRAFT,
+  noticeTab,
   orderCards,
+  PANEL_TABS,
   questionBadge,
+  sendsFor,
+  tabBadges,
+  tabOf,
+  tabPath,
   toAnswerBlocks,
   withDone,
   type AskDraft,
   type BlockDraft,
+  type PanelTab,
+  type TabBadge,
 } from "./lib/panel.ts";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -400,7 +409,7 @@ function AskCard({ ask, onAnswered }: { ask: AskView; onAnswered: () => void }) 
 }
 
 /** Answers saved but not sent to their thread, and records not posted to Linear, each with a retry. */
-function Undelivered({ undelivered, unposted }: { undelivered: DeliveryView[]; unposted: RecordView[] }) {
+function Undelivered({ title, undelivered, unposted }: { title: string; undelivered: DeliveryView[]; unposted: RecordView[] }) {
   const rpc = useRpc<typeof rpcContract>();
   const [busy, setBusy] = useState<string | null>(null);
   if (undelivered.length === 0 && unposted.length === 0) return null;
@@ -420,8 +429,8 @@ function Undelivered({ undelivered, unposted }: { undelivered: DeliveryView[]; u
 
   return (
     <section className="space-y-2 rounded-lg border border-destructive/40 p-4 text-sm">
-      <h2 className="font-medium">Answers that did not go out</h2>
-      <p className="text-xs text-muted-foreground">A send that looked failed may still have arrived, so a retry can deliver an answer twice.</p>
+      <h2 className="font-medium">{title}</h2>
+      <p className="text-xs text-muted-foreground">A send that looked failed may still have arrived, so a retry can deliver it twice.</p>
       <ul className="space-y-2">
         {undelivered.map((row) => (
           <li key={row.id} className="flex flex-wrap items-center gap-2">
@@ -548,12 +557,14 @@ function TodoCard({ todo, onDone }: { todo: TodoView; onDone: (entry: DoneHere) 
   );
 }
 
-/** Your todos, and the ones done from this page, which can be undone while the page stays open. */
-function Todos({ todos, todoError }: { todos: TodoView[]; todoError: string | null }) {
+/**
+ * Your todos, and the ones done from this page, which can be undone while the
+ * page stays open. `known` says Linear was read, so an empty list means none.
+ */
+function Todos({ todos, todoError, known }: { todos: TodoView[]; todoError: string | null; known: boolean }) {
   const rpc = useRpc<typeof rpcContract>();
   const [doneHere, setDoneHere] = useState<DoneHere[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
-  if (todos.length === 0 && doneHere.length === 0 && todoError === null) return null;
 
   async function reopen(entry: DoneHere) {
     setBusy(entry.undo);
@@ -569,11 +580,12 @@ function Todos({ todos, todoError }: { todos: TodoView[]; todoError: string | nu
   }
 
   return (
-    <section className="space-y-3 rounded-lg border border-border bg-card p-4">
-      <h2 className="text-sm font-medium">Todos</h2>
+    <section className="space-y-3">
       {todoError === null ? null : <Notice tone="error">Could not read the todos: {todoError}</Notice>}
       {todos.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No todos.</p>
+        known && todoError === null ? (
+          <Notice>No todos.</Notice>
+        ) : null
       ) : (
         <ul className="space-y-2">
           {todos.map((todo) => (
@@ -599,10 +611,63 @@ function Todos({ todos, todoError }: { todos: TodoView[]; todoError: string | nu
   );
 }
 
-function QuestionsPage() {
+/** The tab bar: each tab with its open count, and a dot when something on it failed. */
+function TabBar({ active, badges, onSelect }: { active: PanelTab; badges: Record<PanelTab, TabBadge> | null; onSelect: (tab: PanelTab) => void }) {
+  return (
+    <div role="tablist" aria-label="SGC Steward" className="flex gap-1 border-b border-border">
+      {PANEL_TABS.map(({ id, label }) => {
+        const badge = badges?.[id];
+        const selected = id === active;
+        return (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            id={`sgc-tab-${id}`}
+            aria-selected={selected}
+            aria-controls={`sgc-panel-${id}`}
+            className={cn(
+              "-mb-px flex cursor-pointer items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium",
+              selected ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+            onClick={() => {
+              if (!selected) onSelect(id);
+            }}
+          >
+            {label}
+            {badge === undefined || badge.count === 0 ? null : (
+              <span className="rounded-full bg-secondary px-1.5 text-xs tabular-nums text-secondary-foreground">{badge.count}</span>
+            )}
+            {badge?.alert ? (
+              <>
+                <span aria-hidden className="size-2 rounded-full bg-destructive" />
+                <span className="sr-only">, needs attention</span>
+              </>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A tab's content. The tabs not shown stay mounted, so drafts and the Undo list survive a switch. */
+function TabPanel({ tab, active, children }: { tab: PanelTab; active: PanelTab; children: ReactNode }) {
+  const shown = tab === active;
+  return (
+    <div role="tabpanel" id={`sgc-panel-${tab}`} aria-labelledby={`sgc-tab-${tab}`} hidden={!shown} className={cn("space-y-4", !shown && "hidden")}>
+      {children}
+    </div>
+  );
+}
+
+/** The SGC page: the last check and its trouble on top, then a tab per list. */
+function SgcPage({ subPath }: { subPath: string }) {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
+  const navigate = useBbNavigate();
   const [refreshing, setRefreshing] = useState(false);
   const now = useNow(30_000);
+  const tab = tabOf(subPath);
 
   async function refresh() {
     setRefreshing(true);
@@ -641,32 +706,46 @@ function QuestionsPage() {
         {snapshot?.error ? (
           <Notice tone="error">
             Could not read Linear: {snapshot.error}
-            {snapshot.issues.length > 0 ? " The questions below are from the last good check." : ""}
+            {snapshot.issues.length > 0 || snapshot.todos.length > 0 ? " The lists below are from the last good check." : ""}
           </Notice>
         ) : null}
-        {snapshot?.issueErrors.map((failed) => (
-          <Notice key={failed.identifier} tone="error">
-            Could not read {failed.identifier}: {failed.message}
-          </Notice>
-        ))}
-        {snapshot === null ? null : <Todos todos={snapshot.todos} todoError={snapshot.todoError} />}
-        {snapshot === null ? null : <Undelivered undelivered={snapshot.undelivered} unposted={snapshot.unposted} />}
-        {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
-          <Notice>No open questions.</Notice>
-        ) : null}
-        {snapshot === null
-          ? null
-          : orderCards(snapshot.issues, snapshot.asks).map((card) =>
-              card.kind === "issue" ? (
-                <IssueCard
-                  key={`${card.issue.id}:${card.issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
-                  issue={card.issue}
-                  onAnswered={load}
-                />
-              ) : (
-                <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
-              ),
-            )}
+        <TabBar
+          active={tab}
+          badges={snapshot === null ? null : tabBadges(snapshot)}
+          onSelect={(next) => navigate.toPluginPanel(PANEL_PATH, { subPath: tabPath(next) })}
+        />
+        <TabPanel tab="questions" active={tab}>
+          {snapshot?.issueErrors.map((failed) => (
+            <Notice key={failed.identifier} tone="error">
+              Could not read {failed.identifier}: {failed.message}
+            </Notice>
+          ))}
+          {snapshot === null ? null : (
+            <Undelivered title="Answers that did not go out" undelivered={sendsFor("questions", snapshot.undelivered)} unposted={snapshot.unposted} />
+          )}
+          {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
+            <Notice>No open questions.</Notice>
+          ) : null}
+          {snapshot === null
+            ? null
+            : orderCards(snapshot.issues, snapshot.asks).map((card) =>
+                card.kind === "issue" ? (
+                  <IssueCard
+                    key={`${card.issue.id}:${card.issue.blocks.map((block) => `${block.commentId}@${block.revision}`).join(",")}`}
+                    issue={card.issue}
+                    onAnswered={load}
+                  />
+                ) : (
+                  <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
+                ),
+              )}
+        </TabPanel>
+        <TabPanel tab="todos" active={tab}>
+          {snapshot === null ? null : <Todos todos={snapshot.todos} todoError={snapshot.todoError} known={snapshot.configured && snapshot.error === null} />}
+          {snapshot === null ? null : (
+            <Undelivered title="Messages to the steward that did not go out" undelivered={sendsFor("todos", snapshot.undelivered)} unposted={[]} />
+          )}
+        </TabPanel>
       </div>
     </div>
   );
@@ -713,7 +792,7 @@ function Notifier() {
   const deliver = useCallback(() => {
     rpc.call("notifications.claim", null).then(
       ({ notifications }) => {
-        if (notifications.length > 0) announce(notifications, () => navigate.toPluginPanel(PANEL_PATH));
+        if (notifications.length > 0) announce(notifications, () => navigate.toPluginPanel(PANEL_PATH, { subPath: tabPath(noticeTab(notifications)) }));
       },
       () => undefined,
     );
@@ -736,7 +815,7 @@ export default definePluginApp((app) => {
     title: "SGC questions",
     icon: "MessageQuestion",
     path: PANEL_PATH,
-    component: QuestionsPage,
+    component: SgcPage,
     experimental_useBadge: useQuestionsBadge,
   });
   app.slots.experimental_appOverlay({ id: "notifier", component: Notifier });

@@ -1,6 +1,7 @@
 // The pure logic behind the Questions page and the notifier, kept out of the
 // React code so it can be tested without a DOM.
 
+import type { DeliveryView } from "./contract.ts";
 import type { BlockAnswer, QuestionBlock } from "./questions.ts";
 
 /** What the user picked or typed for one block, keyed by question number. */
@@ -124,13 +125,18 @@ interface BadgeInput {
   unposted: readonly unknown[];
 }
 
-/** The sidebar badge: open questions first, then answers that did not go out, then Linear trouble. */
-export function questionBadge(view: BadgeInput): { count?: number; tone: "warning" | "critical"; label: string } | null {
+/** Open questions: each question of a parsed Linear block, each block in no format, and each bb question. */
+export function openQuestions(view: Pick<BadgeInput, "issues" | "asks">): number {
   const linear = view.issues.reduce(
     (sum, issue) => sum + issue.blocks.reduce((count, block) => count + (block.format === "parsed" ? block.questions.length : 1), 0),
     0,
   );
-  const open = linear + view.asks.length;
+  return linear + view.asks.length;
+}
+
+/** The sidebar badge: open questions first, then answers that did not go out, then Linear trouble. */
+export function questionBadge(view: BadgeInput): { count?: number; tone: "warning" | "critical"; label: string } | null {
+  const open = openQuestions(view);
   if (open > 0) return { count: open, tone: "warning", label: `${open} open question${open === 1 ? "" : "s"}` };
   const stuck = view.undelivered.length + view.unposted.length;
   if (stuck > 0) return { tone: "critical", label: `${stuck} answer${stuck === 1 ? "" : "s"} did not go out` };
@@ -145,4 +151,57 @@ export function questionBadge(view: BadgeInput): { count?: number; tone: "warnin
  */
 export function withDone<T extends { issueId: string }>(list: readonly T[], entry: T): T[] {
   return [...list.filter((candidate) => candidate.issueId !== entry.issueId), entry];
+}
+
+/** The page's tabs, in order, each at its own route under the panel. A later tab, such as Ideas, joins this list. */
+export const PANEL_TABS = [
+  { id: "questions", label: "Questions", subPath: "" },
+  { id: "todos", label: "Todos", subPath: "todos" },
+] as const;
+
+export type PanelTab = (typeof PANEL_TABS)[number]["id"];
+
+/** The tab a panel route shows. The root, and a route the page does not know, show Questions. */
+export function tabOf(subPath: string): PanelTab {
+  const head = subPath.split("/")[0];
+  return PANEL_TABS.find((tab) => tab.subPath === head)?.id ?? "questions";
+}
+
+/** The route of a tab, for `toPluginPanel`. */
+export function tabPath(tab: PanelTab): string {
+  return PANEL_TABS.find((candidate) => candidate.id === tab)!.subPath;
+}
+
+/** The tab a notification opens: Todos when it tells only of new todos, else Questions. */
+export function noticeTab(notes: ReadonlyArray<Pick<Notice, "source">>): PanelTab {
+  return notes.length > 0 && notes.every((note) => note.source === "todo") ? "todos" : "questions";
+}
+
+/** The tab that lists each kind of send that did not go out. A new kind of send must pick one. */
+const SEND_TAB: Record<DeliveryView["source"], PanelTab> = { ask: "questions", linear: "questions", withdrawal: "questions", todo: "todos" };
+
+/** The sends that did not go out which a tab lists: the steward's todo messages on Todos, answers and notices on Questions. */
+export function sendsFor<R extends Pick<DeliveryView, "source">>(tab: PanelTab, rows: readonly R[]): R[] {
+  return rows.filter((row) => SEND_TAB[row.source] === tab);
+}
+
+interface TabInput extends Pick<BadgeInput, "issues" | "asks" | "unposted"> {
+  issueErrors: readonly unknown[];
+  undelivered: ReadonlyArray<Pick<DeliveryView, "source">>;
+  todos: readonly unknown[];
+  todoError: string | null;
+}
+
+/** A tab's badge: what is open on it, and whether something on it failed, so a failure behind another tab still shows. */
+export interface TabBadge {
+  count: number;
+  alert: boolean;
+}
+
+/** Each tab's badge: open questions, or open todos, and an alert for a failed send, record, or read on that tab. */
+export function tabBadges(view: TabInput): Record<PanelTab, TabBadge> {
+  return {
+    questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
+    todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },
+  };
 }

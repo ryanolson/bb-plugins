@@ -86,9 +86,9 @@ The sends for an answer to a Linear block are kept before the answer posts. When
 
 ## Todos
 
-An issue is on your todo list when it is open and has the `waiting:ryan-action` label, or when it has the `human` label and is assigned to you, the user of the API key. An issue that waits on your decision, with `waiting:ryan-decision`, becomes a question instead. Each todo shows its link and the task lines of its description, the `- [ ]` lines, so you see the steps. `bb sgc todos` lists them too.
+Your todos are on the page's Todos tab. An issue is on your todo list when it is open and has the `waiting:ryan-action` label, or when it has the `human` label and is assigned to you, the user of the API key. An issue that waits on your decision, with `waiting:ryan-decision`, becomes a question instead. Each todo shows its link and the task lines of its description, the `- [ ]` lines, so you see the steps. `bb sgc todos` lists them too.
 
-Done posts one comment from you on the issue: `Done (from the SGC page)`, and your note if you wrote one. Then a `human` issue moves to the team's Done state. Any other issue loses the `waiting:ryan-action` label and keeps its state, so the agent work behind it goes on. The steward thread, named in `stewardThread`, gets a queued message that starts with `[sgc-steward] Todo done <issue>: <title>`, with your note on the next line. With no steward thread set, or one that is archived or gone, nothing is sent, and the change on Linear still counts. A message that fails to send is listed with a retry.
+Done posts one comment from you on the issue: `Done (from the SGC page)`, and your note if you wrote one. Then a `human` issue moves to the team's Done state. Any other issue loses the `waiting:ryan-action` label and keeps its state, so the agent work behind it goes on. The steward thread, named in `stewardThread`, gets a queued message that starts with `[sgc-steward] Todo done <issue>: <title>`, with your note on the next line. With no steward thread set, or one that is archived or gone, nothing is sent, and the change on Linear still counts. A message that fails to send is listed on the Todos tab with a retry.
 
 Two Done clicks at once act once: the plugin reads the issue again under its lock and refuses a todo that is no longer on the list. A Done is kept before it writes, with the steward's message and the steward thread it goes to, and its comment goes under its own id. When Linear does not take the change, the todo stays on the list, and pressing Done again finishes that same Done, with its own comment, note, and steward thread; a new note is not used. When the change landed but the reply was lost, or the plugin restarted, the plugin, or the next poll, reads the issue and finishes the Done. The steward hears once, after Linear holds the change. Its messages go out in the order you acted, but one that failed to send waits for your retry on the page, so it can arrive after a later one. A Done from the page can be undone from the same page, for an hour, until the plugin reloads, and only while it is the latest Done of its issue: a newer Done of the issue, from the page or the CLI, replaces it. Undo posts `Reopened (from the SGC page)`, puts the label or the state back, and sends the steward `[sgc-steward] Todo reopened <issue>: <title>`. Undo refuses an issue that is no longer in the team, or that changed after the Done, with another state or other labels, so a later change, such as a cancellation, stays. This holds when you press Undo again after a failed Undo, too: an Undo whose change Linear already holds finishes without writing again, and any other is given up, which leaves its `Reopened` comment on the issue.
 
@@ -98,7 +98,7 @@ A service on the bb server polls Linear every `pollMinutes`. It lists the team's
 
 ## Notifications
 
-When a poll finds a new question block or a new todo, or an agent asks a bb question, every open bb window hears about it. The first window to ask for it gets it, so each question and todo is announced once. Questions that arrive together share one notification. A question that arrives while no bb window is open is announced by the next window that opens. The sidebar entry shows the number of open questions.
+When a poll finds a new question block or a new todo, or an agent asks a bb question, every open bb window hears about it. The first window to ask for it gets it, so each question and todo is announced once. Questions that arrive together share one notification. A question that arrives while no bb window is open is announced by the next window that opens. The sidebar entry shows the number of open questions. On the page, each tab shows how many are open on it, and a dot when something there failed: a send, a record, or a read. A notification of new todos only opens the Todos tab; any other opens Questions.
 
 With bb in the background and notifications allowed, you get a system notification. Otherwise you get a bb toast. To allow notifications in a browser, use Settings, Push notifications, Allow notifications.
 
@@ -157,7 +157,7 @@ bb plugin logs sgc-steward
 - `lib/asks.ts`: checks for `bb sgc ask` and the text of what goes back: the message to the thread and the Linear record.
 - `lib/ask-store.ts`: the SQLite tables for bb questions, deliveries, and records.
 - `lib/linear.ts`: the Linear GraphQL client, and posting a comment under the id its answer derives.
-- `lib/panel.ts`: the page's answer drafts, card order, badge, and notification text.
+- `lib/panel.ts`: the page's tabs, answer drafts, card order, badges, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
@@ -166,5 +166,5 @@ bb plugin logs sgc-steward
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions and Todos tabs, its sidebar badge, and the notifier.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.
