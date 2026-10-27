@@ -261,7 +261,7 @@ test("a new bb question is announced once, beside new Linear blocks", async () =
   assert.deepEqual(
     notices.map((notice) => [notice.source, notice.id, notice.label, notice.questionCount, notice.preview]),
     [
-      ["linear", "q1", "TEAM-1", 2, "Which scale do estimates use?"],
+      ["linear", "q1", "TEAM-1", 1, "Which scale do estimates use?"],
       ["ask", id, "Title of thr_asker", 1, "Ship it?"],
     ],
   );

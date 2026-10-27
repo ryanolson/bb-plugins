@@ -9,12 +9,12 @@ import type { LinearComment } from "./lib/questions.ts";
 
 export const KEY = "lin_api_test_not_a_real_key";
 
+/** A block of one question, as the steward now posts them. */
 export const QUESTIONS = [
   "[agent:claude-code thr_test1] Questions 2026-01-05",
   "Q1. Which scale do estimates use?",
   "- A (recommended): Powers of two.",
   "- B: Small, medium, large.",
-  "Q2. Which project goes first?",
 ].join("\n");
 
 export interface FakeIssue extends LinearIssue {

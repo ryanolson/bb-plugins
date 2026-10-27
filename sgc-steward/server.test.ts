@@ -115,7 +115,7 @@ test("answering posts one unsigned comment numbered to match and closes the bloc
   assert.equal(posted.id, answerCommentId("uuid-TEAM-1", posted.body), "the id comes from the answer");
   assert.equal(
     checkin.comments.at(-1)?.body,
-    [`Answers to the questions of 2026-01-05 (block q1 rev ${revisionOf(shown, "q1")})`, "", "Q1. A: Powers of two.", "", "Q2. No answer."].join("\n"),
+    [`Answers to the questions of 2026-01-05 (block q1 rev ${revisionOf(shown, "q1")})`, "", "Q1. A: Powers of two."].join("\n"),
   );
   const snapshot = (await harness.behavior.callRpc("questions.list", null)) as Snapshot;
   assert.deepEqual(snapshot.issues, []);
