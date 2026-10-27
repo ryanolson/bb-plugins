@@ -64,6 +64,26 @@ export const STORE_MIGRATIONS: readonly string[] = [
     first_seen_at INTEGER NOT NULL,
     notified_at INTEGER
   )`,
+  // What a todo's Done or Undo means to write to Linear, kept before it
+  // writes, so a retry, or a poll after a restart, can finish it.
+  `CREATE TABLE IF NOT EXISTS todo_actions (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    note TEXT,
+    change TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    restore_id TEXT,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    finished_at INTEGER
+  )`,
+  // At most one unfinished Done, and one unfinished Undo, per issue.
+  `CREATE UNIQUE INDEX IF NOT EXISTS todo_actions_pending ON todo_actions (issue_id, kind) WHERE state = 'pending'`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn";
@@ -266,7 +286,7 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
   // delivery again restarts the window of one still held.
   const holdDelivery = db.prepare(
     `INSERT INTO deliveries (id, source, ref, thread_id, label, message, state, issue_id, created_at, held_at)
-     VALUES (?, 'linear', ?, ?, ?, ?, 'held', ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, 'held', ?, ?, ?)
      ON CONFLICT (source, ref, thread_id) DO UPDATE SET held_at = excluded.held_at WHERE state = 'held'`,
   );
 
@@ -358,39 +378,29 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     },
 
     /**
-     * Keep one message to send. Returns it to the call that kept it, which
-     * sends it, once; null when the same message was kept before.
+     * Keep the deliveries of a Linear write, one per thread, held, before the
+     * write: an answer to blocks, or a todo's Done or Undo. Holding again
+     * restarts the post window of a delivery still held; one already
+     * released stays as it is.
      */
-    keep(delivery: { source: DeliverySource; ref: string; threadId: string; label: string; message: string }): Delivery | null {
-      const { source, ref, threadId, label, message } = delivery;
-      const kept = insertDelivery.run(`dlv_${token(10)}`, source, ref, threadId, label, message, "pending", null, now()).changes;
-      return kept === 1 ? toDelivery(deliveryByKey.get(source, ref, threadId) as DeliveryRecord) : null;
-    },
-
-    /**
-     * Keep the deliveries of a Linear answer, one per thread, held, before
-     * the answer posts. A delivery already released stays as it is.
-     */
-    hold(answer: { ref: string; issueId: string; label: string; message: string }, threadIds: readonly string[]): void {
+    hold(answer: { ref: string; issueId: string; label: string; message: string }, threadIds: readonly string[], source: "linear" | "todo" = "linear"): void {
       db.transaction(() => {
         const at = now();
         for (const threadId of threadIds) {
-          holdDelivery.run(`dlv_${token(10)}`, answer.ref, threadId, answer.label, answer.message, answer.issueId, at, at);
+          holdDelivery.run(`dlv_${token(10)}`, source, answer.ref, threadId, answer.label, answer.message, answer.issueId, at, at);
         }
       })();
     },
 
-    /** Mark the held deliveries of a posted answer pending and return them. The caller sends exactly these. */
-    release(ref: string): Delivery[] {
-      const rows = db
-        .prepare("UPDATE deliveries SET state = 'pending' WHERE source = 'linear' AND ref = ? AND state = 'held' RETURNING *")
-        .all(ref) as DeliveryRecord[];
+    /** Mark the held deliveries of a finished write pending and return them. The caller sends exactly these. */
+    release(ref: string, source: "linear" | "todo" = "linear"): Delivery[] {
+      const rows = db.prepare("UPDATE deliveries SET state = 'pending' WHERE source = ? AND ref = ? AND state = 'held' RETURNING *").all(source, ref) as DeliveryRecord[];
       return rows.map(toDelivery);
     },
 
-    /** Forget the held deliveries of an answer that never posted. */
-    drop(ref: string): void {
-      db.prepare("DELETE FROM deliveries WHERE source = 'linear' AND ref = ? AND state = 'held'").run(ref);
+    /** Forget the held deliveries of a write that will never finish. */
+    drop(ref: string, source: "linear" | "todo" = "linear"): void {
+      db.prepare("DELETE FROM deliveries WHERE source = ? AND ref = ? AND state = 'held'").run(source, ref);
     },
 
     /** Linear answers whose deliveries are still held, oldest first. */

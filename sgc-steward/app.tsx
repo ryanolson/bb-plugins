@@ -494,7 +494,7 @@ function TodoCard({ todo, onDone }: { todo: TodoView; onDone: (entry: DoneHere) 
     setError(null);
     try {
       const result = await rpc.call("todos.done", { issue: todo.id, note });
-      stewardToast("Marked done", todo.identifier, result.steward);
+      stewardToast(result.resumed ? "Finished the earlier Done, with its own note, of" : "Marked done", todo.identifier, result.steward);
       onDone({ identifier: todo.identifier, title: todo.title, undo: result.undo });
     } catch (cause) {
       setError(errorText(cause));

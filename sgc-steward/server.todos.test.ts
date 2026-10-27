@@ -16,6 +16,7 @@ interface DoneResult {
   change: "state" | "label";
   steward: "sent" | "failed" | "skipped";
   undo: string;
+  resumed: boolean;
 }
 
 const refresh = async (harness: Harness) => (await harness.behavior.callRpc("questions.refresh", null)) as Panel;
@@ -244,4 +245,124 @@ test("a todo read that fails is reported on its own, and the questions still pol
   const cli = await harness.behavior.runCli(["todos", "--cached"]);
   assert.equal(cli.exitCode, 1);
   assert.match(cli.stderr, /Could not read the todos: .*label filter/);
+});
+
+const WRITES = ["createComment", "removeLabel", "addLabel", "setState"];
+const writes = (linear: Fake) => linear.calls.filter((call) => WRITES.some((write) => call.startsWith(`${write} `)));
+
+/** A promise to wait on, and the function that lets it go. */
+function gate() {
+  let open!: () => void;
+  const shut = new Promise<void>((resolve) => { open = resolve; });
+  return { shut, open };
+}
+
+test("a poll writes nothing to finish a Done whose change did not land; the retry finishes it with the same comment", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", [ACTION]);
+  linear.removeLabelFaults.push("dropped");
+  const failed = await rejection(done(harness, "TEAM-1", "Made it."));
+  assert.match(failed.message, /comment is posted on TEAM-1, but Linear did not take the change/);
+  assert.match(failed.message, /Press Done again to finish it/);
+  linear.calls.length = 0;
+  const panel = await refresh(harness);
+  assert.deepEqual(panel.todos.map((todo) => todo.identifier), ["TEAM-1"], "it is still on the list");
+  assert.deepEqual(writes(linear), [], "the poll writes nothing");
+  assert.equal(sends.length, 0);
+  const retried = await done(harness, "TEAM-1", "A different note.");
+  assert.equal(retried.resumed, true);
+  assert.deepEqual(issue.comments.map((comment) => comment.body), ["Done (from the SGC page)\n\nMade it."], "the earlier Done's own comment and note");
+  assert.deepEqual(sends.map((send) => send.input[0]!.text), ["[sgc-steward] Todo done TEAM-1: Title of TEAM-1\nMade it."]);
+});
+
+test("a Done that did not finish is not resumed once its issue is outside the team", async () => {
+  const { harness, linear } = await setup();
+  const issue = linear.addIssue("TEAM-1", [ACTION]);
+  linear.removeLabelFaults.push("dropped");
+  await rejection(done(harness, "TEAM-1"));
+  await harness.behavior.setSettings({ teamKey: "OTHER" });
+  linear.calls.length = 0;
+  const refused = await rejection(done(harness, "TEAM-1"));
+  assert.equal(refused.code, "invalid");
+  assert.deepEqual(writes(linear), [], "nothing is written outside the team");
+  assert.equal(issue.comments.length, 1);
+  assert.deepEqual(issue.labels.map((found) => found.name), [ACTION]);
+});
+
+test("a Done resumed near the end of its window is not given up after a restart", async (t) => {
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const { harness, linear, sends, factory } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", [ACTION]);
+  linear.createFaults = ["dropped", "dropped"];
+  await rejection(done(harness, "TEAM-1"));
+  assert.equal(issue.comments.length, 0, "the first Done's comment never landed");
+  const actionId = writes(linear)[0]!.split(" ")[2]!;
+
+  now += 9 * 60_000 + 50_000;
+  const write = gate();
+  const stalled = gate();
+  const create = linear.createComment.bind(linear);
+  linear.createComment = async (args) => {
+    write.open();
+    await stalled.shut;
+    return create(args);
+  };
+  const retrying = done(harness, "TEAM-1").catch(() => undefined);
+  await write.shut;
+  const replacement = await harness.lifecycle.reload(factory);
+  replacement.harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  try {
+    now += 15_000;
+    await replacement.harness.behavior.callRpc("questions.refresh", null);
+    // The retry's writes land late, as the stalled call would have made them.
+    linear.post(issue, actionId, "Done (from the SGC page)");
+    issue.labels = [];
+    const panel = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+    assert.deepEqual(panel.todos, []);
+    assert.deepEqual(sends.map((send) => send.input[0]!.text), ["[sgc-steward] Todo done TEAM-1: Title of TEAM-1"], "the window runs from the retry, not the first try");
+  } finally {
+    stalled.open();
+    await retrying;
+    await replacement.harness.lifecycle.dispose();
+  }
+});
+
+test("an Undo cut short by a restart after both writes landed is finished by the next poll", async () => {
+  const { harness, linear, sends, factory } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  linear.addIssue("TEAM-1", [ACTION]);
+  const { undo } = await done(harness, "TEAM-1");
+  const landed = gate();
+  const reply = gate();
+  const addLabel = linear.addLabel.bind(linear);
+  linear.addLabel = async (args) => {
+    await addLabel(args);
+    landed.open();
+    await reply.shut;
+  };
+  const undoing = harness.behavior.callRpc("todos.reopen", { undo }).catch(() => undefined);
+  await landed.shut;
+  const replacement = await harness.lifecycle.reload(factory);
+  replacement.harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  try {
+    const panel = (await replacement.harness.behavior.callRpc("questions.refresh", null)) as Panel;
+    assert.deepEqual(panel.todos.map((todo) => todo.identifier), ["TEAM-1"]);
+    assert.deepEqual(sends.map((send) => send.input[0]!.text), [
+      "[sgc-steward] Todo done TEAM-1: Title of TEAM-1",
+      "[sgc-steward] Todo reopened TEAM-1: Title of TEAM-1",
+    ]);
+  } finally {
+    reply.open();
+    await undoing;
+    await replacement.harness.lifecycle.dispose();
+  }
 });

@@ -1,31 +1,51 @@
 // The owner's todo list on the server: read with every poll, shown on the
 // page and by `bb sgc todos`, and marked done, or reopened, from either.
 //
-// Done changes Linear under the plugin's one lock and reads the issue again
-// first, so two Done clicks at once act once. The steward hears after Linear
-// has changed, from the call that changed it.
+// A Done or an Undo is kept, with the steward's message held, before it
+// writes to Linear. It then posts its comment under its own id and makes its
+// change, under the plugin's one lock. A write whose reply was lost may
+// still have landed, so only a fresh read of the issue decides what is done.
+// What a failed write leaves, the owner's retry finishes; what a lost reply
+// or a restart leaves after both writes landed, the next poll finishes.
+// Either way the steward hears once, after Linear holds the change.
 
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { PluginCliError, cliCommand, experimental_PluginRpcRefusal, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
+import type { Delivery } from "./lib/ask-store.ts";
 import type { TodoView, rpcContract } from "./lib/contract.ts";
 import { formatTodos } from "./lib/format.ts";
 import { HUMAN_LABEL, TODO_LABEL, postComment, type LinearClient, type TodoIssue } from "./lib/linear.ts";
 import { Refusal } from "./lib/refusal.ts";
+import { createTodoStore, type TodoAction } from "./lib/todo-store.ts";
 import { TODO_NOTE_CHARS, checkNote, checklist, doneComment, hasLabel, isTodo, reopenedComment, todoDoneMessage, todoReopenedMessage } from "./lib/todos.ts";
 
 /** How long the page can undo a Done, and how many undos the plugin keeps. */
 const UNDO_MS = 60 * 60 * 1000;
 const UNDO_LIMIT = 100;
+/** How long finished actions are kept before they are forgotten. */
+const FINISHED_MS = 24 * 60 * 60 * 1000;
 
 export type StewardTold = "sent" | "failed" | "skipped";
 
 export interface TodoDeps {
   db: Database.Database;
+  /** How long a post can take: an action whose comment is still missing after this is given up. */
+  postWindowMs: number;
   /** Run Linear writes ahead of any poll, under the plugin's one lock. Errors come back without the key. */
   write<T>(work: (linear: LinearClient, teamKey: string) => Promise<T>): Promise<T>;
-  /** Keep a message for the steward thread and send it once; skipped when none is set or bb reports it gone. */
-  tellSteward(ref: string, label: string, text: string): Promise<StewardTold>;
+  /** The steward thread to tell, or null when none is set or bb reports it gone. */
+  steward(): Promise<string | null>;
+  /** Hold a message for a thread until its action finishes. Joins the caller's transaction. */
+  hold(ref: string, issueId: string, label: string, message: string, threadId: string): void;
+  /** Release the held messages of a finished action; the caller sends exactly these, once. */
+  release(ref: string): Delivery[];
+  /** Forget the held messages of an action that will never finish. */
+  drop(ref: string): void;
+  /** Send a released message, once. */
+  send(row: Delivery): Promise<"sent" | "failed">;
+  /** Hand released messages to the poll, which sends them after the lock, even when it was stopped. */
+  sendAfterPoll(rows: readonly Delivery[]): void;
   /** Drop what the poller cached about an issue that just changed. */
   forget(issueId: string): void;
   /** Tell open pages that the list changed. */
@@ -34,6 +54,7 @@ export interface TodoDeps {
   refresh(): Promise<void>;
   /** Whether the Linear API key is set. */
   configured(): boolean;
+  log(text: string): void;
 }
 
 /** What undoing one Done puts back. */
@@ -41,7 +62,7 @@ interface Undo {
   issueId: string;
   identifier: string;
   title: string;
-  restore: { kind: "state"; stateId: string } | { kind: "label"; labelId: string };
+  restore: { change: TodoAction["change"]; id: string };
   at: number;
 }
 
@@ -64,38 +85,134 @@ function refusal(error: unknown): never {
   throw error;
 }
 
+/** A Done takes the issue off the list, and an Undo puts it back. Anything else that does the same counts too. */
+function landed(action: Pick<TodoAction, "kind">, issue: TodoIssue): boolean {
+  return action.kind === "done" ? !isTodo(issue) : isTodo(issue);
+}
+
+function messageLabel(action: Pick<TodoAction, "kind" | "identifier">): string {
+  return `${action.kind === "done" ? "Todo done" : "Todo reopened"} ${action.identifier}`;
+}
+
+function messageText(action: Pick<TodoAction, "kind" | "identifier" | "title" | "note">): string {
+  return action.kind === "done" ? todoDoneMessage(action.identifier, action.title, action.note) : todoReopenedMessage(action.identifier, action.title);
+}
+
 export function createTodos(deps: TodoDeps) {
-  const { db } = deps;
+  const store = createTodoStore(deps.db);
   let todos: TodoView[] = [];
   let todoError: string | null = null;
   /** Undos for the Dones of this plugin load, by their comment id: the page's undo. */
   const undos = new Map<string, Undo>();
 
-  /** Record the todos seen; returns how many are new and still to announce. A todo that leaves the list is forgotten, so one that comes back is new. */
-  function reconcile(notify: boolean): number {
-    const now = Date.now();
-    const known = new Set((db.prepare("SELECT issue_id FROM seen_todos").all() as Array<{ issue_id: string }>).map((row) => row.issue_id));
-    const current = new Set(todos.map((todo) => todo.id));
-    const insert = db.prepare("INSERT INTO seen_todos (issue_id, identifier, title, first_seen_at, notified_at) VALUES (?, ?, ?, ?, ?)");
-    const remove = db.prepare("DELETE FROM seen_todos WHERE issue_id = ?");
-    let fresh = 0;
-    db.transaction(() => {
-      for (const todo of todos) {
-        if (known.has(todo.id)) continue;
-        insert.run(todo.id, todo.identifier, todo.title, now, notify ? null : now);
-        if (notify) fresh += 1;
-      }
-      for (const id of known) if (!current.has(id)) remove.run(id);
-    })();
-    return fresh;
+  /** Hold the action's message for the steward, if there is one. Holding again restarts its post window. */
+  function holdFor(action: Omit<TodoAction, "attemptedAt">, steward: string | null): void {
+    if (steward !== null) deps.hold(action.id, action.issueId, messageLabel(action), messageText(action), steward);
+  }
+
+  async function applyChange(linear: LinearClient, action: TodoAction): Promise<void> {
+    if (action.change === "state") await linear.setState({ issueId: action.issueId, stateId: action.targetId });
+    else if (action.kind === "done") await linear.removeLabel({ issueId: action.issueId, labelId: action.targetId });
+    else await linear.addLabel({ issueId: action.issueId, labelId: action.targetId });
   }
 
   /**
-   * Read the todo list, inside the poll, under its lock and signal. A failed
-   * read keeps the list from the read before and records why; it does not
-   * fail the poll of the questions. Null when the poll was stopped.
+   * Carry an action through, under the lock: its comment under its own id,
+   * then its change unless Linear holds it already. A change whose reply was
+   * lost may have landed, so after a failure only a fresh read decides.
+   * Returns the released messages, for the caller to send after the lock.
+   * Throws, leaving the action unfinished, when Linear lacks either write.
+   */
+  async function carry(linear: LinearClient, action: TodoAction, issue: TodoIssue): Promise<Delivery[]> {
+    const again = action.kind === "done" ? "Press Done again to finish it." : "Press Undo again to finish it.";
+    try {
+      await postComment(linear, action.issueId, action.body, action.id);
+    } catch (error) {
+      throw new Error(`Could not post the comment on ${action.identifier}: ${message(error)} ${again}`);
+    }
+    if (!landed(action, issue)) {
+      try {
+        await applyChange(linear, action);
+      } catch (error) {
+        const now = await linear.getTodoIssue(action.issueId).catch(() => null);
+        if (now === null || !landed(action, now)) {
+          throw new Error(`The comment is posted on ${action.identifier}, but Linear did not take the change: ${message(error)} ${again}`);
+        }
+      }
+    }
+    store.finish(action.id);
+    deps.forget(action.issueId);
+    return deps.release(action.id);
+  }
+
+  /** Before a new action on an issue, resolve the other kind's unfinished one: finish it when Linear holds it, else forget it. */
+  async function resolveOther(linear: LinearClient, issue: TodoIssue, kind: TodoAction["kind"]): Promise<Delivery[]> {
+    const other = store.pending(issue.id, kind);
+    if (other === null) return [];
+    const comments = await linear.listComments(issue.id, undefined, issue.identifier);
+    if (comments.some((comment) => comment.id === other.id) && landed(other, issue)) {
+      store.finish(other.id);
+      return deps.release(other.id);
+    }
+    store.abandon(other.id);
+    deps.drop(other.id);
+    return [];
+  }
+
+  /** An Undo left unfinished can be retried only from a page that still holds an undo for its issue. */
+  function retryable(action: TodoAction): boolean {
+    return [...undos.values()].some((undo) => undo.issueId === action.issueId && Date.now() - undo.at <= UNDO_MS);
+  }
+
+  /**
+   * Finish what a lost reply or a restart left: an action whose comment and
+   * change Linear both holds. This writes nothing to Linear. An action still
+   * short of either waits for the owner's retry, unless it can never finish:
+   * its issue is gone, its comment is still missing after the post window,
+   * or it is an Undo that no page can retry any more.
+   */
+  async function settle(linear: LinearClient, signal: AbortSignal): Promise<void> {
+    for (const action of store.unfinished()) {
+      let issue: TodoIssue | null;
+      let posted = false;
+      try {
+        issue = await linear.getTodoIssue(action.issueId, signal);
+        if (issue !== null) posted = (await linear.listComments(issue.id, signal, issue.identifier)).some((comment) => comment.id === action.id);
+      } catch {
+        if (signal.aborted) return;
+        continue;
+      }
+      if (issue !== null && posted && landed(action, issue)) {
+        store.finish(action.id);
+        // Released and handed over in one step: the poll sends them even when it is stopped later.
+        deps.sendAfterPoll(deps.release(action.id));
+        continue;
+      }
+      const why =
+        issue === null
+          ? "its issue is gone"
+          : !posted && Date.now() - action.attemptedAt >= deps.postWindowMs
+            ? "its comment never reached Linear"
+            : posted && action.kind === "reopen" && !retryable(action)
+              ? "no page can retry it, so its Reopened comment may stand without the change"
+              : null;
+      if (why === null) continue;
+      store.abandon(action.id);
+      deps.drop(action.id);
+      deps.log(`gave up the ${action.kind === "done" ? "Done" : "Undo"} of ${action.identifier}: ${why}`);
+    }
+    store.prune(FINISHED_MS);
+  }
+
+  /**
+   * Read the todo list, inside the poll, under its lock and signal, after
+   * settling what earlier actions left. A failed read keeps the list from
+   * the read before and records why; it does not fail the poll of the
+   * questions. Null when the poll was stopped.
    */
   async function poll(linear: LinearClient, teamKey: string, notify: boolean, signal: AbortSignal): Promise<{ fresh: number; changed: boolean } | null> {
+    await settle(linear, signal);
+    if (signal.aborted) return null;
     const before = JSON.stringify([todos, todoError]);
     try {
       const listed = await linear.listTodoIssues(teamKey, signal);
@@ -107,16 +224,8 @@ export function createTodos(deps: TodoDeps) {
       todoError = message(error);
       return { fresh: 0, changed: JSON.stringify([todos, todoError]) !== before };
     }
-    const fresh = reconcile(notify);
+    const fresh = store.reconcileSeen(todos, notify);
     return { fresh, changed: JSON.stringify([todos, todoError]) !== before };
-  }
-
-  /** Todos no window has announced yet, oldest first; each is handed out once. */
-  function claim(): Array<{ at: number; id: string; label: string; preview: string }> {
-    const rows = db
-      .prepare("UPDATE seen_todos SET notified_at = ? WHERE notified_at IS NULL RETURNING issue_id, identifier, title, first_seen_at")
-      .all(Date.now()) as Array<{ issue_id: string; identifier: string; title: string; first_seen_at: number }>;
-    return rows.map((row) => ({ at: row.first_seen_at, id: row.issue_id, label: row.identifier, preview: row.title }));
   }
 
   function remember(token: string, undo: Undo): void {
@@ -126,10 +235,21 @@ export function createTodos(deps: TodoDeps) {
     while (undos.size > UNDO_LIMIT) undos.delete(undos.keys().next().value!);
   }
 
+  /** Send what one action released; the steward's answer is how the first of them went. */
+  async function sendAll(rows: readonly Delivery[]): Promise<StewardTold> {
+    let told: StewardTold = "skipped";
+    for (const row of rows) {
+      const sent = await deps.send(row);
+      if (told !== "failed") told = sent;
+    }
+    return told;
+  }
+
   /**
    * Mark a todo done: one comment from the owner, then the human issue to
-   * Done, or the todo label off any other. Each Done posts under its own id:
-   * a todo can come back and be done again.
+   * Done, or the todo label off any other. A Done that did not finish is
+   * finished first, with its own comment and note, so a retry never posts a
+   * second comment.
    */
   async function done(issueRef: string, noteText: string) {
     let note: string | null;
@@ -138,36 +258,58 @@ export function createTodos(deps: TodoDeps) {
     } catch (error) {
       throw new Refusal("invalid", message(error));
     }
-    const changed = await deps.write(async (linear, teamKey) => {
+    const steward = await deps.steward();
+    const { action, released, others, resumed } = await deps.write(async (linear, teamKey) => {
       const issue = await linear.getTodoIssue(issueRef);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${issueRef}.`);
       if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
-      if (!isTodo(issue)) throw new Refusal("conflict", `${issue.identifier} is not on the todo list; it may be done already.`);
-      // Read everything Done needs before writing anything.
-      const human = hasLabel(issue, HUMAN_LABEL);
-      const doneState = human ? await linear.doneStateId(teamKey) : null;
-      if (human && (doneState === null || issue.state === null)) throw new Refusal("conflict", `Team ${teamKey} has no Done state to move ${issue.identifier} to.`);
-      const label = issue.labels.find((candidate) => candidate.name === TODO_LABEL);
-      const commentId = randomUUID();
-      await postComment(linear, issue.id, doneComment(note), commentId);
-      let restore: Undo["restore"];
-      if (human) {
-        await linear.setState({ issueId: issue.id, stateId: doneState! });
-        restore = { kind: "state", stateId: issue.state!.id };
+      const others = await resolveOther(linear, issue, "reopen");
+      let action = store.pending(issue.id, "done");
+      const resumed = action !== null;
+      if (action !== null) {
+        store.attempt(action.id);
+        holdFor(action, steward);
       } else {
+        if (!isTodo(issue)) throw new Refusal("conflict", `${issue.identifier} is not on the todo list; it may be done already.`);
+        // Read everything Done needs before writing anything.
+        const human = hasLabel(issue, HUMAN_LABEL);
+        const doneState = human ? await linear.doneStateId(teamKey) : null;
+        if (human && (doneState === null || issue.state === null)) throw new Refusal("conflict", `Team ${teamKey} has no Done state to move ${issue.identifier} to.`);
         // Not human, so the todo label is what made it a todo.
-        await linear.removeLabel({ issueId: issue.id, labelId: label!.id });
-        restore = { kind: "label", labelId: label!.id };
+        const label = issue.labels.find((candidate) => candidate.name === TODO_LABEL);
+        const begun: Omit<TodoAction, "attemptedAt"> = {
+          id: randomUUID(),
+          kind: "done",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          body: doneComment(note),
+          note,
+          change: human ? "state" : "label",
+          targetId: human ? doneState! : label!.id,
+          restoreId: human ? issue.state!.id : label!.id,
+        };
+        deps.db.transaction(() => {
+          store.begin(begun);
+          holdFor(begun, steward);
+        })();
+        action = { ...begun, attemptedAt: Date.now() };
       }
-      deps.forget(issue.id);
+      const released = await carry(linear, action, issue);
       todos = todos.filter((todo) => todo.id !== issue.id);
       deps.publish();
-      return { issue, commentId, restore };
+      return { action, released, others, resumed };
     });
-    const { issue, commentId, restore } = changed;
-    remember(commentId, { issueId: issue.id, identifier: issue.identifier, title: issue.title, restore, at: Date.now() });
-    const steward = await deps.tellSteward(commentId, `Todo done ${issue.identifier}`, todoDoneMessage(issue.identifier, issue.title, note));
-    return { identifier: issue.identifier, commentId, change: restore.kind, steward, undo: commentId };
+    remember(action.id, {
+      issueId: action.issueId,
+      identifier: action.identifier,
+      title: action.title,
+      restore: { change: action.change, id: action.restoreId! },
+      at: Date.now(),
+    });
+    const told = await sendAll(released);
+    await sendAll(others);
+    return { identifier: action.identifier, commentId: action.id, change: action.change, steward: told, undo: action.id, resumed };
   }
 
   /** Undo a Done of this plugin load: one comment from the owner, then the state or the todo label back. */
@@ -176,23 +318,45 @@ export function createTodos(deps: TodoDeps) {
     if (undo === undefined || Date.now() - undo.at > UNDO_MS) {
       throw new Refusal("not_found", "That Done can no longer be undone here. Reopen the issue in Linear.");
     }
-    const commentId = await deps.write(async (linear) => {
+    const steward = await deps.steward();
+    const { released, others } = await deps.write(async (linear) => {
       const issue = await linear.getTodoIssue(undo.issueId);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${undo.identifier}.`);
-      if (isTodo(issue)) throw new Refusal("conflict", `${issue.identifier} is on the todo list already.`);
-      const id = randomUUID();
-      await postComment(linear, issue.id, reopenedComment(), id);
-      if (undo.restore.kind === "state") await linear.setState({ issueId: issue.id, stateId: undo.restore.stateId });
-      else await linear.addLabel({ issueId: issue.id, labelId: undo.restore.labelId });
+      const others = await resolveOther(linear, issue, "done");
+      let action = store.pending(issue.id, "reopen");
+      if (action !== null) {
+        store.attempt(action.id);
+        holdFor(action, steward);
+      } else {
+        if (isTodo(issue)) throw new Refusal("conflict", `${issue.identifier} is on the todo list already.`);
+        const begun: Omit<TodoAction, "attemptedAt"> = {
+          id: randomUUID(),
+          kind: "reopen",
+          issueId: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          body: reopenedComment(),
+          note: null,
+          change: undo.restore.change,
+          targetId: undo.restore.id,
+          restoreId: null,
+        };
+        deps.db.transaction(() => {
+          store.begin(begun);
+          holdFor(begun, steward);
+        })();
+        action = { ...begun, attemptedAt: Date.now() };
+      }
+      const released = await carry(linear, action, issue);
       undos.delete(token);
-      deps.forget(issue.id);
       const back = await linear.getTodoIssue(issue.id);
       if (back !== null && isTodo(back)) todos = [...todos.filter((todo) => todo.id !== back.id), toView(back)].sort(byNumber);
       deps.publish();
-      return id;
+      return { released, others };
     });
-    const steward = await deps.tellSteward(commentId, `Todo reopened ${undo.identifier}`, todoReopenedMessage(undo.identifier, undo.title));
-    return { identifier: undo.identifier, steward };
+    const told = await sendAll(released);
+    await sendAll(others);
+    return { identifier: undo.identifier, steward: told };
   }
 
   const rpc = {
@@ -221,7 +385,7 @@ export function createTodos(deps: TodoDeps) {
     }),
     "todo done": cliCommand({
       summary: "Mark a todo done: comment on the issue, then move it to Done or remove the todo label",
-      description: `Posts "Done (from the SGC page)" and the note as the owner. A ${HUMAN_LABEL} issue moves to the team's Done state; any other loses the ${TODO_LABEL} label and keeps its state. The steward thread gets a message.`,
+      description: `Posts "Done (from the SGC page)" and the note as the owner. A ${HUMAN_LABEL} issue moves to the team's Done state; any other loses the ${TODO_LABEL} label and keeps its state. The steward thread gets a message. When an earlier Done of the issue did not finish, this finishes it, with that Done's own comment and note.`,
       positionals: [{ name: "issue", description: "Issue identifier, like TEAM-12", required: true }],
       options: { note: { type: "string", description: `A note for the comment and the steward, at most ${TODO_NOTE_CHARS} characters` }, json },
       async run(input) {
@@ -233,15 +397,16 @@ export function createTodos(deps: TodoDeps) {
           throw new PluginCliError(message(error), { code: "linear_error" });
         }
         const change = result.change === "state" ? "moved it to Done" : `removed the ${TODO_LABEL} label`;
+        const lead = result.resumed ? `Finished the earlier Done of ${result.identifier}, with its own note` : `Marked ${result.identifier} done`;
         const told = {
           sent: "Told the steward.",
           failed: "Could not tell the steward. Retry it on the SGC questions page.",
           skipped: "Did not tell the steward: no steward thread is set, or it is archived or gone.",
         }[result.steward];
-        return { exitCode: 0, stdout: input.options.json ? JSON.stringify(result) : `Marked ${result.identifier} done: ${change}.\n${told}` };
+        return { exitCode: 0, stdout: input.options.json ? JSON.stringify(result) : `${lead}: ${change}.\n${told}` };
       },
     }),
   };
 
-  return { poll, claim, list: () => ({ todos, todoError }), rpc, commands };
+  return { poll, claim: () => store.claimSeen(), list: () => ({ todos, todoError }), rpc, commands };
 }

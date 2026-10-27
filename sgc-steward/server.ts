@@ -146,12 +146,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     const asks = createAskStore(db);
     const todos = createTodos({
       db,
+      postWindowMs,
       write: writeLinear,
-      tellSteward,
+      steward: stewardFor,
+      hold: (ref, issueId, label, message, threadId) => asks.hold({ ref, issueId, label, message }, [threadId], "todo"),
+      release: (ref) => asks.release(ref, "todo"),
+      drop: (ref) => asks.drop(ref, "todo"),
+      send: async (row) => ((await deliver(row.id))?.state === "delivered" ? "sent" : "failed"),
+      sendAfterPoll: (rows) => releasedByPoll.push(...rows),
       forget: (issueId) => commentCache.delete(issueId),
       publish: () => publish(0),
       refresh: async () => void (await pollForCaller(false)),
       configured: () => snapshot.configured,
+      log: (text) => bb.log.warn(text),
     });
 
     let snapshot: Snapshot = {
@@ -466,13 +473,10 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       });
     }
 
-    /** Keep a message for the steward thread and send it once; skipped when none is set or bb reports it gone. */
-    async function tellSteward(ref: string, label: string, text: string): Promise<"sent" | "failed" | "skipped"> {
+    /** The steward thread to tell, or null when none is set or bb reports it gone. */
+    async function stewardFor(): Promise<string | null> {
       const { stewardThread } = await settings.get();
-      if (stewardThread === undefined || (await threadGone(stewardThread))) return "skipped";
-      const kept = asks.keep({ source: "todo", ref, threadId: stewardThread, label, message: text });
-      if (kept === null) return "skipped";
-      return (await deliver(kept.id))?.state === "delivered" ? "sent" : "failed";
+      return stewardThread === undefined || (await threadGone(stewardThread)) ? null : stewardThread;
     }
 
     /** Post the Linear record of an answered bb question, under the same id rules as answers. */

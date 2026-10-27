@@ -174,6 +174,8 @@ export const rpcContract = defineRpcContract({
       steward: z.enum(["sent", "failed", "skipped"]),
       /** Hand it to todos.reopen to undo this Done, while the plugin stays loaded. */
       undo: z.string(),
+      /** This finished an earlier Done of the issue that had not finished, with that Done's own comment and note. */
+      resumed: z.boolean(),
     }),
   },
   /** Undo a Done from this page: comment as the owner, put the state or the label back, and tell the steward. */

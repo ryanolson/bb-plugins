@@ -245,10 +245,13 @@ test("a database with the six shipped steps upgrades: its questions stay, and th
   assert.deepEqual(db.prepare("SELECT identifier FROM seen_todos").all(), [{ identifier: "TEAM-1" }]);
 });
 
-test("a kept message goes to the call that kept it; the same message kept again is not handed out", () => {
+test("a todo's held message is released and dropped apart from a block answer's with the same reference", () => {
   const { store } = open();
-  const kept = store.keep({ source: "todo", ref: "c-1", threadId: "thr_s", label: "Todo done TEAM-1", message: "done" });
-  assert.deepEqual([kept?.state, kept?.label, kept?.message], ["pending", "Todo done TEAM-1", "done"]);
-  assert.equal(store.keep({ source: "todo", ref: "c-1", threadId: "thr_s", label: "Todo done TEAM-1", message: "done" }), null);
-  assert.deepEqual(store.undelivered().map((row) => row.ref), ["c-1"]);
+  store.hold(ANSWER, ["thr_a"]);
+  store.hold({ ...ANSWER, label: "Todo done TEAM-1", message: "done" }, ["thr_s"], "todo");
+  assert.deepEqual(store.release("c-1", "todo").map((row) => [row.source, row.threadId]), [["todo", "thr_s"]]);
+  assert.equal(store.deliveryFor("linear", "c-1", "thr_a")!.state, "held", "the block answer's delivery stays held");
+  store.hold({ ...ANSWER, ref: "c-2" }, ["thr_s"], "todo");
+  store.drop("c-2", "todo");
+  assert.equal(store.deliveryFor("todo", "c-2", "thr_s"), null);
 });

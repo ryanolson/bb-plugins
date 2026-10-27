@@ -11,7 +11,7 @@ Answer the questions your agents ask, on Linear check-in issues or with `bb sgc 
 
 ## How it works
 
-A service on the bb server polls Linear every five minutes for the team's issues with the `checkin` or `needs-decision` label, and for your todos. A signed comment starts with `[agent:`. An answer from the plugin closes only the blocks it names. Any other unsigned comment closes every block before it. Before posting, the plugin reads the issue again and refuses if a block changed, a new one arrived, or the issue closed. An answer to a Linear block also goes to the bb thread named in the block's signature. The plugin keeps that send before it posts the answer, so a restart in the middle cannot lose it. bb questions live in the plugin's SQLite database, so they survive a restart. The API key is a secret setting on the server.
+A service on the bb server polls Linear every five minutes for the team's issues with the `checkin` or `needs-decision` label, and for your todos. A signed comment starts with `[agent:`. An answer from the plugin closes only the blocks it names. Any other unsigned comment closes every block before it. Before posting, the plugin reads the issue again and refuses if a block changed, a new one arrived, or the issue closed. An answer to a Linear block also goes to the bb thread named in the block's signature. The plugin keeps that send before it posts the answer, so a restart in the middle cannot lose it. A todo's Done or Undo is kept the same way, with the steward's message, before it writes to Linear: its comment goes under its own id, so it never posts twice. When its change fails, the todo stays on the list and pressing Done again finishes the same Done, with its own comment and note. When the change landed but its reply was lost, or the plugin restarted, the plugin reads the issue again, or the next poll does, and finishes it. Either way the steward hears once, after Linear holds the change. The poll only reads Linear; it never writes to finish a Done. bb questions live in the plugin's SQLite database, so they survive a restart. The API key is a secret setting on the server.
 
 ## Known limits
 
@@ -20,8 +20,6 @@ A service on the bb server polls Linear every five minutes for the team's issues
 - An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
 - An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
 - Only a signature with a bb thread id, like `thr_abc123`, gets the answer sent to a thread.
-- A restart between the change on Linear and keeping the steward's message for a todo Done loses that message. The steward still sees the change on Linear.
-- When Done posts its comment but then cannot change the state or the label, the todo stays on the list, and a second Done posts a second comment.
 - Undo works only for a Done from the page in this plugin load, for an hour. After a reload or an update, reopen the issue in Linear.
 - The first poll after the update announces every todo open then, in one notification.
 - The plugin cannot tell a Done by you from one an agent ran with `bb sgc todo done`: the CLI does not verify its caller. The skill tells agents to run it only to relay your own word that the action is done.
