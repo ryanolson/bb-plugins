@@ -47,7 +47,18 @@ function own(thread: string) {
 
 test("the shipped migration statements never change, because the host refuses a changed one", () => {
   const hash = (statement: string) => createHash("sha256").update(statement).digest("hex").slice(0, 16);
-  const shipped = ["201efed5e3e033d1", "00e4f9328a580a32", "b6975aa10840e9c7", "3d3eefa6d3eb3097", "8bf1acf89069b93d", "3e5eaeeb41357d9c"];
+  const shipped = [
+    "201efed5e3e033d1",
+    "00e4f9328a580a32",
+    "b6975aa10840e9c7",
+    "3d3eefa6d3eb3097",
+    "8bf1acf89069b93d",
+    "3e5eaeeb41357d9c",
+    // The todo list's: seen_todos, todo_actions, and its index of unfinished actions.
+    "1ffaddb9383af162",
+    "0bbedde4ed482939",
+    "e691d98041e2b45c",
+  ];
   assert.deepEqual(STORE_MIGRATIONS.slice(0, shipped.length).map(hash), shipped);
 });
 
