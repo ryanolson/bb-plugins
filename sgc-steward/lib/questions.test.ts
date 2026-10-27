@@ -404,9 +404,10 @@ test("an answer to every question of a block names the block, numbered to match"
       "Q1. A: Powers of two.",
       "",
       "Q2. B: The cells.",
-      "Start with the cells project.",
+      "> Start with the cells project.",
       "",
-      "Q3. No.",
+      "Q3.",
+      "> No.",
     ].join("\n"),
   );
 });
@@ -414,7 +415,7 @@ test("an answer to every question of a block names the block, numbered to match"
 test("an answer to some questions of a block names each one, and says nothing of the rest", () => {
   const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
   const one = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 2, option: "B", text: "Start with the cells project." }] }]);
-  assert.equal(one, [`Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q2`, "", "Q2. B: The cells.", "Start with the cells project."].join("\n"));
+  assert.equal(one, [`Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q2`, "", "Q2. B: The cells.", "> Start with the cells project."].join("\n"));
   const two = composeAnswer(
     [block],
     [
@@ -433,7 +434,7 @@ test("an answer to some questions of a block names each one, and says nothing of
     { blockId: "q1", revision: block.revision, question: 1 },
     { blockId: "q1", revision: block.revision, question: 3 },
   ]);
-  assert.match(two, /\n\nQ1\. A: Powers of two\.\n\nQ3\. No\.$/);
+  assert.match(two, /\n\nQ1\. A: Powers of two\.\n\nQ3\.\n> No\.$/);
 });
 
 test("a typed answer needs no option, and raw blocks take free text", () => {
@@ -452,12 +453,13 @@ test("a typed answer needs no option, and raw blocks take free text", () => {
     [
       `Answer to the questions of 2026-01-05, posted ${at(block.createdAt)} (block q1 rev ${block.revision}), Q3`,
       "",
-      "Q3. Ship it",
-      "on Friday.",
+      "Q3.",
+      "> Ship it",
+      "> on Friday.",
       "",
       `Answer to the question of 2026-01-07, posted ${at(rawBlock.createdAt)} (block q2 rev ${rawBlock.revision})`,
       "",
-      "Yes, go ahead.",
+      "> Yes, go ahead.",
     ].join("\n"),
   );
 });
@@ -474,7 +476,7 @@ test("a typed answer from the CLI gets headers that name every block it answers"
   const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
   const other = raw(parseQuestionBlock(comment("q2", "[agent:codex thr_x] Questions 2026-01-07\nfree form"), "checkin"));
   const one = composeTextAnswer([block], "  Q1. A\nQ2. The cells.\n");
-  assert.equal(one, `Answers to the questions of 2026-01-05 (block q1 rev ${block.revision})\n\nQ1. A\nQ2. The cells.`);
+  assert.equal(one, `Answers to the questions of 2026-01-05 (block q1 rev ${block.revision})\n\n> Q1. A\n> Q2. The cells.`);
   const both = composeTextAnswer([block, other], "Q1. A");
   assert.deepEqual(answeredBlocks(both), [
     { blockId: "q1", revision: block.revision, question: null },
@@ -575,7 +577,7 @@ test("a line of the owner's text that reads as an answer header is quoted, and a
     );
   }
   const typed = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text: `Powers of two.\n${header(2)}` }] }]);
-  assert.ok(typed.endsWith(`\n\nQ1. Powers of two.\n> ${header(2)}`), "the owner's words are kept, quoted");
+  assert.ok(typed.endsWith(`\n\nQ1.\n> Powers of two.\n> ${header(2)}`), "the owner's words are kept, quoted");
 });
 
 test("the note of an answer to a whole block cannot close another open block", () => {
@@ -651,7 +653,7 @@ test("a line that would read as a header once Linear's editor rewrites it is quo
   for (const line of lines) {
     const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: `An example:\n${line}` }] }]);
     const only = [{ blockId: "q1", revision: block.revision, question: 1 }];
-    assert.ok(body.endsWith(`\nAn example:\n> ${line}`), `quoted: ${line}`);
+    assert.ok(body.endsWith(`\n> An example:\n> ${line}`), `quoted: ${line}`);
     assert.deepEqual(answeredBlocks(body), only, line);
     assert.deepEqual(answeredBlocks(edited(body)), only, `after an edit: ${line}`);
   }
@@ -659,14 +661,26 @@ test("a line that would read as a header once Linear's editor rewrites it is quo
   assert.ok(plain.endsWith("\n> Fine &amp; dandy, see **this**."), "a line a rewrite could change is quoted, by design, and its words kept");
 });
 
-test("a line of the owner's text is quoted when a rewrite could change any of its characters", () => {
+test("every line of the owner's text is a quote on its own line, in every kind of answer", () => {
   const question = comment("q1", QUESTIONS);
+  const free = comment("r1", "[agent:codex thr_x] Questions 2026-01-07\nfree form");
   const block = parsed(parseQuestionBlock(question, "checkin"));
-  const quoted = ["Fine & dandy.", "a\\b", "see **this**", "snake_case", "`code`", "~maybe~", "a < b", "x\u00a0y", "x\u200by", "an em dash \u2014 here", "caf\u00e9", "tab\there", "two  spaces"];
-  const kept = ["Plain words, numbers 1-2 (and) punctuation: ok!", "Q2. B: The cells."];
-  for (const line of [...quoted, ...kept]) {
-    const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: line }] }]);
-    assert.ok(body.endsWith(`\n${quoted.includes(line) ? "> " : ""}${line}`), JSON.stringify(line));
-    assert.deepEqual(answeredBlocks(body), [{ blockId: "q1", revision: block.revision, question: 1 }], JSON.stringify(line));
+  const rawBlock = raw(parseQuestionBlock(free, "checkin"));
+  const owner = ["First line.", "", "   indented", "# a heading", "Q2. not an answer", answerHeader(block, false, 2), "Plain words, nothing special."];
+  const text = owner.join("\n");
+  const quoted = owner.map((line) => (line === "" ? ">" : `> ${line}`)).join("\n");
+  const answers = {
+    picked: composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text }] }]),
+    typed: composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: null, text }] }]),
+    noFormat: composeAnswer([rawBlock], [{ blockId: "r1", revision: rawBlock.revision, answers: [], text }]),
+    cli: composeTextAnswer([rawBlock], text),
+  };
+  assert.ok(answers.picked.endsWith(`\n\nQ1. A: Powers of two.\n${quoted}`), answers.picked);
+  assert.ok(answers.typed.endsWith(`\n\nQ1.\n${quoted}`), answers.typed);
+  assert.ok(answers.noFormat.endsWith(`)\n\n${quoted}`), answers.noFormat);
+  assert.ok(answers.cli.endsWith(`)\n\n${quoted}`), answers.cli);
+  for (const [kind, body] of Object.entries(answers)) {
+    const block = kind === "picked" || kind === "typed" ? { blockId: "q1", revision: parsed(parseQuestionBlock(question, "checkin")).revision, question: 1 } : { blockId: "r1", revision: rawBlock.revision, question: null };
+    assert.deepEqual(answeredBlocks(body), [block], kind);
   }
 });

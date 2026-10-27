@@ -78,12 +78,22 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 ## Reading a Linear answer
 
 - An answer from the SGC Steward page or `bb sgc answer` names what it answers in its header lines. `(block <comment id> rev <revision>)` answers that whole block, at that revision. `(block <comment id> rev <revision>), Q2` answers only question 2 of it: the block stays open until each of its questions has an answer, in this comment or a later one. Ask again about any block it does not name.
-- A line that starts with `>` in an answer is the owner's own text, quoted by the plugin: read it as the owner's words. It answers nothing, even when it reads like a header. The plugin quotes every line of the owner's text that reads like a header, or holds a character such as `&`, `*`, `_`, or anything outside plain ASCII.
+- A line that starts with `>` in an answer is the owner's own text, quoted by the plugin: read it as the owner's words. The plugin quotes every line of it, and an empty line is `>`. A quoted line answers nothing, even when it reads like a header.
 - To see what is still open, run `bb sgc questions`. It lists only the questions that have no answer yet.
 - A comment that starts with `Answer to bb question` records the answer to a bb question, or its withdrawal. It answers no Linear block.
 - A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo done or open again. It answers no Linear block either.
 - Any other unsigned comment from the owner answers every block before it.
-- The page answers one question per comment. It writes `Q1. A: <option text>` for a picked option and `Q2. <text>` for a typed answer. A note can follow on the next line. An older answer can hold `Q3. No answer.` for a question the owner skipped.
+- The page answers one question per comment. It writes `Q1. A: <option text>` for a picked option, and `Q2.` alone on its line for a typed answer. The owner's text, a note under the option or the typed answer, follows below as quoted lines:
+
+  ```
+  Q1. A: <option text>
+  > <the owner's note>
+
+  Q2.
+  > <the owner's typed answer>
+  ```
+
+- An answer from before this format can hold the typed text on the number's line, an unquoted note, or `Q3. No answer.` for a question the owner skipped.
 - Ask again in a new block for every question marked `No answer.` that still matters.
 
 ## Commands
@@ -98,7 +108,7 @@ bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <nam
 ```
 
 - `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`.
-- `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
+- `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text, quoted line by line. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.
 - `bb sgc todo done` marks a todo done as the owner, and the steward treats its message as the owner's word. Run it only to relay the owner's own word that the action is done, never on your own judgment.

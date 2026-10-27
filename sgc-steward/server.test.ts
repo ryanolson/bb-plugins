@@ -139,7 +139,7 @@ test("answering a needs-decision issue also removes the label", async () => {
     notified: [{ threadId: "thr_test2", delivered: true, error: null }],
   });
   assert.deepEqual(decision.labels, []);
-  assert.equal(decision.comments.at(-1)!.body, `Answer to the question of 2026-01-05 (block d1 rev ${revisionOf(shown, "d1")})\n\nYes, use the org id.`);
+  assert.equal(decision.comments.at(-1)!.body, `Answer to the question of 2026-01-05 (block d1 rev ${revisionOf(shown, "d1")})\n\n> Yes, use the org id.`);
 });
 
 test("a label that will not come off is retried, then reported, and the answer is not posted twice", async () => {
@@ -298,10 +298,10 @@ test("one question of a block is answered on its own, and the block stays open u
     snapshot.issues.map((issue) => issue.blocks.map((block) => [block.commentId, block.format === "parsed" ? block.questions.map((asked) => asked.number) : []]));
 
   await harness.behavior.callRpc("questions.answer", answer(2, null, "The cells."));
-  assert.equal(checkin.comments.at(-1)?.body, `Answer to the questions of 2026-01-06 (block q1 rev ${revision}), Q2\n\nQ2. The cells.`);
+  assert.equal(checkin.comments.at(-1)?.body, `Answer to the questions of 2026-01-06 (block q1 rev ${revision}), Q2\n\nQ2.\n> The cells.`);
   assert.deepEqual(open((await harness.behavior.callRpc("questions.list", null)) as Snapshot), [[["q1", [1]]]], "the issue stays, with its open question");
   assert.deepEqual(open(await refresh()), [[["q1", [1]]]]);
-  assert.match(sends.at(-1)!.input[0]!.text, /Answer to your questions on TEAM-1[\s\S]*\nQ2\. The cells\.$/);
+  assert.match(sends.at(-1)!.input[0]!.text, /Answer to your questions on TEAM-1[\s\S]*\nQ2\.\n> The cells\.$/);
   const listed = await harness.behavior.runCli(["questions"]);
   assert.match(listed.stdout, /Q1\. Which scale do estimates use\?/);
   assert.doesNotMatch(listed.stdout, /Q2\./);
@@ -367,7 +367,7 @@ test("a lost reply on a block's last open question is found again, and posted on
   const answers = issue.comments.filter((comment) => !comment.body.startsWith("[agent:"));
   assert.equal(answers.length, 2);
   assert.equal(retried.commentId, answers[1]!.id);
-  assert.match(answers[1]!.body, /\), Q2\n\nQ2\. The cells\.$/);
+  assert.match(answers[1]!.body, /\), Q2\n\nQ2\.\n> The cells\.$/);
   assert.deepEqual((await refresh()).issues, []);
 });
 
@@ -418,7 +418,7 @@ test("bb sgc answer reads the file on the invoking thread's machine and posts it
   });
   assert.equal(cli.exitCode, 0, cli.stderr);
   assert.deepEqual(reads, [{ path: "/work/answer.md", hostId: "host_spark" }]);
-  assert.equal(checkin.comments.at(-1)?.body, `Answers to the questions of 2026-01-05 (block q1 rev ${revision})\n\nQ1. A\nQ2. The cells.`);
+  assert.equal(checkin.comments.at(-1)?.body, `Answers to the questions of 2026-01-05 (block q1 rev ${revision})\n\n> Q1. A\n> Q2. The cells.`);
   assert.match(cli.stdout, /Posted the answer to TEAM-1/);
 });
 

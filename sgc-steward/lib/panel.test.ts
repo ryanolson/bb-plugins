@@ -43,7 +43,7 @@ test("one card's answer names its block, its revision, and its one question", ()
   assert.ok(typed);
   assert.equal(
     composeAnswer([parsed], typed.blocks),
-    `Answer to the questions of 2026-01-05 (block q1 rev ${parsed.revision}), Q2\n\nQ2. Ship Friday.`,
+    `Answer to the questions of 2026-01-05 (block q1 rev ${parsed.revision}), Q2\n\nQ2.\n> Ship Friday.`,
     "the server names the question, and the block stays open for Q1",
   );
 });

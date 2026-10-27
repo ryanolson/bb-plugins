@@ -320,28 +320,18 @@ function postedAt(block: QuestionBlock): string {
 }
 
 /**
- * A character that a Markdown or rich-text rewrite of a line could change:
- * a character reference, an escape, an emphasis or code marker, a tag,
- * anything outside printable ASCII, invisible format characters and
- * non-breaking spaces included, and a run of spaces, which rich text
- * collapses.
- */
-const REWRITABLE = /[&\\*_`~<]|[^\x20-\x7e]| {2}/;
-
-/**
- * The owner's own words for an answer, with a line quoted when it reads as
- * an answer header, or when it holds a character a rewrite in Linear's
- * editor could change, so it might come to read as one. Then nothing the
- * owner writes, fenced or not, can name a block or a question: only the
- * headers the plugin writes do. Quoting more than needed only shows a line
- * as a quote; the words stay, and a quoted line stays quoted through an
- * edit. Lines break where the parser breaks them.
+ * The owner's own words for an answer, every line a quote on its own line:
+ * `> ` and the line, or `>` for an empty one, so the quote does not break.
+ * No line of the owner's then stands outside a quote, so nothing the owner
+ * writes, fenced or not, can name a block or a question, whatever an edit in
+ * Linear makes of it: only the headers the plugin writes do. Every word
+ * stays. Lines break where the parser breaks them.
  */
 function ownWords(text: string): string {
   return text
     .replace(/\r\n?|[\u2028\u2029]/g, "\n")
     .split("\n")
-    .map((line) => (ANSWER_HEADER.test(line) || REWRITABLE.test(line) ? `> ${line}` : line))
+    .map((line) => (line === "" ? ">" : `> ${line}`))
     .join("\n");
 }
 
@@ -522,7 +512,8 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
       const option = question.options.find((candidate) => candidate.letter === item?.option);
       if (option === undefined && note === "") continue;
       answered.push(question.number);
-      if (option === undefined) lines.push(`Q${question.number}. ${ownWords(note)}`);
+      // The owner's words start below the number, so they stay a quote whatever an edit does.
+      if (option === undefined) lines.push(`Q${question.number}.\n${ownWords(note)}`);
       else {
         const picked = `Q${question.number}. ${option.letter}: ${option.text.replace(/\n/g, " ")}`;
         lines.push(note === "" ? picked : `${picked}\n${ownWords(note)}`);
