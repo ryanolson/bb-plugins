@@ -2,6 +2,7 @@
 // shows. The page imports it as types only, so zod stays out of its bundle.
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { TODO_NOTE_CHARS } from "./todos.ts";
 
 const optionSchema = z.object({ letter: z.string(), text: z.string(), recommended: z.boolean() });
 const questionSchema = z.object({ number: z.number().int(), text: z.string(), options: z.array(optionSchema) });
@@ -53,7 +54,7 @@ const askViewSchema = z.object({
 });
 const deliveryViewSchema = z.object({
   id: z.string(),
-  source: z.enum(["ask", "linear", "withdrawal"]),
+  source: z.enum(["ask", "linear", "withdrawal", "todo"]),
   ref: z.string(),
   threadId: z.string(),
   label: z.string(),
@@ -69,16 +70,31 @@ const recordViewSchema = z.object({
   error: z.string().nullable(),
   attempts: z.number().int(),
 });
-/** What the page shows: the last Linear poll, the open bb questions, and the answers that did not go out. */
+const todoViewSchema = z.object({
+  /** The issue's UUID. */
+  id: z.string(),
+  identifier: z.string(),
+  title: z.string(),
+  url: z.string(),
+  /** A human issue: Done moves it to the Done state. Otherwise Done removes the todo label. */
+  human: z.boolean(),
+  /** The task lines of the description, in order. */
+  steps: z.array(z.object({ text: z.string(), done: z.boolean() })),
+});
+/** What the page shows: the last Linear poll, the open bb questions, the owner's todos, and the answers that did not go out. */
 const panelSchema = snapshotSchema.extend({
   asks: z.array(askViewSchema),
   undelivered: z.array(deliveryViewSchema),
   unposted: z.array(recordViewSchema),
+  todos: z.array(todoViewSchema),
+  /** Why the last read of the todos failed; the todos are then from the read before. */
+  todoError: z.string().nullable(),
 });
 export type Panel = z.infer<typeof panelSchema>;
 export type AskView = z.infer<typeof askViewSchema>;
 export type DeliveryView = z.infer<typeof deliveryViewSchema>;
 export type RecordView = z.infer<typeof recordViewSchema>;
+export type TodoView = z.infer<typeof todoViewSchema>;
 
 const answerInputSchema = z.object({
   issueId: z.string().min(1),
@@ -116,9 +132,9 @@ const answerResultSchema = z.object({
 export type AnswerResult = z.infer<typeof answerResultSchema>;
 
 const notificationSchema = z.object({
-  /** The Linear block's comment id, or the bb question id. */
+  /** The Linear block's comment id, the bb question id, or the todo issue's UUID. */
   id: z.string(),
-  source: z.enum(["linear", "ask"]),
+  source: z.enum(["linear", "ask", "todo"]),
   /** The issue identifier, or the asking thread's title. */
   label: z.string(),
   questionCount: z.number().int(),
@@ -148,6 +164,23 @@ export const rpcContract = defineRpcContract({
   "deliveries.retry": { input: z.object({ id: z.string().min(1) }), output: z.object({ delivered: z.boolean(), error: z.string().nullable() }) },
   /** Post a record that did not post. */
   "records.retry": { input: z.object({ askId: z.string().min(1) }), output: z.object({ posted: z.boolean(), error: z.string().nullable() }) },
+  /** Mark a todo done: comment as the owner, then move it to Done or remove the todo label, and tell the steward. */
+  "todos.done": {
+    input: z.object({ issue: z.string().min(1), note: z.string().max(TODO_NOTE_CHARS) }),
+    output: z.object({
+      identifier: z.string(),
+      commentId: z.string(),
+      change: z.enum(["state", "label"]),
+      steward: z.enum(["sent", "failed", "skipped"]),
+      /** Hand it to todos.reopen to undo this Done, while the plugin stays loaded. */
+      undo: z.string(),
+    }),
+  },
+  /** Undo a Done from this page: comment as the owner, put the state or the label back, and tell the steward. */
+  "todos.reopen": {
+    input: z.object({ undo: z.string().min(1) }),
+    output: z.object({ identifier: z.string(), steward: z.enum(["sent", "failed", "skipped"]) }),
+  },
   /** Hand out the questions no window has notified about yet, once each. */
   "notifications.claim": { input: z.null(), output: z.object({ notifications: z.array(notificationSchema) }) },
 });

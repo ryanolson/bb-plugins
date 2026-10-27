@@ -232,3 +232,23 @@ test("the steward withdraws any open question, and its notice and record are sav
   assert.equal(store.withdraw("bbq_1", steward), "not_open", "a second withdrawal changes nothing");
   assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
 });
+
+test("a database with the six shipped steps upgrades: its questions stay, and the todo table works", () => {
+  const db = new Database(":memory:");
+  migrate(db, STORE_MIGRATIONS.slice(0, 6));
+  const before = createAskStore(db, now);
+  before.admit(ask("bbq_live"), false);
+  migrate(db, STORE_MIGRATIONS);
+  const after = createAskStore(db, now);
+  assert.deepEqual(after.listOpen().map((row) => row.id), ["bbq_live"]);
+  db.prepare("INSERT INTO seen_todos (issue_id, identifier, title, first_seen_at, notified_at) VALUES ('uuid-1', 'TEAM-1', 'Log in', 1, NULL)").run();
+  assert.deepEqual(db.prepare("SELECT identifier FROM seen_todos").all(), [{ identifier: "TEAM-1" }]);
+});
+
+test("a kept message goes to the call that kept it; the same message kept again is not handed out", () => {
+  const { store } = open();
+  const kept = store.keep({ source: "todo", ref: "c-1", threadId: "thr_s", label: "Todo done TEAM-1", message: "done" });
+  assert.deepEqual([kept?.state, kept?.label, kept?.message], ["pending", "Todo done TEAM-1", "done"]);
+  assert.equal(store.keep({ source: "todo", ref: "c-1", threadId: "thr_s", label: "Todo done TEAM-1", message: "done" }), null);
+  assert.deepEqual(store.undelivered().map((row) => row.ref), ["c-1"]);
+});

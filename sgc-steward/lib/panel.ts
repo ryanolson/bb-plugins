@@ -63,7 +63,7 @@ export function answerProgress(blocks: readonly QuestionBlock[], drafts: Readonl
 /** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
 export interface Notice {
   id: string;
-  source: "linear" | "ask";
+  source: "linear" | "ask" | "todo";
   label: string;
   questionCount: number;
   preview: string;
@@ -74,11 +74,18 @@ export function announcement(notes: readonly Notice[]): { title: string; body: s
   const first = notes[0];
   if (first === undefined) return { title: "", body: "" };
   if (notes.length === 1) {
+    if (first.source === "todo") return { title: `New todo: ${first.label}`, body: first.preview };
     const more = first.questionCount > 1 ? ` (+${first.questionCount - 1} more)` : "";
     const title = first.source === "linear" ? `Steward question on ${first.label}` : `Question from ${first.label}`;
     return { title, body: `${first.preview}${more}` };
   }
-  return { title: `${notes.length} new questions`, body: notes.map((note) => `${note.label}: ${note.preview}`).join("\n") };
+  const todos = notes.filter((note) => note.source === "todo").length;
+  const questions = notes.length - todos;
+  const counted = (count: number, noun: string) => (count === 0 ? [] : [`${count} new ${noun}${count === 1 ? "" : "s"}`]);
+  return {
+    title: [...counted(questions, "question"), ...counted(todos, "todo")].join(" and "),
+    body: notes.map((note) => `${note.label}: ${note.preview}`).join("\n"),
+  };
 }
 
 /** A card on the page: an issue with open Linear blocks, or an open bb question. */

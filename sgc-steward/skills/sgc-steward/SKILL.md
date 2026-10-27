@@ -1,6 +1,6 @@
 ---
 name: sgc-steward
-description: Ask the owner a question without blocking your thread, with `bb sgc ask`. Treat the `[sgc-steward] Answer to` message that comes back as the answer, and `[sgc-steward] Withdrawn` as the end of the question. Also the question format for Linear check-in issues, how the steward withdraws stale questions, and the `bb sgc` commands. Use whenever you need a decision from the owner, when you are the steward agent writing check-in questions or retracting stale ones, when you park a question with the needs-decision label, or when the user asks about open questions.
+description: Ask the owner a question without blocking your thread, with `bb sgc ask`. Treat the `[sgc-steward] Answer to` message that comes back as the answer, and `[sgc-steward] Withdrawn` as the end of the question. Also the question format for Linear check-in issues, how the steward withdraws stale questions, the messages the steward gets when the owner finishes a todo, and the `bb sgc` commands. Use whenever you need a decision from the owner, when you are the steward agent writing check-in questions or retracting stale ones, when you park a question with the needs-decision label, or when the user asks about open questions.
 ---
 
 # SGC Steward questions
@@ -32,6 +32,18 @@ The steward thread, named in the plugin's `stewardThread` setting, withdraws any
 - The steward must give a reason. The asking thread gets it in a message that starts with `[sgc-steward] Withdrawn <id>`, unless bb reports that thread archived, deleted, or missing.
 - When the question names an issue, the plugin posts a record of the withdrawal there. The record closes no Linear block.
 - The tool reaches the steward when its agent session next starts after the setting is made.
+
+## The owner's todos
+
+The plugin lists the owner's todos on the SGC page and with `bb sgc todos`: open issues on the team with the `waiting:ryan-action` label, and the owner's own issues with the `human` label. Use `waiting:ryan-action` only for an action only the owner can take, such as logging in on a machine, giving a token, or approving a budget. A decision belongs in `bb sgc ask` or a question block.
+
+When the owner marks a todo done, on the page or with `bb sgc todo done`, the plugin:
+
+- posts the owner's comment `Done (from the SGC page)` on the issue, with the owner's note if there is one;
+- moves a `human` issue to the team's Done state, or removes `waiting:ryan-action` from any other issue and leaves its state;
+- sends the steward thread a queued message that starts with `[sgc-steward] Todo done <issue>: <title>`, with the note on the next line.
+
+Treat that message as the owner's word that the action is done, and go on with the work behind it. A message that starts with `[sgc-steward] Todo reopened <issue>: <title>` takes it back: the todo is open again.
 
 ## Asking on a Linear check-in issue
 
@@ -66,6 +78,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 - An answer from the SGC Steward page or `bb sgc answer` names the blocks it answers in its header lines, as `(block <comment id> rev <revision>)`. It answers only those blocks, at that revision. Ask again about any block it does not name.
 - A comment that starts with `Answer to bb question` records the answer to a bb question, or its withdrawal. It answers no Linear block.
+- A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo done or open again. It answers no Linear block either.
 - Any other unsigned comment from the owner answers every block before it.
 - The page writes `Q1. A: <option text>` for a picked option, `Q2. <text>` for a typed answer, and `Q3. No answer.` for a skipped question. A note can follow on the next line.
 - Ask again in a new block for every question marked `No answer.` that still matters.
@@ -76,6 +89,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached]
+bb sgc todos [--json] [--cached]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 ```
 

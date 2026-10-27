@@ -56,6 +56,14 @@ export const STORE_MIGRATIONS: readonly string[] = [
   `ALTER TABLE asks ADD COLUMN withdrawn_by TEXT`,
   `ALTER TABLE asks ADD COLUMN withdraw_reason TEXT`,
   `ALTER TABLE asks ADD COLUMN withdrawn_at INTEGER`,
+  // The owner's todos already seen, so each new one is announced once.
+  `CREATE TABLE IF NOT EXISTS seen_todos (
+    issue_id TEXT PRIMARY KEY,
+    identifier TEXT NOT NULL,
+    title TEXT NOT NULL,
+    first_seen_at INTEGER NOT NULL,
+    notified_at INTEGER
+  )`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn";
@@ -70,11 +78,12 @@ export interface AskRow extends Ask {
   withdrawnAt: number | null;
 }
 
-export type DeliverySource = "ask" | "linear" | "withdrawal";
+export type DeliverySource = "ask" | "linear" | "withdrawal" | "todo";
 
 /**
  * One message to send to a thread: the answer to its bb question or to its
- * Linear block, or the notice that the steward withdrew its question. An
+ * Linear block, the notice that the steward withdrew its question, or the
+ * steward's news that the owner marked a todo done or reopened it. An
  * answer to a block is kept held before it posts, so a restart while the
  * post is in flight cannot lose it. Whoever moves a row out of held sends
  * it, once; after that, only the owner's retry sends it again, because a
@@ -346,6 +355,16 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
         if (record !== null) insertRecord.run(id, record.issue, record.body, at);
         return "answered" as const;
       })();
+    },
+
+    /**
+     * Keep one message to send. Returns it to the call that kept it, which
+     * sends it, once; null when the same message was kept before.
+     */
+    keep(delivery: { source: DeliverySource; ref: string; threadId: string; label: string; message: string }): Delivery | null {
+      const { source, ref, threadId, label, message } = delivery;
+      const kept = insertDelivery.run(`dlv_${token(10)}`, source, ref, threadId, label, message, "pending", null, now()).changes;
+      return kept === 1 ? toDelivery(deliveryByKey.get(source, ref, threadId) as DeliveryRecord) : null;
     },
 
     /**

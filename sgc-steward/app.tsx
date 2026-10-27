@@ -1,7 +1,7 @@
 // SGC Steward frontend: the Questions page, its sidebar badge, and the
-// notifier that tells you, once per question, that new questions came. The
-// page holds two kinds of question: Linear blocks, and bb questions agents
-// asked with `bb sgc ask`.
+// notifier that tells you, once per question or todo, that new ones came. The
+// page holds two kinds of question, Linear blocks and bb questions agents
+// asked with `bb sgc ask`, and your todos from Linear.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
@@ -18,7 +18,7 @@ import {
   useRpc,
   type ExperimentalBadge,
 } from "@get-bb/plugin-sdk/app";
-import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, rpcContract } from "./lib/contract.ts";
+import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, TodoView, rpcContract } from "./lib/contract.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
 import {
   announcement,
@@ -468,6 +468,135 @@ function Undelivered({ undelivered, unposted }: { undelivered: DeliveryView[]; u
   );
 }
 
+// --- todos -------------------------------------------------------------------
+
+/** A Done from this page that can still be undone. */
+interface DoneHere {
+  identifier: string;
+  title: string;
+  undo: string;
+}
+
+function stewardToast(what: string, identifier: string, steward: "sent" | "failed" | "skipped"): void {
+  if (steward === "sent") toast.success(`${what} ${identifier}, and told the steward`);
+  else if (steward === "failed") toast.error(`${what} ${identifier}, but could not tell the steward`, { description: "Send the message again below." });
+  else toast.success(`${what} ${identifier}`);
+}
+
+function TodoCard({ todo, onDone }: { todo: TodoView; onDone: (entry: DoneHere) => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function markDone() {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await rpc.call("todos.done", { issue: todo.id, note });
+      stewardToast("Marked done", todo.identifier, result.steward);
+      onDone({ identifier: todo.identifier, title: todo.title, undo: result.undo });
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className="space-y-2 rounded-md border border-border p-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+        <UrlLink href={todo.url} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
+          {todo.identifier}
+        </UrlLink>
+        <span className="min-w-0 flex-1 font-medium">{todo.title}</span>
+        {todo.human ? <span className="rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">human</span> : null}
+      </div>
+      {todo.steps.length === 0 ? null : (
+        <ul className="space-y-0.5 text-sm">
+          {todo.steps.map((step, index) => (
+            <li key={index} className={cn("flex gap-2", step.done && "text-muted-foreground line-through")}>
+              <span aria-hidden>{step.done ? "☑" : "☐"}</span>
+              <Markdown content={step.text} className="min-w-0 flex-1" />
+            </li>
+          ))}
+        </ul>
+      )}
+      <textarea
+        className={textareaClass()}
+        value={note}
+        aria-label={`Note for ${todo.identifier}`}
+        placeholder="Add a note (optional)"
+        onChange={(event) => setNote(event.target.value)}
+      />
+      {error === null ? null : (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <footer className="flex flex-wrap items-center gap-3">
+        <Button size="sm" disabled={busy} onClick={() => void markDone()}>
+          {busy ? "Marking…" : "Done"}
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          {todo.human ? "Comments as you, then moves the issue to Done." : "Comments as you, then removes the waiting label; the agents' work goes on."}
+        </span>
+      </footer>
+    </li>
+  );
+}
+
+/** Your todos, and the ones done from this page, which can be undone while the page stays open. */
+function Todos({ todos, todoError }: { todos: TodoView[]; todoError: string | null }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [doneHere, setDoneHere] = useState<DoneHere[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  if (todos.length === 0 && doneHere.length === 0 && todoError === null) return null;
+
+  async function reopen(entry: DoneHere) {
+    setBusy(entry.undo);
+    try {
+      const result = await rpc.call("todos.reopen", { undo: entry.undo });
+      stewardToast("Reopened", entry.identifier, result.steward);
+      setDoneHere((current) => current.filter((candidate) => candidate.undo !== entry.undo));
+    } catch (cause) {
+      toast.error(`Could not reopen ${entry.identifier}`, { description: errorText(cause) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-medium">Todos</h2>
+      {todoError === null ? null : <Notice tone="error">Could not read the todos: {todoError}</Notice>}
+      {todos.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No todos.</p>
+      ) : (
+        <ul className="space-y-2">
+          {todos.map((todo) => (
+            <TodoCard key={todo.id} todo={todo} onDone={(entry) => setDoneHere((current) => [...current, entry])} />
+          ))}
+        </ul>
+      )}
+      {doneHere.length === 0 ? null : (
+        <ul className="space-y-1 text-sm">
+          {doneHere.map((entry) => (
+            <li key={entry.undo} className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1 text-muted-foreground">
+                Done: {entry.identifier} {entry.title}
+              </span>
+              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void reopen(entry)}>
+                {busy === entry.undo ? "Reopening…" : "Undo"}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function QuestionsPage() {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
   const [refreshing, setRefreshing] = useState(false);
@@ -518,6 +647,7 @@ function QuestionsPage() {
             Could not read {failed.identifier}: {failed.message}
           </Notice>
         ))}
+        {snapshot === null ? null : <Todos todos={snapshot.todos} todoError={snapshot.todoError} />}
         {snapshot === null ? null : <Undelivered undelivered={snapshot.undelivered} unposted={snapshot.unposted} />}
         {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
           <Notice>No open questions.</Notice>
@@ -567,7 +697,7 @@ function announce(notes: QuestionNotification[], open: () => void): void {
       // toast below still reaches the notification center.
     }
   }
-  toast(title, { description: body, action: { label: "Answer", onClick: open } });
+  toast(title, { description: body, action: { label: "Open", onClick: open } });
 }
 
 /**

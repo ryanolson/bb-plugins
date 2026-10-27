@@ -57,10 +57,11 @@ test("unchanged issues reuse their comments; a refresh from the panel reads them
   assert.equal(cli.exitCode, 0, cli.stderr);
   assert.deepEqual(linear.calls, [], "--cached reads nothing from Linear");
   await harness.behavior.runCli(["questions"]);
-  assert.deepEqual(linear.calls, ["listQuestionIssues TEAM"], "the issue did not change, so its comments come from the cache");
+  // Each poll also reads the todo list: one request, with no comments.
+  assert.deepEqual(linear.calls, ["listQuestionIssues TEAM", "listTodoIssues TEAM"], "the issue did not change, so its comments come from the cache");
   linear.calls.length = 0;
   await poll(true);
-  assert.deepEqual(linear.calls, ["listQuestionIssues TEAM", "listComments uuid-TEAM-1"]);
+  assert.deepEqual(linear.calls, ["listQuestionIssues TEAM", "listComments uuid-TEAM-1", "listTodoIssues TEAM"]);
 });
 
 test("each new question block is handed out for a notification exactly once", async () => {

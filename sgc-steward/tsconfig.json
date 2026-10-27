@@ -26,6 +26,7 @@
     "server.ts",
     "server.test.ts",
     "server.asks.test.ts",
+    "server.todos.test.ts",
     "test-support.ts",
     "app.tsx",
     "components",

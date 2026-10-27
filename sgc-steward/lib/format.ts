@@ -2,7 +2,7 @@
 // `bb sgc questions` listing, and the `--block` option that listing prints.
 import { PluginCliError } from "@get-bb/plugin-sdk";
 import { formatUtc } from "./asks.ts";
-import type { Panel } from "./contract.ts";
+import type { Panel, TodoView } from "./contract.ts";
 import type { BlockRef, QuestionBlock } from "./questions.ts";
 
 export function firstLine(text: string): string {
@@ -108,4 +108,17 @@ export function withdrawalReport(result: WithdrawalResult, asker: string, sendEr
     failed: [`Could not record it on ${issue}: ${recordError ?? "unknown error"}. Retry it on the SGC questions page.`],
   }[result.record];
   return [`Withdrew ${result.id}.`, told, ...recorded].join("\n");
+}
+
+/** The todos as `bb sgc todos` prints them: each with its link and its task lines. */
+export function formatTodos(todos: readonly TodoView[]): string {
+  if (todos.length === 0) return "No todos.";
+  const lines: string[] = [];
+  for (const todo of todos) {
+    lines.push(`${todo.identifier}  ${todo.title}${todo.human ? "  [human]" : ""}`, `  ${todo.url}`);
+    for (const step of todo.steps) lines.push(`  [${step.done ? "x" : " "}] ${step.text}`);
+    lines.push("");
+  }
+  lines.push("Done: bb sgc todo done <issue> [--note <text>]");
+  return lines.join("\n");
 }

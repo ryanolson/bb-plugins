@@ -58,6 +58,8 @@ import {
   type Snapshot,
 } from "./lib/contract.ts";
 import { readHostFile } from "./lib/host-file.ts";
+import { Refusal } from "./lib/refusal.ts";
+import { createTodos } from "./todos.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -70,17 +72,6 @@ const LABEL_ATTEMPTS = 3;
 const KEY_HINT = "Pipe the key in: <command that prints the key> | bb sgc key --api-key-stdin";
 /** bb clears a needs-configuration notice only when the plugin loads again; saving settings does not reload it. */
 const RELOAD_HINT = "Then run `bb plugin reload sgc-steward` to clear this notice.";
-
-type RefusalCode = "conflict" | "invalid" | "not_found";
-
-/** A refusal shared by the panel and the CLI: nothing was posted. */
-class AnswerRefusal extends Error {
-  readonly code: RefusalCode;
-  constructor(code: RefusalCode, message: string) {
-    super(message);
-    this.code = code;
-  }
-}
 
 export interface SgcStewardOptions {
   /** Stand-in for Linear in tests. */
@@ -153,6 +144,15 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       ...STORE_MIGRATIONS,
     ]);
     const asks = createAskStore(db);
+    const todos = createTodos({
+      db,
+      write: writeLinear,
+      tellSteward,
+      forget: (issueId) => commentCache.delete(issueId),
+      publish: () => publish(0),
+      refresh: async () => void (await pollForCaller(false)),
+      configured: () => snapshot.configured,
+    });
 
     let snapshot: Snapshot = {
       configured: Boolean(initial.linearApiKey),
@@ -269,14 +269,16 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           }
         }
         if (signal.aborted) return null;
+        const todoNews = await todos.poll(linear, teamKey, notify, signal);
+        if (todoNews === null) return null;
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
         if (fullRefresh) lastFullRefreshAt = checkedAt;
         const oldest = (issue: IssueView) => Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt)));
         issues.sort((a, b) => oldest(a) - oldest(b));
         snapshot = { configured: true, teamKey, polledAt: checkedAt, checkedAt, error: null, issueErrors, issues };
-        const fresh = reconcileSeen(issues, unread, notify);
+        const fresh = reconcileSeen(issues, unread, notify) + todoNews.fresh;
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
-        if (fresh > 0 || after !== before) publish(fresh);
+        if (fresh > 0 || todoNews.changed || after !== before) publish(fresh);
       } catch (error) {
         if (signal.aborted) return null;
         const reason = redact(message(error), [linearApiKey]);
@@ -315,6 +317,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         asks: asks.listOpen().map(askView),
         undelivered: asks.undelivered().map(deliveryView),
         unposted: asks.unposted().map(recordView),
+        ...todos.list(),
       };
     }
 
@@ -448,6 +451,30 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       }
     }
 
+    /** Linear writes for the todo list: ahead of polls, under the one lock, with the key kept out of errors. */
+    function writeLinear<T>(work: (linear: LinearClient, teamKey: string) => Promise<T>): Promise<T> {
+      writeFirst();
+      return locked(async () => {
+        const { linearApiKey, teamKey } = await settings.get();
+        if (!linearApiKey) throw new Refusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
+        try {
+          return await work(clientFor(linearApiKey), teamKey);
+        } catch (error) {
+          if (error instanceof Refusal) throw error;
+          throw new Error(redact(message(error), [linearApiKey]));
+        }
+      });
+    }
+
+    /** Keep a message for the steward thread and send it once; skipped when none is set or bb reports it gone. */
+    async function tellSteward(ref: string, label: string, text: string): Promise<"sent" | "failed" | "skipped"> {
+      const { stewardThread } = await settings.get();
+      if (stewardThread === undefined || (await threadGone(stewardThread))) return "skipped";
+      const kept = asks.keep({ source: "todo", ref, threadId: stewardThread, label, message: text });
+      if (kept === null) return "skipped";
+      return (await deliver(kept.id))?.state === "delivered" ? "sent" : "failed";
+    }
+
     /** Post the Linear record of an answered bb question, under the same id rules as answers. */
     function postRecord(askId: string): Promise<RecordRow | null> {
       writeFirst();
@@ -507,13 +534,13 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       writeFirst();
       const posted = await locked(async () => {
         const { linearApiKey, teamKey } = await settings.get();
-        if (!linearApiKey) throw new AnswerRefusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
+        if (!linearApiKey) throw new Refusal("invalid", `The Linear API key is not set. ${KEY_HINT}`);
         const linear = clientFor(linearApiKey);
         const issue = await linear.getIssue(issueRef);
-        if (issue === null) throw new AnswerRefusal("not_found", `Linear has no issue ${issueRef}.`);
-        if (issue.teamKey !== teamKey) throw new AnswerRefusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
+        if (issue === null) throw new Refusal("not_found", `Linear has no issue ${issueRef}.`);
+        if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
         if (issue.state !== null && (issue.state.type === "completed" || issue.state.type === "canceled")) {
-          throw new AnswerRefusal("conflict", `${issue.identifier} is ${issue.state.type}, so it takes no answer.`);
+          throw new Refusal("conflict", `${issue.identifier} is ${issue.state.type}, so it takes no answer.`);
         }
         const kind = issueKind(issue);
         const comments = await linear.listComments(issue.id, undefined, issue.identifier);
@@ -527,19 +554,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           ({ commentId, body, blocks: answered } = earlier);
           holdDeliveries(issue, commentId, body, answered);
         } else {
-          if (blocks.length === 0) throw new AnswerRefusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
+          if (blocks.length === 0) throw new Refusal("conflict", `${issue.identifier} has no open questions; they may be answered already.`);
           if (!sameBlocks(expected, blocks)) {
-            throw new AnswerRefusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
+            throw new Refusal("conflict", `The questions on ${issue.identifier} changed since you loaded them. Refresh and answer again.`);
           }
           try {
             body = compose(blocks);
           } catch (error) {
-            throw new AnswerRefusal("invalid", message(error));
+            throw new Refusal("invalid", message(error));
           }
-          if (body.trim() === "") throw new AnswerRefusal("invalid", "The answer is empty.");
-          if (Buffer.byteLength(body) > MAX_ANSWER_BYTES) throw new AnswerRefusal("invalid", `The answer is over ${MAX_ANSWER_BYTES} bytes.`);
+          if (body.trim() === "") throw new Refusal("invalid", "The answer is empty.");
+          if (Buffer.byteLength(body) > MAX_ANSWER_BYTES) throw new Refusal("invalid", `The answer is over ${MAX_ANSWER_BYTES} bytes.`);
           if (commentRole({ body, author: "user" }) !== "answer") {
-            throw new AnswerRefusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
+            throw new Refusal("invalid", "The answer starts with [agent:, so Linear would show it as an agent's comment, not an answer.");
           }
           commentId = answerCommentId(issue.id, body);
           answered = blocks;
@@ -601,6 +628,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         )
         .all(Date.now()) as Array<{ block_id: string; issue_identifier: string; question_count: number; preview: string; first_seen_at: number }>;
       const asked = asks.claim();
+      const todoNotes = todos.claim();
       if (!notify) return [];
       const notices = [
         ...blocks.map((row) => ({
@@ -611,12 +639,13 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           at: row.askedAt,
           notice: { id: row.id, source: "ask" as const, label: row.threadTitle || row.threadId, questionCount: 1, preview: truncate(firstLine(row.question), 160) },
         })),
+        ...todoNotes.map((row) => ({ at: row.at, notice: { id: row.id, source: "todo" as const, label: row.label, questionCount: 1, preview: truncate(row.preview, 160) } })),
       ];
       return notices.sort((a, b) => a.at - b.at || a.notice.id.localeCompare(b.notice.id)).map((entry) => entry.notice);
     }
 
     async function refuse(error: unknown): Promise<never> {
-      if (error instanceof AnswerRefusal) throw new experimental_PluginRpcRefusal({ code: error.code, message: error.message });
+      if (error instanceof Refusal) throw new experimental_PluginRpcRefusal({ code: error.code, message: error.message });
       const { linearApiKey } = await settings.get();
       throw new Error(redact(message(error), linearApiKey ? [linearApiKey] : []));
     }
@@ -684,6 +713,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         return { posted: row.state === "posted", error: row.state === "posted" ? null : row.error };
       },
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
+      ...todos.rpc,
     });
 
     // The steward's power to withdraw any question lives only here: bb hands
@@ -718,6 +748,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         name: "sgc",
         summary: "Ask the owner questions without waiting, list them, answer Linear questions, store the Linear key",
         commands: {
+          ...todos.commands,
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
@@ -879,7 +910,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               try {
                 result = await postAnswer(input.positionals.issue, refs, (blocks) => composeTextAnswer(blocks, text));
               } catch (error) {
-                if (error instanceof AnswerRefusal) throw new PluginCliError(error.message, { code: error.code });
+                if (error instanceof Refusal) throw new PluginCliError(error.message, { code: error.code });
                 const { linearApiKey } = await settings.get();
                 throw new PluginCliError(redact(message(error), linearApiKey ? [linearApiKey] : []), { code: "linear_error" });
               }

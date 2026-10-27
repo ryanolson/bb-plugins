@@ -1,6 +1,6 @@
 # bb-plugin-sgc-steward
 
-Agents need decisions from you. A bb question dialog stops the asking thread until you answer, and a question posted on Linear sends you no notification, because every agent posts through your own login. This plugin puts both kinds of question on one page in bb, notifies you once per question, and sends each answer back: to Linear and to the asking thread. No agent waits on a dialog.
+Agents need decisions from you. A bb question dialog stops the asking thread until you answer, and a question posted on Linear sends you no notification, because every agent posts through your own login. This plugin puts both kinds of question on one page in bb, notifies you once per question, and sends each answer back: to Linear and to the asking thread. No agent waits on a dialog. The same page lists your todos: the Linear issues that wait on something only you can do.
 
 ## Install
 
@@ -48,6 +48,7 @@ The page shows a comment that breaks these rules as written, with the reason, an
 
 - A signed comment starts with `[agent:`. Any other comment from a user is your answer. Comments from integrations are neither.
 - An answer from this plugin names each block it answers, as `(block <comment id> rev <revision>)` in a header line. It closes only those blocks, at that revision. Any other answer closes every block before it.
+- A comment whose first line is `Done (from the SGC page)` or `Reopened (from the SGC page)` marks a todo. It is yours, but it answers no question, so it closes no block.
 - On a check-in issue (label `checkin`), a signed comment is a question block when it has a `Q1.` line or a bare `Questions` header. Run reports and digests stay out. A block is open until an answer closes it. A reply in a comment thread counts.
 - On a needs-decision issue (label `needs-decision`), the latest signed comment is the question, in any shape. It is open while the issue has the label and no answer closed it.
 - Completed and canceled issues are skipped.
@@ -83,13 +84,21 @@ A send or a record that fails is kept and listed on the page, with a retry. A se
 
 The sends for an answer to a Linear block are kept before the answer posts. When a restart stops the post, a later poll sends them once the answer is on Linear. When the answer is still not on Linear ten minutes after its latest post began, the post failed, and the poll drops them.
 
+## Todos
+
+An issue is on your todo list when it is open and has the `waiting:ryan-action` label, or when it has the `human` label and is assigned to you, the user of the API key. An issue that waits on your decision, with `waiting:ryan-decision`, becomes a question instead. Each todo shows its link and the task lines of its description, the `- [ ]` lines, so you see the steps. `bb sgc todos` lists them too.
+
+Done posts one comment from you on the issue: `Done (from the SGC page)`, and your note if you wrote one. Then a `human` issue moves to the team's Done state. Any other issue loses the `waiting:ryan-action` label and keeps its state, so the agent work behind it goes on. The steward thread, named in `stewardThread`, gets a queued message that starts with `[sgc-steward] Todo done <issue>: <title>`, with your note on the next line. With no steward thread set, or one that is archived or gone, nothing is sent, and the change on Linear still counts. A message that fails to send is listed with a retry.
+
+Two Done clicks at once act once: the plugin reads the issue again under its lock and refuses a todo that is no longer on the list. A Done from the page can be undone from the same page, for an hour, until the plugin reloads. Undo posts `Reopened (from the SGC page)`, puts the label or the state back, and sends the steward `[sgc-steward] Todo reopened <issue>: <title>`.
+
 ## How it works
 
-A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the open blocks or their revisions changed, or when the issue is completed or canceled, so an answer never closes a question you did not see.
+A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the open blocks or their revisions changed, or when the issue is completed or canceled, so an answer never closes a question you did not see. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
 
 ## Notifications
 
-When a poll finds a new question block, or an agent asks a bb question, every open bb window hears about it. The first window to ask for it gets it, so each question is announced once. Questions that arrive together share one notification. A question that arrives while no bb window is open is announced by the next window that opens. The sidebar entry shows the number of open questions.
+When a poll finds a new question block or a new todo, or an agent asks a bb question, every open bb window hears about it. The first window to ask for it gets it, so each question and todo is announced once. Questions that arrive together share one notification. A question that arrives while no bb window is open is announced by the next window that opens. The sidebar entry shows the number of open questions.
 
 With bb in the background and notifications allowed, you get a system notification. Otherwise you get a bb toast. To allow notifications in a browser, use Settings, Push notifications, Allow notifications.
 
@@ -102,6 +111,8 @@ bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--re
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
+bb sgc todos [--json] [--cached]
+bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -110,6 +121,8 @@ bb sgc key --api-key-stdin
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text as written. Number the answers to match: `Q1. A`. Name every open block of the issue, as `questions` prints it. It refuses when the open blocks or their revisions differ, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
+- `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
+- `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -149,6 +162,9 @@ bb plugin logs sgc-steward
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.
+- `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
+- `lib/refusal.ts`: the refusal the page and the CLI both show.
+- `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page, its sidebar badge, and the notifier.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

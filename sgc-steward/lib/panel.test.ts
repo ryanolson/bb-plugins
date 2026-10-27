@@ -82,6 +82,13 @@ test("one new question names its issue or its thread; several are summed up in o
     title: "2 new questions",
     body: "TEAM-1: Scale?\nDriver: test project: Ship it?",
   });
+  const todo = { id: "uuid-TEAM-9", source: "todo" as const, label: "TEAM-9", questionCount: 1, preview: "Log in on the build box" };
+  assert.deepEqual(announcement([todo]), { title: "New todo: TEAM-9", body: "Log in on the build box" }, "a todo does not read as a question");
+  assert.deepEqual(announcement([todo, { ...todo, id: "uuid-TEAM-10", label: "TEAM-10" }]).title, "2 new todos");
+  assert.deepEqual(announcement([note, asked, todo]), {
+    title: "2 new questions and 1 new todo",
+    body: "TEAM-1: Scale?\nDriver: test project: Ship it?\nTEAM-9: Log in on the build box",
+  });
 });
 
 test("cards from Linear issues and bb questions come oldest first", () => {

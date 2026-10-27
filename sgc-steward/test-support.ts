@@ -161,7 +161,7 @@ export class FakeLinear implements LinearClient {
 
 export interface Notice {
   id: string;
-  source: "linear" | "ask";
+  source: "linear" | "ask" | "todo";
   label: string;
   questionCount: number;
   preview: string;
