@@ -319,9 +319,11 @@ export function createTodos(deps: TodoDeps) {
       throw new Refusal("not_found", "That Done can no longer be undone here. Reopen the issue in Linear.");
     }
     const steward = await deps.steward();
-    const { released, others } = await deps.write(async (linear) => {
+    const { released, others } = await deps.write(async (linear, teamKey) => {
       const issue = await linear.getTodoIssue(undo.issueId);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${undo.identifier}.`);
+      // The team is checked before anything else, a resumed Undo included: an undo never writes outside it.
+      if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}, so this plugin does not reopen it.`);
       const others = await resolveOther(linear, issue, "done");
       let action = store.pending(issue.id, "reopen");
       if (action !== null) {
