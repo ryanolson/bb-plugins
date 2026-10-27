@@ -16,7 +16,8 @@
 // - Every Undo attempt checks the issue against what its Done left, and
 //   writes nothing to an issue that changed since.
 // - Messages go out one at a time, in the order their actions finished. On
-//   one issue, an action finishes or is given up before the next begins.
+//   one issue, an action finishes or is given up before the next begins. A
+//   send that fails waits for the owner's retry, so it can arrive late.
 
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";

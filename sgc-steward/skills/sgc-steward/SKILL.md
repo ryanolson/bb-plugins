@@ -43,7 +43,7 @@ When the owner marks a todo done, on the page or with `bb sgc todo done`, the pl
 - moves a `human` issue to the team's Done state, or removes `waiting:ryan-action` from any other issue and leaves its state;
 - sends the steward thread a queued message that starts with `[sgc-steward] Todo done <issue>: <title>`, with the note on the next line.
 
-Treat that message as the owner's word that the action is done, and go on with the work behind it. A message that starts with `[sgc-steward] Todo reopened <issue>: <title>` takes it back: the todo is open again. Messages about one issue arrive in the order the owner acted, so the latest one stands.
+Treat that message as the owner's word that the action is done, and go on with the work behind it. A message that starts with `[sgc-steward] Todo reopened <issue>: <title>` takes it back: the todo is open again. Messages about one issue go out in the order the owner acted, but one the owner resent from the SGC page arrives late. When two messages about one issue disagree, read the issue in Linear.
 
 ## Asking on a Linear check-in issue
 
