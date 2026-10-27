@@ -148,6 +148,7 @@ bb plugin logs sgc-steward
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
+- `lib/settings.ts`: the plugin's settings.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page, its sidebar badge, and the notifier.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.
