@@ -7,7 +7,8 @@ import type Database from "better-sqlite3";
 /**
  * A Done or an Undo, kept before it writes to Linear. Its comment posts under
  * the action's own id, so a retry or a poll can finish it without posting a
- * second comment.
+ * second comment. Its message and the thread it goes to are fixed here too,
+ * so a retry never changes what the steward hears, or who hears it.
  */
 export interface TodoAction {
   /** The comment id it posts under, chosen before it writes. */
@@ -26,6 +27,10 @@ export interface TodoAction {
   targetId: string;
   /** For a Done: what Undo puts back, the label or the state before the Done. */
   restoreId: string | null;
+  /** The steward thread its message goes to, as it was when the action began; null when none was set. */
+  recipient: string | null;
+  /** The steward's message, sent once the action finishes. */
+  message: string;
   /** When it last started writing, epoch ms: the post window runs from here. */
   attemptedAt: number;
 }
@@ -41,6 +46,8 @@ interface ActionRecord {
   change: TodoAction["change"];
   target_id: string;
   restore_id: string | null;
+  recipient: string | null;
+  message: string;
   attempted_at: number;
 }
 
@@ -56,6 +63,8 @@ function toAction(row: ActionRecord): TodoAction {
     change: row.change,
     targetId: row.target_id,
     restoreId: row.restore_id,
+    recipient: row.recipient,
+    message: row.message,
     attemptedAt: row.attempted_at,
   };
 }
@@ -98,9 +107,9 @@ export function createTodoStore(db: Database.Database, now: () => number = () =>
     begin(action: Omit<TodoAction, "attemptedAt">): void {
       const at = now();
       db.prepare(
-        `INSERT INTO todo_actions (id, kind, issue_id, identifier, title, body, note, change, target_id, restore_id, state, created_at, attempted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-      ).run(action.id, action.kind, action.issueId, action.identifier, action.title, action.body, action.note, action.change, action.targetId, action.restoreId, at, at);
+        `INSERT INTO todo_actions (id, kind, issue_id, identifier, title, body, note, change, target_id, restore_id, recipient, message, state, created_at, attempted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      ).run(action.id, action.kind, action.issueId, action.identifier, action.title, action.body, action.note, action.change, action.targetId, action.restoreId, action.recipient, action.message, at, at);
     },
 
     /** An action starts writing again, so its post window starts again. */
@@ -119,8 +128,9 @@ export function createTodoStore(db: Database.Database, now: () => number = () =>
       return (db.prepare("SELECT * FROM todo_actions WHERE state = 'pending' ORDER BY created_at, id").all() as ActionRecord[]).map(toAction);
     },
 
-    finish(id: string): void {
-      db.prepare("UPDATE todo_actions SET state = 'finished', finished_at = ? WHERE id = ? AND state = 'pending'").run(now(), id);
+    /** Mark an unfinished action finished; false when it was not unfinished. */
+    finish(id: string): boolean {
+      return db.prepare("UPDATE todo_actions SET state = 'finished', finished_at = ? WHERE id = ? AND state = 'pending'").run(now(), id).changes === 1;
     },
 
     /** Forget an action that will never finish. */

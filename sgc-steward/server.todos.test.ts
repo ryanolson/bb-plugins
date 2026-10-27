@@ -366,3 +366,115 @@ test("an Undo cut short by a restart after both writes landed is finished by the
     await replacement.harness.lifecycle.dispose();
   }
 });
+
+/** Let pending work run: promises, and the host's own hops between them. */
+async function turns(count: number): Promise<void> {
+  for (let turn = 0; turn < count; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("the steward's messages go out one at a time, in the order their actions finished", async () => {
+  const { harness, linear } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  linear.addIssue("TEAM-1", [ACTION]);
+  const second = linear.addIssue("TEAM-2", [ACTION]);
+  const events: string[] = [];
+  const reply = gate();
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    const issue = /TEAM-\d+/.exec((args as { input: Array<{ text: string }> }).input[0]!.text)![0];
+    events.push(`send ${issue}`);
+    if (issue === "TEAM-1") await reply.shut;
+    events.push(`sent ${issue}`);
+    return {};
+  });
+  const first = done(harness, "TEAM-1");
+  const then = done(harness, "TEAM-2");
+  for (let turn = 0; turn < 100 && second.labels.length > 0; turn += 1) await turns(1);
+  await turns(20);
+  assert.deepEqual(second.labels, [], "the second Done finished on Linear");
+  assert.deepEqual(events, ["send TEAM-1"], "its message waits for the first one");
+  reply.open();
+  assert.deepEqual([(await first).steward, (await then).steward], ["sent", "sent"]);
+  assert.deepEqual(events, ["send TEAM-1", "sent TEAM-1", "send TEAM-2", "sent TEAM-2"]);
+});
+
+test("a retried Done tells the steward named when Done was first pressed", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: "thr_first" });
+  linear.addIssue("TEAM-1", [ACTION]);
+  linear.removeLabelFaults.push("dropped");
+  await rejection(done(harness, "TEAM-1"));
+  await harness.behavior.setSettings({ stewardThread: "thr_second" });
+  assert.equal((await done(harness, "TEAM-1")).resumed, true);
+  assert.deepEqual(sends.map((send) => send.threadId), ["thr_first"]);
+});
+
+test("an Undo whose change landed but whose reply was lost finishes on the next press, without a write", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", [ACTION]);
+  const { undo } = await done(harness, "TEAM-1");
+  const addLabel = linear.addLabel.bind(linear);
+  linear.addLabel = async (args) => {
+    await addLabel(args);
+    throw new LinearError("network", "Linear took the label, but its reply was lost");
+  };
+  // The read after the lost reply fails too, so the first press cannot tell that the label is back.
+  const getTodoIssue = linear.getTodoIssue.bind(linear);
+  let unread = true;
+  linear.getTodoIssue = async (id) => {
+    if (unread && linear.calls.some((call) => call.startsWith("addLabel "))) {
+      unread = false;
+      throw new LinearError("network", "could not reach Linear");
+    }
+    return getTodoIssue(id);
+  };
+  const failed = await rejection(harness.behavior.callRpc("todos.reopen", { undo }));
+  assert.match(failed.message, /Press Undo again/);
+  assert.deepEqual(issue.labels.map((label) => label.name), [ACTION], "the label is back");
+
+  linear.calls.length = 0;
+  assert.deepEqual(await harness.behavior.callRpc("todos.reopen", { undo }), { identifier: "TEAM-1", steward: "sent" });
+  assert.deepEqual(writes(linear), [], "the issue changed since the Done, so the second press writes nothing");
+  assert.equal(issue.comments.length, 2);
+  assert.deepEqual(sends.map((send) => send.input[0]!.text), [
+    "[sgc-steward] Todo done TEAM-1: Title of TEAM-1",
+    "[sgc-steward] Todo reopened TEAM-1: Title of TEAM-1",
+  ]);
+});
+
+test("an Undo retry refused because the issue changed is given up, so no message follows later", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", ["human"], "TEAM", { assignedToMe: true });
+  const { undo } = await done(harness, "TEAM-1");
+  const setState = linear.setState.bind(linear);
+  linear.setState = async () => {
+    throw new LinearError("network", "the Undo state write did not reach Linear");
+  };
+  await rejection(harness.behavior.callRpc("todos.reopen", { undo }));
+  linear.setState = setState;
+  issue.state = { id: "state-canceled", type: "canceled" };
+  assert.equal((await rejection(harness.behavior.callRpc("todos.reopen", { undo }))).code, "conflict");
+
+  // The owner reopens it in Linear, as the refusal says.
+  issue.state = { id: "state-started", type: "started" };
+  const panel = await refresh(harness);
+  assert.deepEqual(panel.todos.map((todo) => todo.identifier), ["TEAM-1"]);
+  assert.deepEqual(sends.map((send) => send.input[0]!.text), ["[sgc-steward] Todo done TEAM-1: Title of TEAM-1"], "the refused Undo is never announced");
+  assert.deepEqual(panel.undelivered, []);
+});
+
+test("an Undo that finished reports success even when the read after it fails", async () => {
+  const { harness, linear, sends } = await setup();
+  await harness.behavior.setSettings({ stewardThread: STEWARD });
+  const issue = linear.addIssue("TEAM-1", [ACTION]);
+  const { undo } = await done(harness, "TEAM-1");
+  const getTodoIssue = linear.getTodoIssue.bind(linear);
+  linear.getTodoIssue = async (id) => {
+    if (linear.calls.some((call) => call.startsWith("addLabel "))) throw new LinearError("network", "could not reach Linear");
+    return getTodoIssue(id);
+  };
+  assert.deepEqual(await harness.behavior.callRpc("todos.reopen", { undo }), { identifier: "TEAM-1", steward: "sent" });
+  assert.deepEqual(issue.labels.map((label) => label.name), [ACTION]);
+  assert.equal(sends.length, 2);
+});

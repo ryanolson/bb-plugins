@@ -149,11 +149,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       postWindowMs,
       write: writeLinear,
       steward: stewardFor,
-      hold: (ref, issueId, label, message, threadId) => asks.hold({ ref, issueId, label, message }, [threadId], "todo"),
-      release: (ref) => asks.release(ref, "todo"),
-      drop: (ref) => asks.drop(ref, "todo"),
+      keep: (row) => asks.keep({ source: "todo", ...row }),
       send: async (row) => ((await deliver(row.id))?.state === "delivered" ? "sent" : "failed"),
-      sendAfterPoll: (rows) => releasedByPoll.push(...rows),
       forget: (issueId) => commentCache.delete(issueId),
       publish: () => publish(0),
       refresh: async () => void (await pollForCaller(false)),
@@ -305,6 +302,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       const polled = await locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
       // Outside the lock, so a slow thread send never holds up an answer.
       for (const row of releasedByPoll.splice(0)) await deliver(row.id);
+      await todos.sent();
       return polled;
     };
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
