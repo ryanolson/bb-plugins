@@ -963,6 +963,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           await poll(false, signal);
           if (pollAgain || signal.aborted) continue;
           const { pollMinutes } = await settings.get();
+          // A stop that came while the settings were read fired already; the sleep below would miss it.
+          if (signal.aborted) break;
           await new Promise<void>((resolve) => {
             const done = () => {
               clearTimeout(timer);
