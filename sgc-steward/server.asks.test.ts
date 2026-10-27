@@ -165,6 +165,42 @@ test("a failed send keeps the answer as undelivered, and a retry delivers it onc
   assert.equal(sends.length, 1, "a delivered answer is not sent again");
 });
 
+test("an answer whose thread is archived can be dismissed: it leaves the page and is never sent", async () => {
+  const { harness, sends } = await setup();
+  const id = await askId(harness, ["--question", "Ship it?"]);
+  harness.inspection.sdk.stub("threads.send", async () => {
+    throw new Error("HTTP 409: Thread is archived");
+  });
+  await harness.behavior.callRpc("asks.answer", { id, option: null, text: "Yes." });
+  const failed = (await list(harness)).undelivered;
+  assert.deepEqual(failed.map((row) => [row.ref, row.state, row.error]), [[id, "failed", "HTTP 409: Thread is archived"]]);
+  assert.deepEqual(await harness.behavior.callRpc("deliveries.dismiss", { id: failed[0]!.id }), { dismissed: true });
+  assert.deepEqual((await list(harness)).undelivered, []);
+
+  harness.inspection.sdk.stub("threads.send", async (args: unknown) => {
+    sends.push(args as (typeof sends)[number]);
+    return {};
+  });
+  // A page that still shows the row cannot send it.
+  assert.deepEqual(await harness.behavior.callRpc("deliveries.retry", { id: failed[0]!.id }), { delivered: false, error: "HTTP 409: Thread is archived" });
+  assert.equal(sends.length, 0, "a dismissed answer is never sent");
+  assert.deepEqual(await harness.behavior.callRpc("deliveries.dismiss", { id: failed[0]!.id }), { dismissed: false });
+});
+
+test("a record that will not post can be dismissed too, and is never posted", async () => {
+  const { harness, linear } = await setup({ key: null });
+  const id = await askId(harness, ["--question", "Use the org id?", "--issue", "TEAM-12"]);
+  await harness.behavior.callRpc("asks.answer", { id, option: null, text: "Yes." });
+  assert.deepEqual((await list(harness)).unposted.map((row) => row.askId), [id]);
+  assert.deepEqual(await harness.behavior.callRpc("records.dismiss", { askId: id }), { dismissed: true });
+  assert.deepEqual((await list(harness)).unposted, []);
+  await harness.behavior.setSettings({ linearApiKey: KEY });
+  const issue = linear.addIssue("TEAM-12", ["checkin"]);
+  await harness.behavior.callRpc("records.retry", { askId: id });
+  assert.equal(issue.comments.length, 0, "a dismissed record is never posted");
+  assert.deepEqual(await harness.behavior.callRpc("records.dismiss", { askId: id }), { dismissed: false });
+});
+
 test("an answer to a question that names an issue is recorded there once, and closes no block", async () => {
   const { harness, linear, refresh } = await setup();
   const issue = linear.addIssue("TEAM-12", ["checkin"]);

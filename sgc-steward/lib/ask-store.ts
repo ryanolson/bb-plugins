@@ -121,8 +121,12 @@ export interface Delivery {
   /** What the page shows it as: the question id, the issue identifier, or "Withdrawal of" the question id. */
   label: string;
   message: string;
-  /** held: the Linear answer is not known to be posted, so it is neither shown nor sent. */
-  state: "held" | "pending" | "delivered" | "failed";
+  /**
+   * held: the Linear answer is not known to be posted, so it is neither shown
+   * nor sent. dismissed: the owner gave up on it, so it is never shown or
+   * sent again.
+   */
+  state: "held" | "pending" | "delivered" | "failed" | "dismissed";
   error: string | null;
   attempts: number;
   createdAt: number;
@@ -133,6 +137,9 @@ export interface Delivery {
 
 /** A delivery the page lists: one not sent yet, or whose send failed. */
 export type Undelivered = Delivery & { state: "pending" | "failed" };
+
+/** A record the page lists: one not posted yet, or whose post failed. */
+export type Unposted = RecordRow & { state: "pending" | "failed" };
 
 /** A Linear answer whose deliveries are still held. */
 export interface HeldAnswer {
@@ -150,7 +157,8 @@ export interface RecordRow {
   askId: string;
   issue: string;
   body: string;
-  state: "pending" | "posted" | "failed";
+  /** dismissed: the owner gave up on it, so it is never shown or posted again. */
+  state: "pending" | "posted" | "failed" | "dismissed";
   commentId: string | null;
   error: string | null;
   attempts: number;
@@ -445,6 +453,11 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
       }
     },
 
+    /** Stop listing a delivery that did not go out, and never send it. False unless it was pending or failed. */
+    dismissDelivery(id: string): boolean {
+      return db.prepare("UPDATE deliveries SET state = 'dismissed' WHERE id = ? AND state IN ('pending', 'failed')").run(id).changes === 1;
+    },
+
     /** Deliveries to list for the owner, pending or failed, oldest first. */
     undelivered(): Undelivered[] {
       const rows = db.prepare("SELECT * FROM deliveries WHERE state IN ('pending', 'failed') ORDER BY created_at, id").all() as DeliveryRecord[];
@@ -464,9 +477,14 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
       }
     },
 
+    /** Stop listing a record that did not post, and never post it. False unless it was pending or failed. */
+    dismissRecord(askId: string): boolean {
+      return db.prepare("UPDATE records SET state = 'dismissed' WHERE ask_id = ? AND state IN ('pending', 'failed')").run(askId).changes === 1;
+    },
+
     /** Records not yet posted, pending or failed, oldest first. */
-    unposted(): RecordRow[] {
-      return (db.prepare("SELECT * FROM records WHERE state != 'posted' ORDER BY created_at, ask_id").all() as RecordRecord[]).map(toRecord);
+    unposted(): Unposted[] {
+      return (db.prepare("SELECT * FROM records WHERE state IN ('pending', 'failed') ORDER BY created_at, ask_id").all() as RecordRecord[]).map(toRecord) as Unposted[];
     },
 
     /** Open questions no window has announced yet; each is handed out once. */

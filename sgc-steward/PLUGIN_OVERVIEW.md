@@ -25,7 +25,7 @@ A todo's Done or Undo is kept in the same database before it writes to Linear. I
 - bb plugins cannot send mobile pushes, so the notifications reach only open bb windows.
 - After an answer on a needs-decision issue, the plugin reads the issue once more and then removes the label. A new question posted between that read and the removal loses the label, though it is still open. The window is one request.
 - An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable, with its name in the message.
-- An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
+- An answer that could not be sent to its thread, or whose send a restart cut short, is kept, with a retry, and an X that dismisses it for good. The plugin never retries on its own, because a send that looked failed may have arrived, and a retry can deliver it twice.
 - Only a signature with a bb thread id, like `thr_abc123`, gets the answer sent to a thread.
 - Undo works only for a Done from the page in this plugin load, for an hour, and only for the latest Done of its issue. After a reload or an update, reopen the issue in Linear.
 - The plugin knows only its own Dones. If someone reopens an issue in Linear and completes it there again, with the same state and labels, Undo of the plugin's earlier Done still passes its checks and puts back the state from before that Done.

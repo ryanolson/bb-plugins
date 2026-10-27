@@ -47,7 +47,7 @@ import {
   withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
-import { STORE_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered } from "./lib/ask-store.ts";
+import { STORE_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered, type Unposted } from "./lib/ask-store.ts";
 import {
   rpcContract,
   type AnswerResult,
@@ -113,7 +113,7 @@ function deliveryView(row: Undelivered): DeliveryView {
   };
 }
 
-function recordView(row: RecordRow): RecordView {
+function recordView(row: Unposted): RecordView {
   return { askId: row.askId, issue: row.issue, state: row.state, error: row.error, attempts: row.attempts };
 }
 
@@ -385,7 +385,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
      */
     async function deliver(id: string): Promise<Delivery | null> {
       const row = asks.getDelivery(id);
-      if (row === null || row.state === "held" || row.state === "delivered" || sending.has(id)) return row;
+      if (row === null || (row.state !== "pending" && row.state !== "failed") || sending.has(id)) return row;
       sending.add(id);
       try {
         await bb.sdk.threads.send({ threadId: row.threadId, mode: "queue-if-active", input: [{ type: "text", text: row.message, mentions: [] }] });
@@ -484,7 +484,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       writeFirst();
       return locked(async () => {
         const record = asks.record(askId);
-        if (record === null || record.state === "posted") return record;
+        if (record === null || record.state === "posted" || record.state === "dismissed") return record;
         const { linearApiKey, teamKey } = await settings.get();
         let outcome: { ok: true; commentId: string } | { ok: false; error: string };
         if (!linearApiKey) {
@@ -658,6 +658,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       throw new Error(redact(message(error), linearApiKey ? [linearApiKey] : []));
     }
 
+    /** Tell open pages that a row the owner dismissed is gone. */
+    const dismissed = (done: boolean) => (done && publish(0), { dismissed: done });
+
     bb.rpc.register(rpcContract, {
       "questions.list": () => panel(),
       "questions.refresh": async () => {
@@ -720,6 +723,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No record for ${askId}.` });
         return { posted: row.state === "posted", error: row.state === "posted" ? null : row.error };
       },
+      "deliveries.dismiss": ({ id }) => dismissed(asks.dismissDelivery(id)),
+      "records.dismiss": ({ askId }) => dismissed(asks.dismissRecord(askId)),
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
       ...todos.rpc,
     });

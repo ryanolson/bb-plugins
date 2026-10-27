@@ -164,6 +164,10 @@ export const rpcContract = defineRpcContract({
   "deliveries.retry": { input: z.object({ id: z.string().min(1) }), output: z.object({ delivered: z.boolean(), error: z.string().nullable() }) },
   /** Post a record that did not post. */
   "records.retry": { input: z.object({ askId: z.string().min(1) }), output: z.object({ posted: z.boolean(), error: z.string().nullable() }) },
+  /** Stop listing a send that did not go out, and never send it. */
+  "deliveries.dismiss": { input: z.object({ id: z.string().min(1) }), output: z.object({ dismissed: z.boolean() }) },
+  /** Stop listing a record that did not post, and never post it. */
+  "records.dismiss": { input: z.object({ askId: z.string().min(1) }), output: z.object({ dismissed: z.boolean() }) },
   /** Mark a todo done: comment as the owner, then move it to Done or remove the todo label, and tell the steward. */
   "todos.done": {
     input: z.object({ issue: z.string().min(1), note: z.string().max(TODO_NOTE_CHARS) }),

@@ -349,10 +349,37 @@ function Undelivered({ title, undelivered, unposted }: { title: string; undelive
     }
   }
 
+  /** Stop listing a row; the server never sends or posts it again. Every open page drops it. */
+  async function dismiss(key: string, work: () => Promise<unknown>) {
+    setBusy(key);
+    try {
+      await work();
+    } catch (cause) {
+      toast.error(errorText(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const dismissButton = (key: string, what: string, work: () => Promise<unknown>) => (
+    <Button
+      size="icon"
+      variant="ghost"
+      className="size-8"
+      disabled={busy !== null}
+      aria-label={`Dismiss ${what}`}
+      onClick={() => void dismiss(key, work)}
+    >
+      <Icon name="X" className="size-4" />
+    </Button>
+  );
+
   return (
     <section className="space-y-2 rounded-lg border border-destructive/40 p-4 text-sm">
       <h2 className="font-medium">{title}</h2>
-      <p className="text-xs text-muted-foreground">A send that looked failed may still have arrived, so a retry can deliver it twice.</p>
+      <p className="text-xs text-muted-foreground">
+        A send that looked failed may still have arrived, so a retry can deliver it twice. Dismiss one with X to stop listing it; it is then never sent.
+      </p>
       <ul className="space-y-2">
         {undelivered.map((row) => (
           <li key={row.id} className="flex flex-wrap items-center gap-2">
@@ -373,6 +400,7 @@ function Undelivered({ title, undelivered, unposted }: { title: string; undelive
             >
               {busy === row.id ? "Sending…" : "Send again"}
             </Button>
+            {dismissButton(row.id, `${row.label} to ${row.threadId}`, () => rpc.call("deliveries.dismiss", { id: row.id }))}
           </li>
         ))}
         {unposted.map((row) => (
@@ -393,6 +421,7 @@ function Undelivered({ title, undelivered, unposted }: { title: string; undelive
             >
               {busy === row.askId ? "Posting…" : "Post again"}
             </Button>
+            {dismissButton(row.askId, `the record of ${row.askId}`, () => rpc.call("records.dismiss", { askId: row.askId }))}
           </li>
         ))}
       </ul>
