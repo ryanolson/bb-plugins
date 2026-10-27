@@ -320,17 +320,63 @@ function postedAt(block: QuestionBlock): string {
 }
 
 /**
- * The owner's own words for an answer, with every line that would read as an
- * answer header quoted, so nothing the owner writes, fenced or not, can name
- * a block or a question: only the headers the plugin writes do. Lines break
- * where the parser breaks them, and a line counts with its invisible format
- * characters taken out, in case Linear's rich text drops them.
+ * The character references that matter for how a header's words and lines
+ * read. No named reference stands for an ASCII letter, so any other one can
+ * only stand for a separator, and it is tried as nothing and as a space.
+ */
+const REFERENCES: Readonly<Record<string, string>> = { amp: "&", NewLine: "\n", Tab: " ", nbsp: " " };
+
+/** A line with its character references decoded, as often as they nest, as in `&amp;#65;`. */
+function decodeReferences(line: string, other: string): string {
+  let text = line;
+  for (let round = 0; round < 4; round += 1) {
+    const next = text.replace(
+      /&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{1,31}));/g,
+      (_reference, decimal: string | undefined, hex: string | undefined, name: string | undefined) => {
+        if (name !== undefined) return REFERENCES[name] ?? other;
+        const code = decimal !== undefined ? Number(decimal) : parseInt(hex!, 16);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "\ufffd";
+      },
+    );
+    if (next === text) break;
+    text = next;
+  }
+  return text;
+}
+
+/**
+ * What one line of the owner's Markdown could read as once Linear's editor
+ * rewrites it from rich text: its character references decoded, which can
+ * also break the line, then its backslash escapes, emphasis and code
+ * markers, and invisible format characters dropped, and its spaces plain.
+ */
+function readings(line: string): string[] {
+  return ["", " "].flatMap((other) =>
+    decodeReferences(line, other)
+      .split(/\r\n?|[\n\u2028\u2029]/)
+      .map((piece) =>
+        piece
+          .replace(/\\(?=.)/g, "")
+          .replace(/[*_`~]/g, "")
+          .replace(/\p{Cf}/gu, "")
+          .replace(/\s+/g, " "),
+      ),
+  );
+}
+
+/**
+ * The owner's own words for an answer, with every line that reads as an
+ * answer header, as written or as Linear's editor could rewrite it, quoted.
+ * So nothing the owner writes, fenced or not, can name a block or a
+ * question: only the headers the plugin writes do. Lines break where the
+ * parser breaks them. A quoted line stays quoted through an edit, since the
+ * editor writes each line of a quote with its `>`.
  */
 function ownWords(text: string): string {
   return text
     .replace(/\r\n?|[\u2028\u2029]/g, "\n")
     .split("\n")
-    .map((line) => (ANSWER_HEADER.test(line.replace(/\p{Cf}/gu, "")) ? `> ${line}` : line))
+    .map((line) => ([line, ...readings(line)].some((reading) => ANSWER_HEADER.test(reading)) ? `> ${line}` : line))
     .join("\n");
 }
 

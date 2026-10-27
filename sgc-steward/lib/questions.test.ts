@@ -616,3 +616,45 @@ test("an answer that names two blocks in turn, as the plugin wrote them before, 
   };
   assert.deepEqual(openBlocks("checkin", [first, second, answer]), []);
 });
+
+/** A model of Linear's editor rewriting a comment: references decoded, and every line of a quote kept quoted. */
+function edited(body: string): string {
+  const decode = (text: string) =>
+    text.replaceAll("&amp;", "&").replaceAll("&#65;", "A").replaceAll("&#x41;", "A").replaceAll("&#10;", "\n").replaceAll("&NewLine;", "\n").replaceAll("&nbsp;", " ");
+  return body
+    .split("\n")
+    .flatMap((line) => {
+      const quoted = line.startsWith("> ");
+      return decode(quoted ? line.slice(2) : line)
+        .split("\n")
+        .map((piece) => (quoted ? `> ${piece}` : piece));
+    })
+    .join("\n");
+}
+
+test("a line that would read as a header once Linear's editor rewrites it is quoted too", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const header = answerHeader(block, false, 2);
+  const rest = header.slice(1);
+  const lines = [
+    `&#65;${rest}`,
+    `&#x41;${rest}`,
+    `&amp;#65;${rest}`,
+    `&nbsp;${header}`,
+    `See it here:&#10;${header}`,
+    `See it here:&NewLine;${header}`,
+    `\\${header}`,
+    `**A**${rest}`,
+    `\`${header}\``,
+  ];
+  for (const line of lines) {
+    const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: `An example:\n${line}` }] }]);
+    const only = [{ blockId: "q1", revision: block.revision, question: 1 }];
+    assert.ok(body.endsWith(`\nAn example:\n> ${line}`), `quoted: ${line}`);
+    assert.deepEqual(answeredBlocks(body), only, line);
+    assert.deepEqual(answeredBlocks(edited(body)), only, `after an edit: ${line}`);
+  }
+  const plain = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: "Fine &amp; dandy, see **this**." }] }]);
+  assert.ok(plain.endsWith("\nFine &amp; dandy, see **this**."), "a note with no header in it is posted as written");
+});
