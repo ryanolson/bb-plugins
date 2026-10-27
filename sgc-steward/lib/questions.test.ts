@@ -656,5 +656,17 @@ test("a line that would read as a header once Linear's editor rewrites it is quo
     assert.deepEqual(answeredBlocks(edited(body)), only, `after an edit: ${line}`);
   }
   const plain = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: "Fine &amp; dandy, see **this**." }] }]);
-  assert.ok(plain.endsWith("\nFine &amp; dandy, see **this**."), "a note with no header in it is posted as written");
+  assert.ok(plain.endsWith("\n> Fine &amp; dandy, see **this**."), "a line a rewrite could change is quoted, by design, and its words kept");
+});
+
+test("a line of the owner's text is quoted when a rewrite could change any of its characters", () => {
+  const question = comment("q1", QUESTIONS);
+  const block = parsed(parseQuestionBlock(question, "checkin"));
+  const quoted = ["Fine & dandy.", "a\\b", "see **this**", "snake_case", "`code`", "~maybe~", "a < b", "x\u00a0y", "x\u200by", "an em dash \u2014 here", "caf\u00e9", "tab\there", "two  spaces"];
+  const kept = ["Plain words, numbers 1-2 (and) punctuation: ok!", "Q2. B: The cells."];
+  for (const line of [...quoted, ...kept]) {
+    const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "A", text: line }] }]);
+    assert.ok(body.endsWith(`\n${quoted.includes(line) ? "> " : ""}${line}`), JSON.stringify(line));
+    assert.deepEqual(answeredBlocks(body), [{ blockId: "q1", revision: block.revision, question: 1 }], JSON.stringify(line));
+  }
 });
