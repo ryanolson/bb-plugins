@@ -181,10 +181,17 @@ export function tabBadges(view: TabInput): Record<PanelTab, TabBadge> {
   };
 }
 
-/** Whether a question has every label wanted, in any case. Wanting none matches every question. */
-export function hasLabels(labels: readonly string[], wanted: readonly string[]): boolean {
+/** How a label filter matches, as Linear's does: a question with any of the labels, or with all of them. */
+export type LabelMatch = "any" | "all";
+
+/**
+ * Whether a question passes a label filter, in any case: with any of the
+ * labels wanted, or with all of them. Wanting none passes every question.
+ */
+export function hasLabels(labels: readonly string[], wanted: readonly string[], match: LabelMatch): boolean {
   const have = new Set(labels.map((label) => label.toLowerCase()));
-  return wanted.every((label) => have.has(label.toLowerCase()));
+  const has = (label: string) => have.has(label.toLowerCase());
+  return wanted.length === 0 || (match === "all" ? wanted.every(has) : wanted.some(has));
 }
 
 /** A card's labels: a bb question's own, or the labels of a Linear question's issue. */
@@ -192,9 +199,13 @@ function cardLabels<I extends { labels: readonly string[] }, A extends { labels:
   return card.kind === "ask" ? card.ask.labels : card.issue.labels;
 }
 
-/** The cards with every label wanted. */
-export function filterCards<I extends { labels: readonly string[] }, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, wanted: readonly string[]): Array<Card<I, A>> {
-  return cards.filter((card) => hasLabels(cardLabels(card), wanted));
+/** The cards that pass the label filter: any of the labels by default, as Linear's label filter starts. */
+export function filterCards<I extends { labels: readonly string[] }, A extends { labels: readonly string[] }>(
+  cards: ReadonlyArray<Card<I, A>>,
+  wanted: readonly string[],
+  match: LabelMatch = "any",
+): Array<Card<I, A>> {
+  return cards.filter((card) => hasLabels(cardLabels(card), wanted, match));
 }
 
 export type CardOrder = "age" | "label";
@@ -226,9 +237,13 @@ export function labelChoices(asks: ReadonlyArray<{ labels: readonly string[] }>,
   return [...choices.values()].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
 }
 
-/** What `bb sgc questions --label` lists: the questions with every label named, of both kinds. */
-export function filterPanel(view: Panel, wanted: readonly string[]): Panel {
+/** What `bb sgc questions --label` lists: the questions of both kinds that pass the label filter. */
+export function filterPanel(view: Panel, wanted: readonly string[], match: LabelMatch): Panel {
   return wanted.length === 0
     ? view
-    : { ...view, issues: view.issues.filter((issue) => hasLabels(issue.labels, wanted)), asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted)) };
+    : {
+        ...view,
+        issues: view.issues.filter((issue) => hasLabels(issue.labels, wanted, match)),
+        asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted, match)),
+      };
 }

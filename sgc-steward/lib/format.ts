@@ -54,15 +54,23 @@ function formatBlock(block: QuestionBlock): string[] {
   return lines;
 }
 
-/** "a", "a and b", "a, b and c". */
-function andList(items: readonly string[]): string {
-  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+/** "a", "a and b", "a, b and c", or with "or". */
+function joinList(items: readonly string[], word: "and" | "or"): string {
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} ${word} ${items.at(-1)}`;
 }
 
-/** The panel as text. `labels` names the labels the view was filtered by, so an empty list says so. */
-export function formatPanel(view: Panel, labels: readonly string[] = []): string {
+/**
+ * The panel as text. `labels` and `match` name the label filter the view
+ * passed, so an empty list says what it looked for.
+ */
+export function formatPanel(view: Panel, labels: readonly string[] = [], match: "any" | "all" = "any"): string {
   const lines: string[] = [];
-  const having = labels.length === 0 ? "" : ` with the label${labels.length === 1 ? "" : "s"} ${andList(labels)}`;
+  const having =
+    labels.length === 0
+      ? ""
+      : match === "all"
+        ? ` with the label${labels.length === 1 ? "" : "s"} ${joinList(labels, "and")}`
+        : ` with the label ${joinList(labels, "or")}`;
   const tagged = (names: readonly string[]) => (names.length === 0 ? "" : `, labels ${names.join(", ")}`);
   if (view.configured) {
     if (view.issues.length === 0) lines.push(`No open questions on ${view.teamKey} issues${having}.`);

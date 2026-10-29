@@ -40,6 +40,7 @@ import {
   type AskDraft,
   type Card,
   type CardOrder,
+  type LabelMatch,
   type PanelTab,
   type TabBadge,
 } from "./lib/panel.ts";
@@ -631,21 +632,26 @@ function TabPanel({ tab, active, children }: { tab: PanelTab; active: PanelTab; 
 }
 
 /**
- * Label chips that filter the questions, each chosen one needed, a way to
- * clear them, and the order of the cards. Shown only once a question has a
- * label, so the page without labels looks as it did.
+ * Label chips that filter the questions, a toggle between any of them and
+ * all of them, as Linear's label filter has, a way to clear them, and the
+ * order of the cards. Shown only once a question has a label, so the page
+ * without labels looks as it did.
  */
 function QuestionFilter({
   choices,
   chosen,
+  match,
   order,
   onChosen,
+  onMatch,
   onOrder,
 }: {
   choices: string[];
   chosen: string[];
+  match: LabelMatch;
   order: CardOrder;
   onChosen: (next: string[]) => void;
+  onMatch: (next: LabelMatch) => void;
   onOrder: (next: CardOrder) => void;
 }) {
   if (choices.length === 0) return null;
@@ -653,6 +659,19 @@ function QuestionFilter({
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs">
       <span className="text-muted-foreground">Labels</span>
+      <div role="group" aria-label="Match" className="flex overflow-hidden rounded-full border border-border">
+        {(["any", "all"] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={match === value}
+            className={cn("cursor-pointer px-2 py-0.5", match === value ? "bg-state-active text-foreground" : "text-muted-foreground hover:text-foreground")}
+            onClick={() => onMatch(value)}
+          >
+            {value === "any" ? "Any of" : "All of"}
+          </button>
+        ))}
+      </div>
       {choices.map((label) => (
         <button
           key={label}
@@ -699,8 +718,9 @@ function SgcPage({ subPath }: { subPath: string }) {
   const now = useNow(30_000);
   const tab = tabOf(subPath);
   const [chosen, setChosen] = useState<string[]>([]);
+  const [match, setMatch] = useState<LabelMatch>("any");
   const [order, setOrder] = useState<CardOrder>("age");
-  const cards = snapshot === null ? [] : sortCards(filterCards(orderCards(snapshot.issues, snapshot.asks), chosen), order);
+  const cards = snapshot === null ? [] : sortCards(filterCards(orderCards(snapshot.issues, snapshot.asks), chosen, match), order);
 
   async function refresh() {
     setRefreshing(true);
@@ -760,15 +780,19 @@ function SgcPage({ subPath }: { subPath: string }) {
             <QuestionFilter
               choices={labelChoices([...snapshot.issues, ...snapshot.asks], chosen)}
               chosen={chosen}
+              match={match}
               order={order}
               onChosen={setChosen}
+              onMatch={setMatch}
               onOrder={setOrder}
             />
           )}
           {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
             <Notice>No open questions.</Notice>
           ) : null}
-          {chosen.length > 0 && cards.length === 0 ? <Notice>No open questions have every label chosen.</Notice> : null}
+          {chosen.length > 0 && cards.length === 0 ? (
+            <Notice>No open questions have {match === "all" ? "every label chosen" : "any label chosen"}.</Notice>
+          ) : null}
           {snapshot === null
             ? null
             : cards.map((card) =>

@@ -150,17 +150,17 @@ function cardName(card: Card<{ id: string }, { id: string }>): string {
   return card.kind === "ask" ? card.ask.id : card.kind === "question" ? `${card.issue.id}:${card.block.commentId}:Q${card.question.number}` : card.issue.id;
 }
 
-test("the page filters bb questions by every label chosen, in any case; Linear questions carry none", () => {
+test("with all of, the page shows the questions that have every label chosen, in any case", () => {
   const asks = [
     { id: "a1", askedAt: 1, labels: ["release", "Infra"] },
     { id: "a2", askedAt: 2, labels: ["release"] },
     { id: "a3", askedAt: 3, labels: [] },
   ];
   const cards = orderCards([{ id: "i1", labels: [], blocks: [parsed] }], asks);
-  assert.deepEqual(filterCards(cards, []).map(cardName), cards.map(cardName), "no label chosen shows every card");
-  assert.deepEqual(filterCards(cards, ["RELEASE"]).map(cardName), ["a1", "a2"]);
-  assert.deepEqual(filterCards(cards, ["release", "infra"]).map(cardName), ["a1"]);
-  assert.deepEqual(filterCards(cards, ["nope"]).map(cardName), []);
+  assert.deepEqual(filterCards(cards, [], "all").map(cardName), cards.map(cardName), "no label chosen shows every card");
+  assert.deepEqual(filterCards(cards, ["RELEASE"], "all").map(cardName), ["a1", "a2"]);
+  assert.deepEqual(filterCards(cards, ["release", "infra"], "all").map(cardName), ["a1"]);
+  assert.deepEqual(filterCards(cards, ["nope"], "all").map(cardName), []);
 });
 
 test("sorting by label puts each card under its first label, alphabetically, and cards without one last", () => {
@@ -193,4 +193,18 @@ test("a Linear question carries its issue's labels, so one label filter covers b
   const cards = orderCards(issues, asks);
   assert.deepEqual(filterCards(cards, ["area/gdl"]).map(cardName), ["a1", "i1:q1:Q1", "i1:q1:Q2"]);
   assert.deepEqual(labelChoices([...issues, ...asks], []), ["area/gdl", "checkin"]);
+});
+
+test("the page matches any of the labels chosen unless told all of, as Linear's label filter starts", () => {
+  const asks = [
+    { id: "a1", askedAt: 1, labels: ["release", "Infra"] },
+    { id: "a2", askedAt: 2, labels: ["release"] },
+    { id: "a3", askedAt: 3, labels: ["infra"] },
+    { id: "a4", askedAt: 4, labels: [] },
+  ];
+  const cards = orderCards([{ id: "i1", labels: ["infra"], blocks: [raw] }], asks);
+  assert.deepEqual(filterCards(cards, ["RELEASE", "infra"]).map(cardName), ["a1", "a2", "a3", "i1"], "any of, by default");
+  assert.deepEqual(filterCards(cards, ["release", "infra"], "any").map(cardName), ["a1", "a2", "a3", "i1"]);
+  assert.deepEqual(filterCards(cards, ["release", "infra"], "all").map(cardName), ["a1"]);
+  assert.deepEqual(filterCards(cards, [], "any").map(cardName), cards.map(cardName), "no label chosen shows every card");
 });

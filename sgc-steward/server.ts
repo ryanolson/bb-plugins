@@ -746,15 +746,18 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             options: {
               json,
               cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" },
-              label: { type: "string", repeatable: true, description: "Only bb questions with this label, in any case; give it again to need each one. Linear questions carry no labels" },
+              label: { type: "string", repeatable: true, description: "Only questions with this label, in any case; give it again for more. A Linear question has its issue's labels" },
+              match: { type: "string", description: "any, the default: a question with any label named; all: a question with every one" },
             },
             async run(input) {
               const labels = (input.options.label ?? []).map((label) => label.trim()).filter((label) => label !== "");
+              const match = input.options.match ?? "any";
+              if (match !== "any" && match !== "all") throw new PluginCliError("--match takes any or all.", { code: "invalid" });
               const polled = input.options.cached ? snapshot : await pollForCaller(false);
               if (polled === null) {
                 throw new PluginCliError("Answers being posted stopped the check twice.", { code: "interrupted", hint: "Run `bb sgc questions` again." });
               }
-              const current = filterPanel(panel(), labels);
+              const current = filterPanel(panel(), labels, match);
               // A failed read hides that issue's questions, so it is a failure.
               const failures = [
                 ...(current.configured ? [] : [`The Linear API key is not set, so Linear questions are not listed. ${KEY_HINT}`]),
@@ -763,7 +766,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               ];
               return {
                 exitCode: failures.length > 0 ? 1 : 0,
-                stdout: input.options.json ? JSON.stringify(current) : formatPanel(current, labels),
+                stdout: input.options.json ? JSON.stringify(current) : formatPanel(current, labels, match),
                 ...(failures.length > 0 ? { stderr: failures.join("\n") } : {}),
               };
             },

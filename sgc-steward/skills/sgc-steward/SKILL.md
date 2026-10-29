@@ -102,13 +102,13 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 ```
 bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--label <name>]... [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
-bb sgc questions [--json] [--cached] [--label <name>]...
+bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc todos [--json] [--cached]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 ```
 
-- `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`. `--label <name>` lists only the questions with that label; give it again to need each one. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`.
+- `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`. `--label <name>` lists only the questions with that label. Give it again for more: a question then needs any one of them, or every one with `--match all`. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`.
 - `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text, quoted line by line. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.

@@ -64,29 +64,29 @@ test("asking the same open question again returns its id, and a thread can have 
   await askId(harness, ["--question", "Question 11?"], "thr_other");
 });
 
-test("an agent labels its question, and bb sgc questions shows the labels and filters by every one named", async () => {
+test("an agent labels its question, and bb sgc questions shows the labels and filters by them", async () => {
   const { harness, linear, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
   await refresh();
   const both = await askId(harness, ["--question", "Ship it?", "--label", "release", "--label", "Infra"]);
   const one = await askId(harness, ["--question", "Rename it?", "--label", "release"]);
   const none = await askId(harness, ["--question", "Lunch?"]);
-  const listed = async (...labels: string[]) => {
-    const result = await harness.behavior.runCli(["questions", "--cached", "--json", ...labels.flatMap((label) => ["--label", label])]);
+  const listed = async (labels: string[], match?: "any" | "all") => {
+    const result = await harness.behavior.runCli(["questions", "--cached", "--json", ...labels.flatMap((label) => ["--label", label]), ...(match === undefined ? [] : ["--match", match])]);
     const panel = JSON.parse(result.stdout) as Panel;
     return { asks: Object.fromEntries(panel.asks.map((row) => [row.id, row.labels])), issues: panel.issues.length };
   };
-  assert.deepEqual(await listed(), { asks: { [both]: ["release", "Infra"], [one]: ["release"], [none]: [] }, issues: 1 }, "no filter lists everything, as before");
-  assert.deepEqual(await listed("release"), { asks: { [both]: ["release", "Infra"], [one]: ["release"] }, issues: 0 });
-  assert.deepEqual(await listed("RELEASE", "infra"), { asks: { [both]: ["release", "Infra"] }, issues: 0 }, "every label named, in any case");
-  assert.deepEqual(await listed("nope"), { asks: {}, issues: 0 });
+  assert.deepEqual(await listed([]), { asks: { [both]: ["release", "Infra"], [one]: ["release"], [none]: [] }, issues: 1 }, "no filter lists everything, as before");
+  assert.deepEqual(await listed(["release"]), { asks: { [both]: ["release", "Infra"], [one]: ["release"] }, issues: 0 });
+  assert.deepEqual(await listed(["RELEASE", "infra"], "all"), { asks: { [both]: ["release", "Infra"] }, issues: 0 }, "every label named, in any case");
+  assert.deepEqual(await listed(["nope"]), { asks: {}, issues: 0 });
 
   const text = await harness.behavior.runCli(["questions", "--cached", "--label", "release"]);
   assert.match(text.stdout, new RegExp(`${both} {2}from .*, labels release, Infra\\n`));
   assert.doesNotMatch(text.stdout, /TEAM-1/, "TEAM-1 has no label release");
   const empty = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other"]);
-  assert.match(empty.stdout, /No open bb questions with the labels nope and other\./);
-  assert.match(empty.stdout, /No open questions on TEAM issues with the labels nope and other\./);
+  assert.match(empty.stdout, /No open bb questions with the label nope or other\./);
+  assert.match(empty.stdout, /No open questions on TEAM issues with the label nope or other\./);
 });
 
 test("a Linear question takes its issue's labels, a grouped one as group/label, so one filter covers both kinds", async () => {
@@ -104,6 +104,25 @@ test("a Linear question takes its issue's labels, a grouped one as group/label, 
   const text = await harness.behavior.runCli(["questions", "--cached", "--label", "area/gdl"]);
   assert.match(text.stdout, /TEAM-1 {2}Title of TEAM-1 {2}\[check-in\], labels checkin, area\/gdl\n/);
   assert.doesNotMatch(text.stdout, /TEAM-2/);
+});
+
+test("a question matches any label named by default, every one with --match all, and another --match is refused", async () => {
+  const { harness } = await setup();
+  const both = await askId(harness, ["--question", "Ship it?", "--label", "release", "--label", "infra"]);
+  const one = await askId(harness, ["--question", "Rename it?", "--label", "release"]);
+  await askId(harness, ["--question", "Lunch?"]);
+  const ids = async (...args: string[]) =>
+    (JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json", "--label", "release", "--label", "infra", ...args])).stdout) as Panel).asks
+      .map((row) => row.id)
+      .sort();
+  assert.deepEqual(await ids(), [both, one].sort(), "any of, by default");
+  assert.deepEqual(await ids("--match", "any"), [both, one].sort());
+  assert.deepEqual(await ids("--match", "all"), [both]);
+  const all = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other", "--match", "all"]);
+  assert.match(all.stdout, /No open bb questions with the labels nope and other\./);
+  const refused = await harness.behavior.runCli(["questions", "--cached", "--label", "release", "--match", "some"]);
+  assert.equal(refused.exitCode, 1);
+  assert.match(refused.stderr, /--match takes any or all/);
 });
 
 test("asking the same open question again with other labels returns its id and keeps its first labels", async () => {
