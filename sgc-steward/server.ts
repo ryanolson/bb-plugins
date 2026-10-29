@@ -41,6 +41,7 @@ import {
   askRecord,
   blockDelivery,
   checkIssueRef,
+  checkLabels,
   checkQuestion,
   checkReason,
   isThreadId,
@@ -49,6 +50,7 @@ import {
 } from "./lib/asks.ts";
 import { STORE_MIGRATIONS, createAskId, createAskStore, type Delivery, type RecordRow } from "./lib/ask-store.ts";
 import { askView, deliveryView, recordView } from "./lib/views.ts";
+import { filterPanel } from "./lib/panel.ts";
 import {
   rpcContract,
   type AnswerResult,
@@ -741,13 +743,18 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
-            options: { json, cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" } },
+            options: {
+              json,
+              cached: { type: "boolean", description: "Print the last poll's questions without reading Linear" },
+              label: { type: "string", repeatable: true, description: "Only bb questions with this label, in any case; give it again to need each one. Linear questions carry no labels" },
+            },
             async run(input) {
+              const labels = (input.options.label ?? []).map((label) => label.trim()).filter((label) => label !== "");
               const polled = input.options.cached ? snapshot : await pollForCaller(false);
               if (polled === null) {
                 throw new PluginCliError("Answers being posted stopped the check twice.", { code: "interrupted", hint: "Run `bb sgc questions` again." });
               }
-              const current = panel();
+              const current = filterPanel(panel(), labels);
               // A failed read hides that issue's questions, so it is a failure.
               const failures = [
                 ...(current.configured ? [] : [`The Linear API key is not set, so Linear questions are not listed. ${KEY_HINT}`]),
@@ -756,7 +763,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               ];
               return {
                 exitCode: failures.length > 0 ? 1 : 0,
-                stdout: input.options.json ? JSON.stringify(current) : formatPanel(current),
+                stdout: input.options.json ? JSON.stringify(current) : formatPanel(current, labels),
                 ...(failures.length > 0 ? { stderr: failures.join("\n") } : {}),
               };
             },
@@ -773,6 +780,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
                 description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionChars} characters each; they get letters A, B, and so on`,
               },
               recommend: { type: "string", description: "The letter of the recommended option, or none; default A when there are options" },
+              label: {
+                type: "string",
+                repeatable: true,
+                description: `A label to sort and filter questions by, at most ${ASK_LIMITS.labels}, ${ASK_LIMITS.labelChars} characters each; kept from the first ask`,
+              },
               issue: { type: "string", description: "A Linear issue, like TEAM-12, that gets a comment recording the question and its answer" },
               thread: { type: "string", description: "The asking thread, which gets the answer; default the calling thread" },
               machine: { type: "string", description: "Machine that holds --question-file, when not called from a thread" },
@@ -792,8 +804,10 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               let question: string;
               let options: ReturnType<typeof askOptions>;
               let issue: string | null;
+              let labels: string[];
               try {
                 question = checkQuestion(raw);
+                labels = checkLabels(input.options.label ?? []);
                 const texts = input.options.option ?? [];
                 const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
                 options = askOptions(texts, recommend);
@@ -819,7 +833,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               };
               // Read everything first: no other ask may run between the checks and the insert.
               const { notify } = await settings.get();
-              const admitted = asks.admit({ id: createAskId(), threadId, threadTitle, question, options, issue, askedAt: Date.now() }, !notify);
+              const admitted = asks.admit({ id: createAskId(), threadId, threadTitle, question, options, issue, labels, askedAt: Date.now() }, !notify);
               if (admitted.kind === "full") {
                 const thread = admitted.scope === "thread";
                 throw new PluginCliError(thread ? `${threadId} already has ${admitted.open} open questions.` : `${admitted.open} questions are already open.`, {

@@ -87,6 +87,8 @@ export const STORE_MIGRATIONS: readonly string[] = [
   )`,
   // At most one unfinished Done, and one unfinished Undo, per issue.
   `CREATE UNIQUE INDEX IF NOT EXISTS todo_actions_pending ON todo_actions (issue_id, kind) WHERE state = 'pending'`,
+  // The labels an asker gives a bb question, as a JSON list; a question from before has none.
+  `ALTER TABLE asks ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn";
@@ -201,6 +203,7 @@ interface AskRecord {
   question: string;
   options: string;
   issue: string | null;
+  labels: string;
   asked_at: number;
   state: AskState;
   answer: string | null;
@@ -243,6 +246,7 @@ function toAsk(row: AskRecord): AskRow {
     question: row.question,
     options: JSON.parse(row.options) as AskOption[],
     issue: row.issue,
+    labels: JSON.parse(row.labels) as string[],
     askedAt: row.asked_at,
     state: row.state,
     answer: row.answer === null ? null : (JSON.parse(row.answer) as AskAnswer),
@@ -305,7 +309,8 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     /**
      * Store a question, unless the same one is open from the same thread, or
      * a cap is full. The checks and the insert are one transaction, so two
-     * asks at once cannot both pass them. A repeat at a cap still gets its
+     * asks at once cannot both pass them. Labels do not make a question
+     * another one: a repeat keeps the labels it was first asked with. A repeat at a cap still gets its
      * id. `notified` stores the question as already announced, when
      * notifications are off.
      */
@@ -321,9 +326,9 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
         if (open.thread >= ASK_LIMITS.openPerThread) return { kind: "full", scope: "thread", open: open.thread };
         if (open.total >= ASK_LIMITS.openTotal) return { kind: "full", scope: "total", open: open.total };
         db.prepare(
-          `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
-        ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, ask.askedAt, notified ? now() : null);
+          `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, labels, asked_at, state, notified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+        ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, JSON.stringify(ask.labels), ask.askedAt, notified ? now() : null);
         return { kind: "asked", id: ask.id };
       })();
     },

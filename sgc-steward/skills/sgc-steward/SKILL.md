@@ -12,13 +12,14 @@ Never ask the owner in a bb question dialog. It stops your thread until the owne
 ## Asking from a bb thread
 
 ```
-bb sgc ask --question "<question>" --option "<your recommendation>" --option "<another answer>" [--issue TEAM-12]
+bb sgc ask --question "<question>" --option "<your recommendation>" --option "<another answer>" [--issue TEAM-12] [--label <name>]...
 ```
 
 - The command stores the question, prints its id, and returns at once. Then move on to other work.
 - The answer arrives in your thread as a message that starts with `[sgc-steward] Answer to <id>`. It quotes your question and the owner's answer word for word. Treat it as the owner's answer.
 - Put your recommendation first: option A is marked recommended. Pass `--recommend B` to mark another, or `--recommend none`.
 - Use `--question-file <file>` for a long question.
+- Give the question a label with `--label <name>`, once per label, so the owner can sort and filter questions by it, for example by project. Asking the same open question again keeps its first labels.
 - Name an issue with `--issue` when the answer is a ruling that belongs in Linear. The plugin then posts a comment there that records the question and the answer.
 - Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`, from the thread that asked it.
 - The steward can withdraw your question when it is no longer valid. You then get a message that starts with `[sgc-steward] Withdrawn <id>`, with the reason. Stop waiting for that answer, and ask again only if the question still matters.
@@ -99,15 +100,15 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 ## Commands
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--label <name>]... [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
-bb sgc questions [--json] [--cached]
+bb sgc questions [--json] [--cached] [--label <name>]...
 bb sgc todos [--json] [--cached]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 ```
 
-- `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`.
+- `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`. `--label <name>` lists only the bb questions with that label; give it again to need each one.
 - `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text, quoted line by line. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.

@@ -17,6 +17,9 @@ export const ASK_LIMITS = {
   openTotal: 50,
   /** A withdrawal reason, which goes to the asker and the issue record. */
   reasonChars: 2000,
+  /** Labels on one question, and the length of each. */
+  labels: 10,
+  labelChars: 40,
 } as const;
 
 /** The first words of every message the plugin sends to a thread. */
@@ -38,6 +41,8 @@ export interface Ask {
   options: AskOption[];
   /** A Linear issue identifier, like TEAM-12, that gets a record of the answer. */
   issue: string | null;
+  /** Names to sort and filter questions by, as the asker spelled them. Kept from the first ask. */
+  labels: string[];
   askedAt: number;
 }
 
@@ -72,6 +77,24 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
     throw new Error(`there is no option ${recommend} to recommend`);
   }
   return options;
+}
+
+/**
+ * The labels for a question: each trimmed, and kept once, in its first
+ * spelling, since labels match in any case. A label prints on its own in the
+ * CLI, so it must hold no line break or other control character.
+ */
+export function checkLabels(raw: readonly string[]): string[] {
+  const labels: string[] = [];
+  for (const text of raw) {
+    const label = text.trim();
+    if (label === "") throw new Error("a label is empty");
+    if (label.length > ASK_LIMITS.labelChars) throw new Error(`label ${label.slice(0, ASK_LIMITS.labelChars)}… is over ${ASK_LIMITS.labelChars} characters`);
+    if (/\p{Cc}/u.test(label)) throw new Error(`label ${JSON.stringify(label)} holds a control character`);
+    if (!labels.some((kept) => kept.toLowerCase() === label.toLowerCase())) labels.push(label);
+  }
+  if (labels.length > ASK_LIMITS.labels) throw new Error(`a question takes at most ${ASK_LIMITS.labels} labels`);
+  return labels;
 }
 
 export function checkReason(text: string): string {

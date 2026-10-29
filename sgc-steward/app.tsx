@@ -24,18 +24,22 @@ import type { QuestionBlock } from "./lib/questions.ts";
 import {
   announcement,
   askAnswerInput,
+  filterCards,
+  labelChoices,
   noticeTab,
   orderCards,
   PANEL_TABS,
   questionAnswerInput,
   questionBadge,
   sendsFor,
+  sortCards,
   tabBadges,
   tabOf,
   tabPath,
   withDone,
   type AskDraft,
   type Card,
+  type CardOrder,
   type PanelTab,
   type TabBadge,
 } from "./lib/panel.ts";
@@ -309,6 +313,11 @@ function AskCard({ ask, onAnswered }: { ask: AskView; onAnswered: () => void }) 
           {who}
         </button>
         <span className="font-mono text-xs text-muted-foreground">{ask.id}</span>
+        {ask.labels.map((label) => (
+          <span key={label} className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+            {label}
+          </span>
+        ))}
         {ask.issue === null ? null : <span className="text-xs text-muted-foreground">issue {ask.issue}</span>}
       </header>
       <Markdown content={ask.question} className="text-sm" />
@@ -612,6 +621,67 @@ function TabPanel({ tab, active, children }: { tab: PanelTab; active: PanelTab; 
   );
 }
 
+/**
+ * Label chips that filter the questions, each chosen one needed, a way to
+ * clear them, and the order of the cards. Shown only once a question has a
+ * label, so the page without labels looks as it did.
+ */
+function QuestionFilter({
+  choices,
+  chosen,
+  order,
+  onChosen,
+  onOrder,
+}: {
+  choices: string[];
+  chosen: string[];
+  order: CardOrder;
+  onChosen: (next: string[]) => void;
+  onOrder: (next: CardOrder) => void;
+}) {
+  if (choices.length === 0) return null;
+  const isChosen = (label: string) => chosen.some((candidate) => candidate.toLowerCase() === label.toLowerCase());
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-muted-foreground">Labels</span>
+      {choices.map((label) => (
+        <button
+          key={label}
+          type="button"
+          aria-pressed={isChosen(label)}
+          className={cn(
+            "cursor-pointer rounded-full border px-2 py-0.5",
+            isChosen(label) ? "border-foreground bg-state-active text-foreground" : "border-border text-muted-foreground hover:text-foreground",
+          )}
+          onClick={() => onChosen(isChosen(label) ? chosen.filter((candidate) => candidate.toLowerCase() !== label.toLowerCase()) : [...chosen, label])}
+        >
+          {label}
+        </button>
+      ))}
+      {chosen.length === 0 ? null : (
+        <button
+          type="button"
+          className="cursor-pointer text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={() => onChosen([])}
+        >
+          Clear
+        </button>
+      )}
+      <label className="ml-auto flex items-center gap-1 text-muted-foreground">
+        Sort
+        <select
+          className="rounded border border-border bg-transparent px-1 py-0.5 text-foreground"
+          value={order}
+          onChange={(event) => onOrder(event.target.value === "label" ? "label" : "age")}
+        >
+          <option value="age">Oldest first</option>
+          <option value="label">By label</option>
+        </select>
+      </label>
+    </div>
+  );
+}
+
 /** The SGC page: the last check and its trouble on top, then a tab per list. */
 function SgcPage({ subPath }: { subPath: string }) {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
@@ -619,6 +689,9 @@ function SgcPage({ subPath }: { subPath: string }) {
   const [refreshing, setRefreshing] = useState(false);
   const now = useNow(30_000);
   const tab = tabOf(subPath);
+  const [chosen, setChosen] = useState<string[]>([]);
+  const [order, setOrder] = useState<CardOrder>("age");
+  const cards = snapshot === null ? [] : sortCards(filterCards(orderCards(snapshot.issues, snapshot.asks), chosen), order);
 
   async function refresh() {
     setRefreshing(true);
@@ -674,12 +747,19 @@ function SgcPage({ subPath }: { subPath: string }) {
           {snapshot === null ? null : (
             <Undelivered title="Answers that did not go out" undelivered={sendsFor("questions", snapshot.undelivered)} unposted={snapshot.unposted} />
           )}
+          {snapshot === null ? null : (
+            <QuestionFilter choices={labelChoices(snapshot.asks, chosen)} chosen={chosen} order={order} onChosen={setChosen} onOrder={setOrder} />
+          )}
+          {chosen.length > 0 && snapshot !== null && snapshot.issues.length > 0 ? (
+            <p className="text-xs text-muted-foreground">Linear questions carry no labels, so a label filter hides them.</p>
+          ) : null}
           {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
             <Notice>No open questions.</Notice>
           ) : null}
+          {chosen.length > 0 && cards.length === 0 ? <Notice>No open questions have every label chosen.</Notice> : null}
           {snapshot === null
             ? null
-            : orderCards(snapshot.issues, snapshot.asks).map((card) =>
+            : cards.map((card) =>
                 card.kind === "ask" ? (
                   <AskCard key={card.ask.id} ask={card.ask} onAnswered={load} />
                 ) : (

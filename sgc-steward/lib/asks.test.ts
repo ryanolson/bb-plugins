@@ -8,6 +8,7 @@ import {
   askRecord,
   blockDelivery,
   checkIssueRef,
+  checkLabels,
   checkQuestion,
   checkReason,
   isThreadId,
@@ -27,6 +28,7 @@ const ASK: Ask = {
     { letter: "B", text: "No, wait for the soak.", recommended: false },
   ],
   issue: "TEAM-12",
+  labels: [],
   askedAt: Date.parse("2026-01-05T10:00:00Z"),
 };
 
@@ -152,4 +154,14 @@ test("a withdrawal record starts with the record header, so it closes no block",
   assert.match(record, /Withdrawn by the steward, thread thr_steward, at 2026-01-05 11:30 UTC\. Reason:\nThe router change shipped\./);
   assert.ok(record.includes(ASK.question));
   assert.match(record, /- A \(recommended\): Yes, today\./);
+});
+
+test("labels are trimmed and kept once each, in their first spelling, within the limits", () => {
+  assert.deepEqual(checkLabels([]), []);
+  assert.deepEqual(checkLabels([" infra ", "Docs", "INFRA", "docs", "agent: auto"]), ["infra", "Docs", "agent: auto"]);
+  assert.throws(() => checkLabels(["  "]), /a label is empty/);
+  assert.throws(() => checkLabels(["x".repeat(ASK_LIMITS.labelChars + 1)]), new RegExp(`over ${ASK_LIMITS.labelChars} characters`));
+  assert.throws(() => checkLabels(["two\nlines"]), /control character/);
+  assert.throws(() => checkLabels(["tab\there"]), /control character/);
+  assert.throws(() => checkLabels(Array.from({ length: ASK_LIMITS.labels + 1 }, (_, index) => `l${index}`)), new RegExp(`at most ${ASK_LIMITS.labels} labels`));
 });

@@ -50,6 +50,8 @@ const askViewSchema = z.object({
   question: z.string(),
   options: z.array(optionSchema),
   issue: z.string().nullable(),
+  /** Names to sort and filter by, as the asker spelled them. */
+  labels: z.array(z.string()),
   askedAt: z.number(),
 });
 const deliveryViewSchema = z.object({

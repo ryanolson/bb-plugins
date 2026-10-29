@@ -22,7 +22,7 @@ async function askId(harness: Harness, args: string[], threadId = "thr_asker"): 
 }
 
 function asAsk(view: Panel["asks"][number]): Ask {
-  return { id: view.id, threadId: view.threadId, threadTitle: view.threadTitle, question: view.question, options: view.options, issue: view.issue, askedAt: view.askedAt };
+  return { id: view.id, threadId: view.threadId, threadTitle: view.threadTitle, question: view.question, options: view.options, issue: view.issue, labels: view.labels, askedAt: view.askedAt };
 }
 
 test("an agent asks without waiting: the command stores the question and returns its id", async () => {
@@ -62,6 +62,50 @@ test("asking the same open question again returns its id, and a thread can have 
   assert.equal(eleventh.exitCode, 1);
   assert.match(eleventh.stderr, /thr_asker already has 10 open questions/);
   await askId(harness, ["--question", "Question 11?"], "thr_other");
+});
+
+test("an agent labels its question, and bb sgc questions shows the labels and filters by every one named", async () => {
+  const { harness, linear, refresh } = await setup();
+  linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
+  await refresh();
+  const both = await askId(harness, ["--question", "Ship it?", "--label", "release", "--label", "Infra"]);
+  const one = await askId(harness, ["--question", "Rename it?", "--label", "release"]);
+  const none = await askId(harness, ["--question", "Lunch?"]);
+  const listed = async (...labels: string[]) => {
+    const result = await harness.behavior.runCli(["questions", "--cached", "--json", ...labels.flatMap((label) => ["--label", label])]);
+    const panel = JSON.parse(result.stdout) as Panel;
+    return { asks: Object.fromEntries(panel.asks.map((row) => [row.id, row.labels])), issues: panel.issues.length };
+  };
+  assert.deepEqual(await listed(), { asks: { [both]: ["release", "Infra"], [one]: ["release"], [none]: [] }, issues: 1 }, "no filter lists everything, as before");
+  assert.deepEqual(await listed("release"), { asks: { [both]: ["release", "Infra"], [one]: ["release"] }, issues: 0 });
+  assert.deepEqual(await listed("RELEASE", "infra"), { asks: { [both]: ["release", "Infra"] }, issues: 0 }, "every label named, in any case");
+  assert.deepEqual(await listed("nope"), { asks: {}, issues: 0 });
+
+  const text = await harness.behavior.runCli(["questions", "--cached", "--label", "release"]);
+  assert.match(text.stdout, new RegExp(`${both} {2}from .*, labels release, Infra\\n`));
+  assert.doesNotMatch(text.stdout, /TEAM-1/, "Linear questions carry no labels");
+  const empty = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other"]);
+  assert.match(empty.stdout, /No open bb questions with the labels nope and other\./);
+  assert.doesNotMatch(empty.stdout, /No open questions on TEAM issues/);
+});
+
+test("asking the same open question again with other labels returns its id and keeps its first labels", async () => {
+  const { harness } = await setup();
+  const first = await askId(harness, ["--question", "Ship it?", "--label", "release"]);
+  const again = await ask(harness, ["--question", "Ship it?", "--label", "other", "--json"]);
+  assert.deepEqual(JSON.parse(again.stdout), { id: first, existing: true });
+  assert.deepEqual((await list(harness)).asks.map((row) => row.labels), [["release"]]);
+});
+
+test("ask refuses a label that is empty, too long, or holds a control character, and too many labels", async () => {
+  const { harness } = await setup();
+  const many = Array.from({ length: 11 }, (_, index) => `l${index}`);
+  for (const labels of [[" "], ["x".repeat(41)], ["two\nlines"], many]) {
+    const refused = await ask(harness, ["--question", "Ship it?", ...labels.flatMap((label) => ["--label", label])]);
+    assert.equal(refused.exitCode, 1, JSON.stringify(labels));
+    assert.match(refused.stderr, /a label is empty|over 40 characters|control character|at most 10 labels/, JSON.stringify(labels));
+  }
+  assert.deepEqual((await list(harness)).asks, []);
 });
 
 test("ask refuses without a thread, for an unknown thread, a bad issue, an empty question, or a bad recommendation", async () => {

@@ -54,9 +54,15 @@ function formatBlock(block: QuestionBlock): string[] {
   return lines;
 }
 
-export function formatPanel(view: Panel): string {
+/** "a", "a and b", "a, b and c". */
+function andList(items: readonly string[]): string {
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+/** The panel as text. With `labels`, the view lists only bb questions that have them all, and Linear is left out. */
+export function formatPanel(view: Panel, labels: readonly string[] = []): string {
   const lines: string[] = [];
-  if (view.configured) {
+  if (view.configured && labels.length === 0) {
     if (view.issues.length === 0) lines.push(`No open questions on ${view.teamKey} issues.`);
     for (const issue of view.issues) {
       lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]`);
@@ -65,9 +71,12 @@ export function formatPanel(view: Panel): string {
       lines.push(`  Answer: bb sgc answer ${issue.identifier} ${blocks} --text-file <file>`, "");
     }
   }
-  if (view.asks.length === 0) lines.push("No open bb questions.");
+  if (view.asks.length === 0) {
+    lines.push(labels.length === 0 ? "No open bb questions." : `No open bb questions with the label${labels.length === 1 ? "" : "s"} ${andList(labels)}.`);
+  }
   for (const ask of view.asks) {
-    lines.push(`${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), asked ${formatUtc(ask.askedAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}`);
+    const tags = ask.labels.length === 0 ? "" : `, labels ${ask.labels.join(", ")}`;
+    lines.push(`${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), asked ${formatUtc(ask.askedAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}${tags}`);
     lines.push(...ask.question.split("\n").map((line) => `  ${line}`));
     for (const option of ask.options) lines.push(`    ${option.letter}${option.recommended ? " (recommended)" : ""}: ${option.text}`);
     lines.push("  Answer it on the SGC questions page.", "");

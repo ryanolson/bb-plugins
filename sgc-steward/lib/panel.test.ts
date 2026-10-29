@@ -4,15 +4,19 @@ import {
   PANEL_TABS,
   announcement,
   askAnswerInput,
+  filterCards,
+  labelChoices,
   noticeTab,
   orderCards,
   questionAnswerInput,
   questionBadge,
   sendsFor,
+  sortCards,
   tabBadges,
   tabOf,
   tabPath,
   withDone,
+  type Card,
 } from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
 
@@ -139,4 +143,40 @@ test("each tab's badge counts what is open on it, and flags a failure there", ()
   assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "linear" }] }), { questions: { count: 0, alert: true }, todos: quiet });
   assert.deepEqual(tabBadges({ ...base, unposted: [{}] }).questions, { count: 0, alert: true });
   assert.deepEqual(tabBadges({ ...base, issueErrors: [{}] }).questions, { count: 0, alert: true });
+});
+
+/** A card's name in the order tests: a bb question's id, or a Linear question as issue:block:Qn. */
+function cardName(card: Card<{ id: string }, { id: string }>): string {
+  return card.kind === "ask" ? card.ask.id : card.kind === "question" ? `${card.issue.id}:${card.block.commentId}:Q${card.question.number}` : card.issue.id;
+}
+
+test("the page filters bb questions by every label chosen, in any case; Linear questions carry none", () => {
+  const asks = [
+    { id: "a1", askedAt: 1, labels: ["release", "Infra"] },
+    { id: "a2", askedAt: 2, labels: ["release"] },
+    { id: "a3", askedAt: 3, labels: [] },
+  ];
+  const cards = orderCards([{ id: "i1", blocks: [parsed] }], asks);
+  assert.deepEqual(filterCards(cards, []).map(cardName), cards.map(cardName), "no label chosen shows every card");
+  assert.deepEqual(filterCards(cards, ["RELEASE"]).map(cardName), ["a1", "a2"]);
+  assert.deepEqual(filterCards(cards, ["release", "infra"]).map(cardName), ["a1"]);
+  assert.deepEqual(filterCards(cards, ["nope"]).map(cardName), []);
+});
+
+test("sorting by label puts each card under its first label, alphabetically, and cards without one last", () => {
+  const asks = [
+    { id: "a1", askedAt: 1, labels: ["zeta"] },
+    { id: "a2", askedAt: 2, labels: ["zeta", "Alpha"] },
+    { id: "a3", askedAt: 3, labels: [] },
+    { id: "a4", askedAt: 4, labels: ["alpha"] },
+  ];
+  const cards = orderCards([{ id: "i1", blocks: [parsed] }], asks);
+  assert.deepEqual(sortCards(cards, "age").map(cardName), cards.map(cardName), "oldest first is the order the page had");
+  assert.deepEqual(sortCards(cards, "label").map(cardName), ["a2", "a4", "a1", "a3", "i1:q1:Q1", "i1:q1:Q2"]);
+});
+
+test("the label chips list every label once, and keep a chosen one after its last question is answered", () => {
+  assert.deepEqual(labelChoices([{ labels: ["zeta", "Alpha"] }, { labels: ["alpha", "beta"] }], []), ["Alpha", "beta", "zeta"]);
+  assert.deepEqual(labelChoices([{ labels: ["beta"] }], ["Gone"]), ["beta", "Gone"]);
+  assert.deepEqual(labelChoices([], []), []);
 });

@@ -35,6 +35,7 @@ function ask(id: string, extra: Partial<Ask> = {}): Ask {
       { letter: "B", text: "No.", recommended: false },
     ],
     issue: null,
+    labels: [],
     askedAt: now(),
     ...extra,
   };
@@ -247,8 +248,11 @@ test("the steward withdraws any open question, and its notice and record are sav
 test("a database with the six shipped steps upgrades: its questions stay, and the todo table works", () => {
   const db = new Database(":memory:");
   migrate(db, STORE_MIGRATIONS.slice(0, 6));
-  const before = createAskStore(db, now);
-  before.admit(ask("bbq_live"), false);
+  // Written as the plugin wrote it then, before later columns existed.
+  db.prepare(
+    `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
+     VALUES ('bbq_live', 'thr_a', 'Thread A', 'Live?', '[]', NULL, 1, 'open', NULL)`,
+  ).run();
   migrate(db, STORE_MIGRATIONS);
   const after = createAskStore(db, now);
   assert.deepEqual(after.listOpen().map((row) => row.id), ["bbq_live"]);
@@ -264,4 +268,25 @@ test("a kept message goes to the call that kept it; the same message kept again 
   assert.equal(store.keep({ source: "todo", ref: "c-1", threadId: "thr_s", label: "Todo done TEAM-1", message: "done" }), null);
   assert.deepEqual(store.undelivered().map((row) => row.ref), ["c-1"]);
   assert.equal(store.deliveryFor("linear", "c-1", "thr_a")!.state, "held", "a block answer with the same reference stays held");
+});
+
+test("a question keeps its labels, and the same question asked again keeps its first ones", () => {
+  const { store } = open();
+  assert.deepEqual(store.admit(ask("bbq_1", { labels: ["infra", "Docs"] }), false), { kind: "asked", id: "bbq_1" });
+  assert.deepEqual(store.get("bbq_1")!.labels, ["infra", "Docs"]);
+  assert.deepEqual(store.admit(ask("bbq_2", { question: "Question bbq_1?", labels: ["other"] }), false), { kind: "existing", id: "bbq_1" });
+  assert.deepEqual(store.listOpen().map((row) => [row.id, row.labels]), [["bbq_1", ["infra", "Docs"]]]);
+});
+
+test("a database with the nine shipped steps upgrades: a question from before has no labels and still takes an answer", () => {
+  const db = new Database(":memory:");
+  migrate(db, STORE_MIGRATIONS.slice(0, 9));
+  db.prepare(
+    `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, asked_at, state, notified_at)
+     VALUES ('bbq_old', 'thr_a', 'Thread A', 'Old?', '[]', NULL, 1, 'open', NULL)`,
+  ).run();
+  migrate(db, STORE_MIGRATIONS);
+  const store = createAskStore(db, now);
+  assert.deepEqual(store.get("bbq_old")!.labels, []);
+  assert.equal(store.answer("bbq_old", { option: null, text: "Yes." }, { message: "m", label: "bbq_old" }, null), "answered");
 });

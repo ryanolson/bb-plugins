@@ -1,7 +1,7 @@
 // The pure logic behind the Questions page and the notifier, kept out of the
 // React code so it can be tested without a DOM.
 
-import type { DeliveryView } from "./contract.ts";
+import type { DeliveryView, Panel } from "./contract.ts";
 import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
 
 /** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
@@ -179,4 +179,54 @@ export function tabBadges(view: TabInput): Record<PanelTab, TabBadge> {
     questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
     todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },
   };
+}
+
+/** Whether a question has every label wanted, in any case. Wanting none matches every question. */
+export function hasLabels(labels: readonly string[], wanted: readonly string[]): boolean {
+  const have = new Set(labels.map((label) => label.toLowerCase()));
+  return wanted.every((label) => have.has(label.toLowerCase()));
+}
+
+/** A card's labels: a bb question's own. A Linear question carries none. */
+function cardLabels<I, A extends { labels: readonly string[] }>(card: Card<I, A>): readonly string[] {
+  return card.kind === "ask" ? card.ask.labels : [];
+}
+
+/** The cards with every label wanted. With any label wanted, Linear questions drop out. */
+export function filterCards<I, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, wanted: readonly string[]): Array<Card<I, A>> {
+  return cards.filter((card) => hasLabels(cardLabels(card), wanted));
+}
+
+export type CardOrder = "age" | "label";
+
+/**
+ * The cards in the order chosen: as given, oldest first, or by label, under
+ * each card's first label in alphabetical order ignoring case, with cards
+ * that have no label last. A stable sort keeps the oldest first among equals.
+ */
+export function sortCards<I, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, order: CardOrder): Array<Card<I, A>> {
+  if (order === "age") return [...cards];
+  const first = (card: Card<I, A>) => cardLabels(card).map((label) => label.toLowerCase()).sort()[0] ?? null;
+  return [...cards].sort((a, b) => {
+    const [x, y] = [first(a), first(b)];
+    if (x === y) return 0;
+    if (x === null || y === null) return x === null ? 1 : -1;
+    return x < y ? -1 : 1;
+  });
+}
+
+/**
+ * The label chips: every label on the open questions, once in its first
+ * spelling, alphabetical ignoring case. A chosen label stays, so a filter
+ * whose last question was answered can still be cleared.
+ */
+export function labelChoices(asks: ReadonlyArray<{ labels: readonly string[] }>, chosen: readonly string[]): string[] {
+  const choices = new Map<string, string>();
+  for (const label of [...asks.flatMap((ask) => ask.labels), ...chosen]) if (!choices.has(label.toLowerCase())) choices.set(label.toLowerCase(), label);
+  return [...choices.values()].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
+}
+
+/** What `bb sgc questions --label` lists: bb questions with every label named. Linear questions carry none. */
+export function filterPanel(view: Panel, wanted: readonly string[]): Panel {
+  return wanted.length === 0 ? view : { ...view, issues: [], asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted)) };
 }

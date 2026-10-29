@@ -5,7 +5,16 @@ import type { AskRow, Undelivered, Unposted } from "./ask-store.ts";
 import type { AskView, DeliveryView, RecordView } from "./contract.ts";
 
 export function askView(row: AskRow): AskView {
-  return { id: row.id, threadId: row.threadId, threadTitle: row.threadTitle, question: row.question, options: row.options, issue: row.issue, askedAt: row.askedAt };
+  return {
+    id: row.id,
+    threadId: row.threadId,
+    threadTitle: row.threadTitle,
+    question: row.question,
+    options: row.options,
+    issue: row.issue,
+    labels: row.labels,
+    askedAt: row.askedAt,
+  };
 }
 
 export function deliveryView(row: Undelivered): DeliveryView {
