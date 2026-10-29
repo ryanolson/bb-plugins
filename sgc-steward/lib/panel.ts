@@ -187,13 +187,13 @@ export function hasLabels(labels: readonly string[], wanted: readonly string[]):
   return wanted.every((label) => have.has(label.toLowerCase()));
 }
 
-/** A card's labels: a bb question's own. A Linear question carries none. */
-function cardLabels<I, A extends { labels: readonly string[] }>(card: Card<I, A>): readonly string[] {
-  return card.kind === "ask" ? card.ask.labels : [];
+/** A card's labels: a bb question's own, or the labels of a Linear question's issue. */
+function cardLabels<I extends { labels: readonly string[] }, A extends { labels: readonly string[] }>(card: Card<I, A>): readonly string[] {
+  return card.kind === "ask" ? card.ask.labels : card.issue.labels;
 }
 
-/** The cards with every label wanted. With any label wanted, Linear questions drop out. */
-export function filterCards<I, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, wanted: readonly string[]): Array<Card<I, A>> {
+/** The cards with every label wanted. */
+export function filterCards<I extends { labels: readonly string[] }, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, wanted: readonly string[]): Array<Card<I, A>> {
   return cards.filter((card) => hasLabels(cardLabels(card), wanted));
 }
 
@@ -204,7 +204,7 @@ export type CardOrder = "age" | "label";
  * each card's first label in alphabetical order ignoring case, with cards
  * that have no label last. A stable sort keeps the oldest first among equals.
  */
-export function sortCards<I, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, order: CardOrder): Array<Card<I, A>> {
+export function sortCards<I extends { labels: readonly string[] }, A extends { labels: readonly string[] }>(cards: ReadonlyArray<Card<I, A>>, order: CardOrder): Array<Card<I, A>> {
   if (order === "age") return [...cards];
   const first = (card: Card<I, A>) => cardLabels(card).map((label) => label.toLowerCase()).sort()[0] ?? null;
   return [...cards].sort((a, b) => {
@@ -226,7 +226,9 @@ export function labelChoices(asks: ReadonlyArray<{ labels: readonly string[] }>,
   return [...choices.values()].sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1));
 }
 
-/** What `bb sgc questions --label` lists: bb questions with every label named. Linear questions carry none. */
+/** What `bb sgc questions --label` lists: the questions with every label named, of both kinds. */
 export function filterPanel(view: Panel, wanted: readonly string[]): Panel {
-  return wanted.length === 0 ? view : { ...view, issues: [], asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted)) };
+  return wanted.length === 0
+    ? view
+    : { ...view, issues: view.issues.filter((issue) => hasLabels(issue.labels, wanted)), asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted)) };
 }

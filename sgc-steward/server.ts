@@ -16,7 +16,7 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, LinearError, postComment, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
+import { CHECKIN_LABEL, createLinearClient, DECISION_LABEL, keyProblem, labelName, LinearError, postComment, redact, type LinearClient, type LinearIssue } from "./lib/linear.ts";
 import {
   answerCommentId,
   answerFor,
@@ -242,7 +242,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             const kind = issueKind(issue);
             const blocks = openBlocks(kind, comments);
             if (blocks.length > 0) {
-              issues.push({ id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, kind, blocks });
+              issues.push({ id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, kind, labels: issue.labels.map(labelName), blocks });
             }
           } catch (error) {
             // A bad key or the rate limit fails the whole poll; anything else

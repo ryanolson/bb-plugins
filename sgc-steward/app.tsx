@@ -230,6 +230,15 @@ function LinearCard({ card, onAnswered }: { card: Extract<Card<IssueView, AskVie
           {issue.kind === "checkin" ? "check-in" : "needs decision"}
         </span>
       </header>
+      {issue.labels.length === 0 ? null : (
+        <div className="flex flex-wrap gap-1">
+          {issue.labels.map((label) => (
+            <span key={label} className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+              {label}
+            </span>
+          ))}
+        </div>
+      )}
       <BlockHeader block={block} />
       {card.kind === "raw" ? (
         <>
@@ -748,11 +757,14 @@ function SgcPage({ subPath }: { subPath: string }) {
             <Undelivered title="Answers that did not go out" undelivered={sendsFor("questions", snapshot.undelivered)} unposted={snapshot.unposted} />
           )}
           {snapshot === null ? null : (
-            <QuestionFilter choices={labelChoices(snapshot.asks, chosen)} chosen={chosen} order={order} onChosen={setChosen} onOrder={setOrder} />
+            <QuestionFilter
+              choices={labelChoices([...snapshot.issues, ...snapshot.asks], chosen)}
+              chosen={chosen}
+              order={order}
+              onChosen={setChosen}
+              onOrder={setOrder}
+            />
           )}
-          {chosen.length > 0 && snapshot !== null && snapshot.issues.length > 0 ? (
-            <p className="text-xs text-muted-foreground">Linear questions carry no labels, so a label filter hides them.</p>
-          ) : null}
           {snapshot !== null && snapshot.asks.length === 0 && snapshot.configured && snapshot.issues.length === 0 && snapshot.error === null ? (
             <Notice>No open questions.</Notice>
           ) : null}

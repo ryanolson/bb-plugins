@@ -83,10 +83,27 @@ test("an agent labels its question, and bb sgc questions shows the labels and fi
 
   const text = await harness.behavior.runCli(["questions", "--cached", "--label", "release"]);
   assert.match(text.stdout, new RegExp(`${both} {2}from .*, labels release, Infra\\n`));
-  assert.doesNotMatch(text.stdout, /TEAM-1/, "Linear questions carry no labels");
+  assert.doesNotMatch(text.stdout, /TEAM-1/, "TEAM-1 has no label release");
   const empty = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other"]);
   assert.match(empty.stdout, /No open bb questions with the labels nope and other\./);
-  assert.doesNotMatch(empty.stdout, /No open questions on TEAM issues/);
+  assert.match(empty.stdout, /No open questions on TEAM issues with the labels nope and other\./);
+});
+
+test("a Linear question takes its issue's labels, a grouped one as group/label, so one filter covers both kinds", async () => {
+  const { harness, linear, refresh } = await setup();
+  linear.post(linear.addIssue("TEAM-1", ["checkin", "area/gdl"]), "q1", QUESTIONS);
+  linear.post(linear.addIssue("TEAM-2", ["checkin"]), "q2", QUESTIONS);
+  const shown = await refresh();
+  assert.deepEqual(shown.issues.map((issue) => [issue.identifier, issue.labels]), [["TEAM-1", ["checkin", "area/gdl"]], ["TEAM-2", ["checkin"]]]);
+  const tagged = await askId(harness, ["--question", "Ship gdl?", "--label", "area/gdl"]);
+  await askId(harness, ["--question", "Lunch?"]);
+
+  const listed = JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json", "--label", "AREA/gdl"])).stdout) as Panel;
+  assert.deepEqual(listed.issues.map((issue) => issue.identifier), ["TEAM-1"]);
+  assert.deepEqual(listed.asks.map((row) => row.id), [tagged]);
+  const text = await harness.behavior.runCli(["questions", "--cached", "--label", "area/gdl"]);
+  assert.match(text.stdout, /TEAM-1 {2}Title of TEAM-1 {2}\[check-in\], labels checkin, area\/gdl\n/);
+  assert.doesNotMatch(text.stdout, /TEAM-2/);
 });
 
 test("asking the same open question again with other labels returns its id and keeps its first labels", async () => {

@@ -59,24 +59,23 @@ function andList(items: readonly string[]): string {
   return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 }
 
-/** The panel as text. With `labels`, the view lists only bb questions that have them all, and Linear is left out. */
+/** The panel as text. `labels` names the labels the view was filtered by, so an empty list says so. */
 export function formatPanel(view: Panel, labels: readonly string[] = []): string {
   const lines: string[] = [];
-  if (view.configured && labels.length === 0) {
-    if (view.issues.length === 0) lines.push(`No open questions on ${view.teamKey} issues.`);
+  const having = labels.length === 0 ? "" : ` with the label${labels.length === 1 ? "" : "s"} ${andList(labels)}`;
+  const tagged = (names: readonly string[]) => (names.length === 0 ? "" : `, labels ${names.join(", ")}`);
+  if (view.configured) {
+    if (view.issues.length === 0) lines.push(`No open questions on ${view.teamKey} issues${having}.`);
     for (const issue of view.issues) {
-      lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]`);
+      lines.push(`${issue.identifier}  ${issue.title}  [${issue.kind === "checkin" ? "check-in" : "needs-decision"}]${tagged(issue.labels)}`);
       for (const block of issue.blocks) lines.push(...formatBlock(block));
       const blocks = issue.blocks.map((block) => `--block ${block.commentId}@${block.revision}`).join(" ");
       lines.push(`  Answer: bb sgc answer ${issue.identifier} ${blocks} --text-file <file>`, "");
     }
   }
-  if (view.asks.length === 0) {
-    lines.push(labels.length === 0 ? "No open bb questions." : `No open bb questions with the label${labels.length === 1 ? "" : "s"} ${andList(labels)}.`);
-  }
+  if (view.asks.length === 0) lines.push(`No open bb questions${having}.`);
   for (const ask of view.asks) {
-    const tags = ask.labels.length === 0 ? "" : `, labels ${ask.labels.join(", ")}`;
-    lines.push(`${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), asked ${formatUtc(ask.askedAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}${tags}`);
+    lines.push(`${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), asked ${formatUtc(ask.askedAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}${tagged(ask.labels)}`);
     lines.push(...ask.question.split("\n").map((line) => `  ${line}`));
     for (const option of ask.options) lines.push(`    ${option.letter}${option.recommended ? " (recommended)" : ""}: ${option.text}`);
     lines.push("  Answer it on the SGC questions page.", "");

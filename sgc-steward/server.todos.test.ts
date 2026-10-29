@@ -68,7 +68,7 @@ test("Done on another issue removes only the todo label, leaves the state, and t
   const { harness, linear, sends } = await setup();
   await harness.behavior.setSettings({ stewardThread: STEWARD });
   const { action } = seed(linear);
-  action.labels.push({ id: "label-area", name: "area" });
+  action.labels.push({ id: "label-area", name: "area", group: null });
   const result = await done(harness, "TEAM-1");
   assert.deepEqual([result.change, result.steward], ["label", "sent"]);
   assert.deepEqual(action.labels.map((label) => label.name), ["area"]);

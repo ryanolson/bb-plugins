@@ -381,3 +381,35 @@ test("moving an issue to a state and adding a label report failure", async () =>
   assert.deepEqual(calls[2]?.variables, { id: "issue-1", labelId: "label-1" });
   await assert.rejects(client.addLabel({ issueId: "issue-1", labelId: "label-1" }), /Linear did not add the label/);
 });
+
+test("question issues read each label's group, which Linear gives as the label's parent", async () => {
+  const { calls, client } = fakeLinear([
+    {
+      json: {
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "1",
+                identifier: "TEAM-1",
+                title: "Issue 1",
+                url: "https://linear.example/1",
+                updatedAt: "2026-01-05T10:00:00.000Z",
+                team: { key: "TEAM" },
+                state: { type: "started" },
+                labels: { nodes: [{ id: "l-1", name: "checkin", parent: null }, { id: "l-2", name: "gdl", parent: { name: "area" } }] },
+              },
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    },
+  ]);
+  const [issue] = await client.listQuestionIssues("TEAM");
+  assert.deepEqual(issue?.labels, [
+    { id: "l-1", name: "checkin", group: null },
+    { id: "l-2", name: "gdl", group: "area" },
+  ]);
+  assert.match(calls[0]?.query ?? "", /labels\(first: 50\) \{ nodes \{ id name parent \{ name \} \} \}/);
+});

@@ -63,7 +63,11 @@ export class FakeLinear implements LinearClient {
       updatedAt: this.tick(),
       teamKey,
       state: { id: "state-started", type: "started" },
-      labels: labels.map((name) => ({ id: `label-${name}`, name })),
+      // A label written group/name is in that group, as `area/gdl`.
+      labels: labels.map((label) => {
+        const slash = label.indexOf("/");
+        return { id: `label-${label}`, name: slash < 0 ? label : label.slice(slash + 1), group: slash < 0 ? null : label.slice(0, slash) };
+      }),
       description: "",
       assignedToMe: false,
       comments: [],
@@ -152,7 +156,7 @@ export class FakeLinear implements LinearClient {
   async addLabel({ issueId, labelId }: { issueId: string; labelId: string }) {
     this.calls.push(`addLabel ${issueId} ${labelId}`);
     const issue = this.find(issueId)!;
-    if (!issue.labels.some((label) => label.id === labelId)) issue.labels.push({ id: labelId, name: labelId.replace(/^label-/, "") });
+    if (!issue.labels.some((label) => label.id === labelId)) issue.labels.push({ id: labelId, name: labelId.replace(/^label-/, ""), group: null });
     issue.updatedAt = this.tick();
   }
 

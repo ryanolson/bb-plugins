@@ -25,7 +25,8 @@ export interface LinearIssue {
   teamKey: string;
   /** The workflow state's type: triage, backlog, unstarted, started, completed, or canceled. */
   state: { type: string } | null;
-  labels: Array<{ id: string; name: string }>;
+  /** Each label's own name, and the name of the label group it is in, or null. */
+  labels: Array<{ id: string; name: string; group: string | null }>;
 }
 
 /** An issue that may be on the owner's todo list, with what the list shows and Done needs. */
@@ -93,7 +94,7 @@ export function redact(text: string, secrets: readonly string[] = []): string {
 }
 
 // Nested page sizes stay small: Linear limits query complexity.
-const ISSUE_FIELDS = `id identifier title url updatedAt team { key } state { type } labels(first: 50) { nodes { id name } }`;
+const ISSUE_FIELDS = `id identifier title url updatedAt team { key } state { type } labels(first: 50) { nodes { id name parent { name } } }`;
 
 export const ISSUES_QUERY = `query SgcQuestionIssues($teamKey: String!, $labels: [String!]!, $after: String) {
   issues(
@@ -188,7 +189,7 @@ interface IssueNode {
   updatedAt: string;
   team: { key: string } | null;
   state: { type: string } | null;
-  labels: { nodes: Array<{ id: string; name: string }> };
+  labels: { nodes: Array<{ id: string; name: string; parent?: { name: string } | null }> };
 }
 
 interface TodoNode {
@@ -266,8 +267,17 @@ function toIssue(node: IssueNode): LinearIssue {
     updatedAt: node.updatedAt,
     teamKey: node.team?.key ?? "",
     state: node.state === null ? null : { type: node.state.type },
-    labels: node.labels.nodes.map((label) => ({ id: label.id, name: label.name })),
+    labels: node.labels.nodes.map((label) => ({ id: label.id, name: label.name, group: label.parent?.name ?? null })),
   };
+}
+
+/**
+ * A label as the page and the CLI show it: `group/name` for a label in a
+ * label group, as `area/gdl`, else its name. Linear names a grouped label by
+ * itself and gives its group as the label's parent; this joins the two.
+ */
+export function labelName(label: { name: string; group: string | null }): string {
+  return label.group === null ? label.name : `${label.group}/${label.name}`;
 }
 
 function toTodo(node: TodoNode): TodoIssue {

@@ -25,6 +25,8 @@ const issueSchema = z.object({
   title: z.string(),
   url: z.string(),
   kind: z.enum(["checkin", "needs-decision"]),
+  /** The issue's labels, a grouped one as `group/name`; its questions carry them. */
+  labels: z.array(z.string()),
   blocks: z.array(blockSchema),
 });
 const snapshotSchema = z.object({

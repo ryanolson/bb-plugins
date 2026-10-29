@@ -156,7 +156,7 @@ test("the page filters bb questions by every label chosen, in any case; Linear q
     { id: "a2", askedAt: 2, labels: ["release"] },
     { id: "a3", askedAt: 3, labels: [] },
   ];
-  const cards = orderCards([{ id: "i1", blocks: [parsed] }], asks);
+  const cards = orderCards([{ id: "i1", labels: [], blocks: [parsed] }], asks);
   assert.deepEqual(filterCards(cards, []).map(cardName), cards.map(cardName), "no label chosen shows every card");
   assert.deepEqual(filterCards(cards, ["RELEASE"]).map(cardName), ["a1", "a2"]);
   assert.deepEqual(filterCards(cards, ["release", "infra"]).map(cardName), ["a1"]);
@@ -170,7 +170,7 @@ test("sorting by label puts each card under its first label, alphabetically, and
     { id: "a3", askedAt: 3, labels: [] },
     { id: "a4", askedAt: 4, labels: ["alpha"] },
   ];
-  const cards = orderCards([{ id: "i1", blocks: [parsed] }], asks);
+  const cards = orderCards([{ id: "i1", labels: [], blocks: [parsed] }], asks);
   assert.deepEqual(sortCards(cards, "age").map(cardName), cards.map(cardName), "oldest first is the order the page had");
   assert.deepEqual(sortCards(cards, "label").map(cardName), ["a2", "a4", "a1", "a3", "i1:q1:Q1", "i1:q1:Q2"]);
 });
@@ -179,4 +179,18 @@ test("the label chips list every label once, and keep a chosen one after its las
   assert.deepEqual(labelChoices([{ labels: ["zeta", "Alpha"] }, { labels: ["alpha", "beta"] }], []), ["Alpha", "beta", "zeta"]);
   assert.deepEqual(labelChoices([{ labels: ["beta"] }], ["Gone"]), ["beta", "Gone"]);
   assert.deepEqual(labelChoices([], []), []);
+});
+
+test("a Linear question carries its issue's labels, so one label filter covers both kinds", () => {
+  const issues = [
+    { id: "i1", labels: ["checkin", "area/gdl"], blocks: [parsed] },
+    { id: "i2", labels: ["checkin"], blocks: [raw] },
+  ];
+  const asks = [
+    { id: "a1", askedAt: 1, labels: ["area/gdl"] },
+    { id: "a2", askedAt: 2, labels: [] },
+  ];
+  const cards = orderCards(issues, asks);
+  assert.deepEqual(filterCards(cards, ["area/gdl"]).map(cardName), ["a1", "i1:q1:Q1", "i1:q1:Q2"]);
+  assert.deepEqual(labelChoices([...issues, ...asks], []), ["area/gdl", "checkin"]);
 });
