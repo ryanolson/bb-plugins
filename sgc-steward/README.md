@@ -163,6 +163,7 @@ bb plugin logs sgc-steward
 - `lib/linear.ts`: the Linear GraphQL client, and posting a comment under the id its answer derives.
 - `lib/panel.ts`: the page's tabs, answer drafts, card order, badges, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
+- `lib/views.ts`: the stored rows mapped to the shapes the page and `bb sgc questions --json` show.
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.

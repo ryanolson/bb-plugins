@@ -47,16 +47,14 @@ import {
   withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
-import { STORE_MIGRATIONS, createAskId, createAskStore, type AskRow, type Delivery, type RecordRow, type Undelivered, type Unposted } from "./lib/ask-store.ts";
+import { STORE_MIGRATIONS, createAskId, createAskStore, type Delivery, type RecordRow } from "./lib/ask-store.ts";
+import { askView, deliveryView, recordView } from "./lib/views.ts";
 import {
   rpcContract,
   type AnswerResult,
-  type AskView,
-  type DeliveryView,
   type IssueView,
   type Panel,
   type QuestionNotification,
-  type RecordView,
   type Snapshot,
 } from "./lib/contract.ts";
 import { readHostFile } from "./lib/host-file.ts";
@@ -93,28 +91,6 @@ function message(error: unknown): string {
 
 function issueKind(issue: LinearIssue): IssueKind {
   return issue.labels.some((label) => label.name === DECISION_LABEL) ? "needs-decision" : "checkin";
-}
-
-function askView(row: AskRow): AskView {
-  return { id: row.id, threadId: row.threadId, threadTitle: row.threadTitle, question: row.question, options: row.options, issue: row.issue, askedAt: row.askedAt };
-}
-
-function deliveryView(row: Undelivered): DeliveryView {
-  return {
-    id: row.id,
-    source: row.source,
-    ref: row.ref,
-    threadId: row.threadId,
-    label: row.label,
-    state: row.state,
-    error: row.error,
-    attempts: row.attempts,
-    createdAt: row.createdAt,
-  };
-}
-
-function recordView(row: Unposted): RecordView {
-  return { askId: row.askId, issue: row.issue, state: row.state, error: row.error, attempts: row.attempts };
 }
 
 export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
