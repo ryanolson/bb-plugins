@@ -25,7 +25,7 @@ bb k8s flags [--json]                # open flags for the steward's digest
 bb k8s flag clear <id>               # the steward clears a flag it reported
 ```
 
-k8s-guard calls these:
+k8s-guard calls these. Take a lease with `k8s-guard lease acquire`, which passes `--uid` and `--thread` for you.
 
 ```
 bb k8s lease acquire --cluster <c> --namespace <ns> --uid <uid> --thread <id> --gpu-type <t> --gpus <n> --hours <h>

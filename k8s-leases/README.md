@@ -31,7 +31,7 @@ Cluster names and machine ids are internal. They go only in settings, never in t
 | `firstRunApprovals` | `{}` | Clusters (profile names) whose first run Ryan approved. |
 | `multiNodeApprovals` | `[]` | `{cluster, namespace, thread, maxGpus, record}` entries that allow more than one node. |
 | `hosts` | `[]` | Machine ids whose host entry runs `k8s-guard`. |
-| `guardCommand` | `k8s-guard` | The guard on each host. |
+| `guardCommand` | `~/.agents/skills/k8s-clusters/scripts/k8s-guard` | The guard on each host: `~/path`, an absolute path, or a name on PATH. |
 | `bbServerUrl` | `http://127.0.0.1:38900` | `BB_SERVER_URL` for the `bb` CLI that the guard runs. Host entries get no `BB_*` variables. |
 | `kubeconfig` | empty | `KUBECONFIG` for the guard. Empty means inherit. |
 
@@ -54,7 +54,7 @@ sequenceDiagram
 - **One process decides.** Every `bb k8s` call runs in the bb server. Each check-and-write is one SQLite transaction with no await inside. So two hosts cannot take the same GPUs, and two writes cannot hold one slot.
 - **Acquire** confirms the namespace on a host first: its UID, and its `wcep.agent/thread` label, which must be the calling thread. Then it checks the cluster's profile (not `never`, `bot_can_write`, its GPU type, which must have a limit), the first-run approval, the hours, one node or a multi-node approval, a heartbeat in the last 10 minutes, the limit, and that no other lease holds the namespace.
 - **The slot.** `op begin` works only while the lease is active and its one slot is free or past its 2-minute deadline.
-- **Reconcile.** A schedule runs every minute. It probes each host, then inspects each lease's namespace on the freshest host, and fails over to the next one. An expired lease, or a lease whose thread bb reports archived, deleted or missing, moves to `revoking`. So does a lease whose namespace holds more GPUs than it leased. A revoking lease gets `k8s-guard expire` on every tick, and `down` after its grace deadline. A released lease gets `down` on every tick. A namespace whose `expires-at` differs from the lease gets `k8s-guard extend`.
+- **Reconcile.** A schedule runs every minute. It probes each host, then inspects each lease's namespace on the freshest host, and fails over to the next one. An expired lease, or a lease whose thread bb reports archived, deleted or missing, moves to `revoking`. So does a lease whose namespace holds more GPUs than it leased. A revoking lease gets `k8s-guard expire` on every tick, and `down` after its grace deadline. A released lease gets `down` on every tick. A namespace whose `expires-at` differs from the lease gets `k8s-guard extend`. `k8s-guard` decides where a namespace keeps its `expires-at`; the plugin reads it only through `inspect`.
 - **Teardown is narrow.** Writes always pass the lease's namespace UID. A namespace that is gone, or re-created with a new UID, ends the lease, and the new namespace gets no write.
 - **GPUs free late.** A lease frees its GPUs only when a host reports its namespace gone.
 - **Extend.** The panel lists every lease. Each active lease has an Extend button: +30 min, +1 h, +2 h, or a custom amount. The plugin moves the expiry, records the extension, and runs `k8s-guard extend` at once.

@@ -8,7 +8,7 @@ import { CLUSTER_A, THREAD_A, setup } from "./test-support.ts";
 /** Made-up profiles; the cluster's name differs from its kube context. */
 const PROFILES = {
   schema_version: 1,
-  bot: { user: "bot-example", kubeconfig: "/home/test/kubeconfig.yaml", developer: "test", namespace_prefix: "dyntest-", admission_namespace: "dyntest-admission" },
+  bot: { user: "bot-example", kubeconfig: "/home/test/kubeconfig.yaml", developer: "test", namespace_prefix: "dyntest-" },
   clusters: {
     "lab-a": { context: "proxy.example.test-lab-a", allowed: "first-choice", source: ["test"], bot_can_write: true, gpu_type: "gb300", gpus_per_node: 2 },
     "lab-qa": { context: "proxy.example.test-lab-qa", allowed: "qa-idle", source: ["test"], bot_can_write: true, gpu_type: "gb300", gpus_per_node: 4 },

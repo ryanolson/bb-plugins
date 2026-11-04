@@ -35,6 +35,11 @@ function run(command: string, argv: string[], env: NodeJS.ProcessEnv, timeoutMs:
   });
 }
 
+/** `~/...` on this host, for commands the k8s-clusters skill deploys under the home directory. */
+function expandHome(command: string): string {
+  return command.startsWith("~/") ? join(homedir(), command.slice(2)) : command;
+}
+
 /** Whether `command` is an executable, on PATH or by absolute path. */
 function findExecutable(command: string, path: string | undefined): string | null {
   const candidates = isAbsolute(command) ? [command] : (path ?? "").split(delimiter).filter(Boolean).map((dir) => join(dir, command));
@@ -53,7 +58,7 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
   const timeouts: HostTimeouts = { ...HOST_TIMEOUTS, ...options.timeoutMs };
 
   async function guard(method: GuardMethod, input: GuardTarget & { run: GuardRun }, signal: AbortSignal): Promise<GuardOutcome> {
-    const ran = await run(input.run.command, guardArgv(method, input), guardEnv(input.run, process.env), timeouts[method], signal);
+    const ran = await run(expandHome(input.run.command), guardArgv(method, input), guardEnv(input.run, process.env), timeouts[method], signal);
     if (ran.missing) return { ok: false, code: "guard_missing", error: `${input.run.command} is not on PATH` };
     if (ran.timedOut) return { ok: false, code: "guard_timeout", error: `k8s-guard ${method} ran past ${timeouts[method]} ms and was stopped` };
     return readGuardOutput(ran.exitCode, ran.stdout, ran.stderr);
@@ -68,8 +73,7 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
     contract: hostContract,
     handlers: {
       profiles: async ({ command }, context) => {
-        const path = command.startsWith("~/") ? join(homedir(), command.slice(2)) : command;
-        const ran = await run(path, ["--list"], process.env, timeouts.profiles, context.signal);
+        const ran = await run(expandHome(command), ["--list"], process.env, timeouts.profiles, context.signal);
         if (ran.missing) return { ok: false as const, code: "profiles_reader_missing", error: `${command} is not installed` };
         if (ran.timedOut) return { ok: false as const, code: "profiles_timeout", error: `${command} --list ran past ${timeouts.profiles} ms` };
         let parsed: unknown;
@@ -89,7 +93,7 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
         return { ok: true as const, value: profiles.data };
       },
       probe: async ({ run: settings }, context) => {
-        if (findExecutable(settings.command, process.env.PATH) === null) return { ok: false, detail: `${settings.command} is not on PATH` };
+        if (findExecutable(expandHome(settings.command), process.env.PATH) === null) return { ok: false, detail: `${settings.command} is not on PATH` };
         // The same path the guard takes to check its authority.
         const ran = await run("bb", ["k8s", "leases", "--json"], guardEnv(settings, process.env), timeouts.probe, context.signal);
         if (ran.missing) return { ok: false, detail: "bb is not on PATH" };

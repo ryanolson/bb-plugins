@@ -17,8 +17,8 @@ export const GPU_TYPE = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "not a GPU
 /** How the host entry runs `k8s-guard`, from the plugin's settings. */
 export const GUARD_RUN = z
   .object({
-    /** The guard executable: a bare name looked up on PATH, or an absolute path. */
-    command: z.string().regex(/^(\/[^\0]*|[A-Za-z0-9._-]+)$/),
+    /** The guard executable: a bare name looked up on PATH, an absolute path, or `~/...` on the host. */
+    command: z.string().regex(/^(~\/[^\0]*|\/[^\0]*|[A-Za-z0-9._-]+)$/),
     /** `BB_SERVER_URL` for the bb CLI the guard runs; host entries get no `BB_*` variables. */
     serverUrl: z.string().url(),
     /** `KUBECONFIG` for the guard, or null to inherit. */

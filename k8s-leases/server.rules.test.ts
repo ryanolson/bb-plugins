@@ -172,3 +172,11 @@ test("no host configured: acquire fails closed", async () => {
   const ns = world.cluster.create(CLUSTER_A, "dyntest-nohost", THREAD_A);
   assert.equal((await world.acquire(THREAD_A, ns, 1)).json.code, "enforcement_unhealthy");
 });
+
+test("the guard command defaults to where the k8s-clusters skill deploys it", async () => {
+  const world = await ready();
+  const ns = world.cluster.create(CLUSTER_A, "dyntest-guardpath", THREAD_A);
+  await world.acquire(THREAD_A, ns, 1);
+  const call = world.harness.inspection.experimental_hostRpcCalls.find((c) => c.method === "inspect");
+  assert.equal((call!.input as { run: { command: string } }).run.command, "~/.agents/skills/k8s-clusters/scripts/k8s-guard");
+});

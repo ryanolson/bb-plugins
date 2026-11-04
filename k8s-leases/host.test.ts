@@ -185,3 +185,19 @@ test("profiles: k8s-check --list, with ~ expanded, and its failure code kept", a
   assert.deepEqual([missing.ok, missing.code], [false, "profiles_reader_missing"]);
   await harness.experimental_dispose();
 });
+
+test("a guard command under ~ is expanded for the probe and for every guard call", async () => {
+  const harness = experimental_createHostEntryHarness(createHostEntry());
+  const savedHome = process.env.HOME;
+  process.env.HOME = dir.slice(0, dir.lastIndexOf("/"));
+  try {
+    const run = { ...RUN, command: `~/${dir.slice(dir.lastIndexOf("/") + 1)}/k8s-guard` };
+    assert.deepEqual(await harness.experimental_call("probe", { run }), { ok: true, detail: "ok" });
+    const result = (await harness.experimental_call("inspect", { ...target, run })) as { ok: boolean };
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls().at(-1)!.argv, ["inspect", "--context", "test-context-a", "dyntest-a"]);
+  } finally {
+    process.env.HOME = savedHome;
+  }
+  await harness.experimental_dispose();
+});

@@ -113,9 +113,9 @@ export const SETTINGS = {
   guardCommand: {
     type: "string",
     label: "k8s-guard command",
-    description: "The guard on each enforcement host: a name on PATH or an absolute path.",
-    default: "k8s-guard",
-    experimental_schema: z.string().regex(/^(\/[^\0]*|[A-Za-z0-9._-]+)$/, "Use a command name or an absolute path."),
+    description: "The guard on each enforcement host: ~/path, an absolute path, or a name on PATH. The k8s-clusters skill deploys it at the default.",
+    default: "~/.agents/skills/k8s-clusters/scripts/k8s-guard",
+    experimental_schema: z.string().regex(/^(~\/[^\0]*|\/[^\0]*|[A-Za-z0-9._-]+)$/, "Use ~/path, an absolute path, or a command name."),
   },
   bbServerUrl: {
     type: "string",

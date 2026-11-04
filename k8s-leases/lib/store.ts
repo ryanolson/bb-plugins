@@ -136,7 +136,7 @@ export const FAILURES_BEFORE_FLAG = 3;
 
 const LIVE = `state IN (${CHARGED.map((s) => `'${s}'`).join(",")})`;
 
-/** Lease times are whole seconds, so they survive an annotation written without milliseconds. */
+/** Lease times are whole seconds, so they survive an `expires-at` written without milliseconds. */
 export function wholeSecond(ms: number): number {
   return Math.floor(ms / 1000) * 1000;
 }
