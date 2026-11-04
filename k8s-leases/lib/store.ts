@@ -40,7 +40,7 @@ export const MIGRATIONS = [
     failures INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
   )`,
-  `CREATE UNIQUE INDEX leases_live_namespace ON leases(cluster, namespace) WHERE state IN ('active','revoking','releasing')`,
+  `CREATE UNIQUE INDEX leases_live_namespace ON leases(context, namespace) WHERE state IN ('active','revoking','releasing')`,
   `CREATE INDEX leases_state ON leases(state)`,
   `CREATE TABLE extensions (
     lease_id TEXT NOT NULL,
@@ -146,7 +146,8 @@ export function createStore(db: Db, now: () => number) {
     get: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE id = ?"),
     live: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE ${LIVE} ORDER BY created_at, id`),
     ended: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE NOT ${LIVE} ORDER BY COALESCE(ended_at, created_at) DESC, id LIMIT 200`),
-    liveOn: db.prepare<[string, string], LeaseRow>(`SELECT * FROM leases WHERE cluster = ? AND namespace = ? AND ${LIVE}`),
+    // By kube context, not profile name: two profile names for one context are one cluster.
+    liveOn: db.prepare<[string, string], LeaseRow>(`SELECT * FROM leases WHERE context = ? AND namespace = ? AND ${LIVE}`),
     used: db.prepare<[string], { used: number | null }>(`SELECT SUM(gpus) AS used FROM leases WHERE gpu_type = ? AND ${LIVE}`),
     usedAll: db.prepare<[], { gpu_type: string; used: number }>(`SELECT gpu_type, SUM(gpus) AS used FROM leases WHERE ${LIVE} GROUP BY gpu_type`),
     byThread: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE thread_id = ? AND state = 'active'"),
@@ -215,8 +216,8 @@ export function createStore(db: Db, now: () => number) {
       return q.byThread.all(thread);
     },
 
-    liveOn(cluster: string, namespace: string): LeaseRow | undefined {
-      return q.liveOn.get(cluster, namespace);
+    liveOn(context: string, namespace: string): LeaseRow | undefined {
+      return q.liveOn.get(context, namespace);
     },
 
     used(gpuType: string): number {
@@ -240,7 +241,7 @@ export function createStore(db: Db, now: () => number) {
         if (!freshHeartbeat(heartbeatMs, cfg.hosts)) {
           throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${heartbeatMs / 60_000} minutes.`);
         }
-        const held = q.liveOn.get(req.cluster, req.namespace);
+        const held = q.liveOn.get(req.context, req.namespace);
         if (held !== undefined) throw new Refusal("namespace_leased", `${req.namespace} on ${req.cluster} already has lease ${held.id} (${held.state}).`);
         const limit = cfg.limits[req.gpuType] ?? 0;
         const used = q.used.get(req.gpuType)?.used ?? 0;

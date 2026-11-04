@@ -4,10 +4,13 @@
 // frees its GPUs, only when a host reports its namespace gone or re-created.
 // A lookup that merely failed changes nothing and is retried next tick.
 //
-// Two lanes per lease. The step (inspect, then expire or extend) is short
-// and runs every tick. `down` can run for minutes, so it runs on its own and
-// the step waits for it only briefly: a slow deletion never stops the
-// scale-to-0 of this lease or any other.
+// Every tick runs a step for every live lease, even one whose last step is
+// still waiting on a slow host: a step only reads, reduces, or syncs, and it
+// re-reads its lease after inspect, so two at once are safe. The host call
+// orders a stalled host last, so the new step reaches a healthy one. `down`
+// can run for minutes, so it runs on its own lane, once per lease, and a step
+// waits for it only briefly. `extend` runs one at a time per lease, so an
+// older expiry can never land after a newer one.
 import type { GuardFailure, Inspect, WriteMethod } from "./contract.ts";
 import type { LeaseRow, Store } from "./store.ts";
 import type { Config } from "./settings.ts";
@@ -61,10 +64,12 @@ export async function within(work: Promise<unknown>, ms: number): Promise<boolea
 
 export function createEnforcer(deps: EnforcerDeps) {
   const { store, now } = deps;
-  /** The step in flight for each lease, so steps on one lease run one at a time. */
-  const steps = new Map<string, Promise<void>>();
   /** The `down` in flight for each lease. */
   const deletions = new Map<string, Promise<boolean>>();
+  /** Leases whose last `down` failed: a working `expire` does not reset their failure count. */
+  const downFailed = new Set<string>();
+  /** The `extend` chain of each lease. */
+  const extending = new Map<string, Promise<boolean>>();
 
   function fail(lease: LeaseRow, what: string): void {
     deps.log(`lease ${lease.id}: ${what}`);
@@ -85,13 +90,28 @@ export function createEnforcer(deps: EnforcerDeps) {
     return false;
   }
 
-  /** Start the lease's `down`, or join the one already running. */
-  function down(lease: LeaseRow): Promise<boolean> {
-    const running = deletions.get(lease.id);
-    if (running !== undefined) return running;
-    const started = write("down", lease).finally(() => deletions.delete(lease.id));
+  /** Start the lease's `down`, or null when one is already running. */
+  function down(lease: LeaseRow): Promise<boolean> | null {
+    if (deletions.has(lease.id)) return null;
+    const started = write("down", lease).then((ok) => {
+      if (ok) downFailed.delete(lease.id);
+      else downFailed.add(lease.id);
+      return ok;
+    });
+    void started.finally(() => deletions.delete(lease.id));
     deletions.set(lease.id, started);
     return started;
+  }
+
+  /** Sync the namespace's expires-at to the lease, after any sync already running for it. */
+  function extend(lease: LeaseRow): Promise<boolean> {
+    const previous = extending.get(lease.id) ?? Promise.resolve(true);
+    const next = previous.then(() => write("extend", store.find(lease.id) ?? lease));
+    extending.set(lease.id, next);
+    void next.finally(() => {
+      if (extending.get(lease.id) === next) extending.delete(lease.id);
+    });
+    return next;
   }
 
   async function step(id: string): Promise<void> {
@@ -134,13 +154,14 @@ export function createEnforcer(deps: EnforcerDeps) {
 
     if (lease.state === "active") {
       const allocation = Math.max(ns.dgd_gpus, ns.pod_gpus);
-      const wrongType = allocation > 0 && ns.gpu_type !== null && ns.gpu_type !== lease.gpu_type;
+      // GPUs of an unknown type cannot be charged to this lease's type.
+      const wrongType = allocation > 0 && ns.gpu_type !== lease.gpu_type;
       if (allocation <= lease.gpus && !wrongType) {
-        if (nsExpires === lease.expires_at || (await write("extend", lease))) store.clearFailures(id);
+        if (nsExpires === lease.expires_at || (await extend(lease))) store.clearFailures(id);
         return;
       }
       const what = wrongType
-        ? `${allocation} ${ns.gpu_type} GPUs on a ${lease.gpu_type} lease`
+        ? `${allocation} GPUs of type ${ns.gpu_type ?? "unknown"} on a ${lease.gpu_type} lease`
         : `${allocation} GPUs on a lease of ${lease.gpus} (DGD specs ${ns.dgd_gpus}, pods ${ns.pod_gpus})`;
       store.flag(lease.id, "over_allocation", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): ${what}. Revoked; DGDs scaled to 0.`);
       lease = store.revoke(lease.id, "over_allocation", now() + cfg.graceMs);
@@ -151,47 +172,35 @@ export function createEnforcer(deps: EnforcerDeps) {
     let worked = await write("expire", lease);
     const deleteNow = lease.state === "releasing" || (lease.grace_deadline !== null && now() >= lease.grace_deadline);
     if (deleteNow) {
+      // Wait only for a deletion this step started; one already running goes on alone.
       const deletion = down(lease);
-      if (await within(deletion, deps.downWaitMs)) worked = (await deletion) && worked;
+      if (deletion !== null && (await within(deletion, deps.downWaitMs))) worked = (await deletion) && worked;
     }
-    if (worked) store.clearFailures(id);
+    // A deletion still running, or one that failed, keeps the failures counted.
+    if (worked && !downFailed.has(id) && !deletions.has(id)) store.clearFailures(id);
   }
 
-  /** Queue a step behind the one in flight, if any. */
-  function queue(id: string): Promise<void> {
-    const previous = steps.get(id) ?? Promise.resolve();
-    const next = previous
-      .then(() => step(id))
-      .catch((error: unknown) => deps.log(`lease ${id}: reconcile failed: ${message(error)}`))
-      .finally(() => {
-        if (steps.get(id) === next) steps.delete(id);
-      });
-    steps.set(id, next);
-    return next;
+  async function run(id: string): Promise<void> {
+    try {
+      await step(id);
+    } catch (error) {
+      deps.log(`lease ${id}: reconcile failed: ${message(error)}`);
+    }
   }
 
   return {
-    /**
-     * Reconcile one lease. A tick skips a lease whose step is still running
-     * (it comes round again next tick); a release or an extension waits its
-     * turn, so its change is acted on.
-     */
-    reconcile(id: string, mode: "tick" | "now"): Promise<void> | null {
-      if (mode === "tick" && steps.has(id)) return null;
-      return queue(id);
-    },
+    /** Reconcile one lease now. */
+    reconcile: run,
 
     /** Move the namespace's expires-at to the lease's expiry now. True when the guard did it. */
-    async sync(lease: LeaseRow): Promise<boolean> {
-      return write("extend", lease);
-    },
+    sync: extend,
 
     /** Revoke every active lease of a thread bb reports gone, then reconcile them. */
     async threadGone(threadId: string, fate: "archived" | "deleted"): Promise<void> {
       const cfg = await deps.config();
       for (const lease of store.activeOfThread(threadId)) {
         store.revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs);
-        await queue(lease.id);
+        await run(lease.id);
       }
     },
   };
