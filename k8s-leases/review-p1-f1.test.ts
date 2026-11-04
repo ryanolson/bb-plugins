@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Snapshot } from "./lib/contract.ts";
 import { HOST_ONE, HOST_TWO, HOUR, MIN, THREAD_A, setup } from "./test-support.ts";
 
 test("a host with broken Kubernetes access cannot prevent a healthy host from expiring a lease", async () => {
@@ -26,7 +27,7 @@ test("a host with broken Kubernetes access cannot prevent a healthy host from ex
     world.clock.advance(MIN);
   }
   assert.equal((await world.cli(["lease", "show", id])).json.state, "revoking");
-  const snapshot = await world.harness.behavior.callRpc("snapshot", null);
+  const snapshot = (await world.harness.behavior.callRpc("snapshot", null)) as Snapshot;
   assert.ok(snapshot.hosts.find((host) => host.hostId === HOST_TWO)?.ok, "the second host remains healthy");
   assert.equal(world.cluster.inspect(ns).dgd_gpus, 0, `DGDs still run after three ticks; inspected hosts: ${inspectedHosts.join(", ")}`);
 });

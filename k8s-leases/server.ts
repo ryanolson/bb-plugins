@@ -26,7 +26,7 @@ import {
   type Profiles,
   type Snapshot,
 } from "./lib/contract.ts";
-import { HostUnreachable, createEnforcer, type HostCall, type ThreadFate } from "./lib/enforcer.ts";
+import { HostUnreachable, createEnforcer, within, type HostCall, type ThreadFate } from "./lib/enforcer.ts";
 import { checkAsk } from "./lib/policy.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { SETTINGS, parseConfig, type Config } from "./lib/settings.ts";
@@ -36,13 +36,17 @@ import { MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
 export const HEARTBEAT_WINDOW_MS = 10 * 60_000;
 /** The op slot's deadline. */
 export const SLOT_MS = 2 * 60_000;
-/** Leases reconciled at once in a tick. */
-const PARALLEL = 4;
+/** A tick waits this long for its work; the rest goes on, and the next tick skips what is still running. */
+const TICK_WAIT_MS = 45_000;
+/** A reconcile step waits this long for a `down`; the deletion goes on alone after that. */
+const DOWN_WAIT_MS = 20_000;
 
 export interface K8sLeasesOptions {
   now?: () => number;
   newLeaseId?: () => string;
   newToken?: () => string;
+  tickWaitMs?: number;
+  downWaitMs?: number;
 }
 
 function message(error: unknown): string {
@@ -124,6 +128,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
   const now = options.now ?? Date.now;
   const newLeaseId = options.newLeaseId ?? (() => `lse_${randomBytes(8).toString("hex")}`);
   const newToken = options.newToken ?? (() => `tok_${randomUUID()}`);
+  const tickWaitMs = options.tickWaitMs ?? TICK_WAIT_MS;
+  const downWaitMs = options.downWaitMs ?? DOWN_WAIT_MS;
 
   return async function k8sLeases(bb: BbPluginApi): Promise<void> {
     const settings = bb.settings.define(SETTINGS);
@@ -142,10 +148,16 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       return [...cfg.hosts].sort((a, b) => (seen.get(b) ?? -1) - (seen.get(a) ?? -1));
     }
 
-    /** Call the host entry, failing over to the next host when one cannot be reached. */
+    /**
+     * Call the host entry, failing over to the next host when one cannot be
+     * reached or its guard fails: a host whose own Kubernetes access broke
+     * must not stop a healthy one. Only `not_found` is taken as the answer at
+     * once. When every host fails, the first guard failure is returned.
+     */
     const hostCall: HostCall = async (method, lease) => {
       const cfg = await config();
       const attempts: string[] = [];
+      let firstFailure: { hostId: string; result: unknown } | null = null;
       for (const hostId of hostOrder(cfg)) {
         try {
           const input = { run: cfg.run, context: lease.context, namespace: lease.namespace, uid: lease.uid, leaseId: lease.id };
@@ -153,14 +165,19 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             method === "inspect"
               ? await host.call("inspect", { run: cfg.run, context: lease.context, namespace: lease.namespace }, { hostId, timeoutMs: HOST_TIMEOUTS.inspect + HOST_CALL_MARGIN_MS })
               : await host.call(method, input, { hostId, timeoutMs: HOST_TIMEOUTS[method] + HOST_CALL_MARGIN_MS });
-          if (!result.ok && result.code === "guard_missing") {
-            attempts.push(`${hostId}: ${result.error}`);
+          if (!result.ok && result.code !== "not_found") {
+            attempts.push(`${hostId}: ${result.code}: ${result.error}`);
+            firstFailure ??= { hostId, result };
             continue;
           }
           return { hostId, result } as never;
         } catch (error) {
           attempts.push(`${hostId}: ${message(error)}`);
         }
+      }
+      if (firstFailure !== null) {
+        if (attempts.length > 1) bb.log.warn(`k8s-guard ${method} on ${lease.namespace} failed on every host: ${attempts.join("; ")}`);
+        return firstFailure as never;
       }
       throw new HostUnreachable(attempts);
     };
@@ -207,42 +224,38 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       return parsed.success ? parsed.data : null;
     }
 
-    const enforcer = createEnforcer({ store, config, now, host: hostCall, threadFate, log: (text) => bb.log.warn(text) });
+    const enforcer = createEnforcer({ store, config, now, host: hostCall, threadFate, log: (text) => bb.log.warn(text), downWaitMs });
 
-    let ticking = false;
+    /** Probes in flight, by host, so a hung host is not probed twice at once. */
+    const probing = new Set<string>();
+
+    /**
+     * One tick. There is no lock over the whole tick: each lease's step runs
+     * on its own, a lease whose step is still running is skipped, and the
+     * tick waits for its steps at most `tickWaitMs`. So one slow lease or
+     * host never delays the others past the next tick.
+     */
     async function tick(): Promise<void> {
-      if (ticking) return;
-      ticking = true;
-      try {
-        const cfg = await config();
-        await Promise.all(
-          cfg.hosts.map(async (hostId) => {
-            try {
-              const probe = await host.call("probe", { run: cfg.run }, { hostId, timeoutMs: HOST_TIMEOUTS.probe + HOST_CALL_MARGIN_MS });
-              store.heartbeat(hostId, probe.ok, probe.detail);
-            } catch (error) {
-              store.heartbeat(hostId, false, message(error));
-            }
-          }),
-        );
-        await refreshProfiles(cfg);
-        store.sweepExpired(cfg.graceMs);
-        const queue = store.live().map((row) => row.id);
-        await Promise.all(
-          Array.from({ length: Math.min(PARALLEL, queue.length) }, async () => {
-            for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
-              try {
-                await enforcer.reconcile(id);
-              } catch (error) {
-                bb.log.error(`reconcile of ${id} failed: ${message(error)}`);
-              }
-            }
-          }),
-        );
-      } finally {
-        ticking = false;
-        publish();
-      }
+      const cfg = await config();
+      const probes = cfg.hosts
+        .filter((hostId) => !probing.has(hostId))
+        .map(async (hostId) => {
+          probing.add(hostId);
+          try {
+            const probe = await host.call("probe", { run: cfg.run }, { hostId, timeoutMs: HOST_TIMEOUTS.probe + HOST_CALL_MARGIN_MS });
+            store.heartbeat(hostId, probe.ok, probe.detail);
+          } catch (error) {
+            store.heartbeat(hostId, false, message(error));
+          } finally {
+            probing.delete(hostId);
+          }
+        });
+      await within(Promise.all(probes), tickWaitMs);
+      await within(refreshProfiles(cfg), tickWaitMs);
+      store.sweepExpired(cfg.graceMs);
+      const started = store.live().flatMap((row) => enforcer.reconcile(row.id, "tick") ?? []);
+      await within(Promise.all(started), tickWaitMs);
+      publish();
     }
 
     async function acquire(input: Record<string, unknown>, ctx: PluginCliContext) {
@@ -257,7 +270,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const gpus = parsed(z.number().int().min(1), input.gpus, "--gpus");
       const hours = parsed(z.coerce.number().positive().finite(), input.hours, "--hours");
       const cfg = await config();
-      const { context, multiNode } = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, cfg, currentProfiles() ?? (await refreshProfiles(cfg)));
+      const { context, approvals } = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, cfg, currentProfiles() ?? (await refreshProfiles(cfg)));
       // Cheap checks first; the transaction checks them all again.
       if (!store.freshHeartbeat(HEARTBEAT_WINDOW_MS, cfg.hosts)) {
         throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${HEARTBEAT_WINDOW_MS / 60_000} minutes.`);
@@ -291,7 +304,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       if (allocation > 0 && ns.gpu_type !== null && ns.gpu_type !== gpuType) {
         throw new Refusal("gpu_type_mismatch", `${namespace} holds ${ns.gpu_type} GPUs, not ${gpuType}.`);
       }
-      const row = store.acquire({ id: newLeaseId(), thread, cluster, context, namespace, uid, gpuType, gpus, hours, multiNode }, cfg, HEARTBEAT_WINDOW_MS);
+      const row = store.acquire({ id: newLeaseId(), thread, cluster, context, namespace, uid, gpuType, gpus, hours, approvals }, cfg, HEARTBEAT_WINDOW_MS);
       publish();
       return { lease_id: row.id, expires_at: iso(row.expires_at) };
     }
@@ -368,7 +381,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
                 const row = store.release(id, ctx.threadId, await config());
                 publish();
                 // A release tears down at once: one reconcile now, not at the next tick.
-                if (row.state === "releasing") await enforcer.reconcile(id);
+                if (row.state === "releasing") await enforcer.reconcile(id, "now");
                 publish();
                 return { state: store.find(id)!.state };
               }),
@@ -388,7 +401,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
           leases: cliCommand({
             summary: "List what runs where: live leases, or every lease with --all",
             options: {
-              all: { type: "boolean", description: "Include released and torn-down leases (the latest 500)" },
+              all: { type: "boolean", description: "Include released and torn-down leases (the latest 200)" },
               json: { type: "boolean", description: "Print JSON" },
             },
             run: async (input) => {

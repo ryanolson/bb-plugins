@@ -44,7 +44,7 @@ export function clusterRule(name: string, cfg: Config, profiles: Profiles | null
 }
 
 /** Throws the first rule the ask breaks; returns the cluster's context and whether the lease spans nodes. */
-export function checkAsk(ask: LeaseAsk, cfg: Config, profiles: Profiles | null): { context: string; multiNode: boolean } {
+export function checkAsk(ask: LeaseAsk, cfg: Config, profiles: Profiles | null): { context: string; approvals: string[] | null } {
   const rule = clusterRule(ask.cluster, cfg, profiles);
   if (cfg.firstRuns[ask.cluster] === undefined) {
     throw new Refusal("first_run_unapproved", `The first run on ${ask.cluster} needs Ryan's approval.`);
@@ -55,12 +55,12 @@ export function checkAsk(ask: LeaseAsk, cfg: Config, profiles: Profiles | null):
   const perNode = rule.gpusPerNode[ask.gpuType];
   if (perNode === undefined) throw new Refusal("gpu_type_not_on_cluster", `${ask.cluster} has no ${ask.gpuType} nodes in its profile.`);
   if (cfg.limits[ask.gpuType] === undefined) throw new Refusal("gpu_type_no_limit", `There is no GPU limit for ${ask.gpuType}, so it cannot be leased.`);
-  if (ask.gpus <= perNode) return { context: rule.context, multiNode: false };
-  const approved = cfg.multiNode.some(
-    (a) => a.cluster === ask.cluster && a.namespace === ask.namespace && a.thread === ask.thread && ask.gpus <= a.maxGpus,
-  );
-  if (!approved) {
+  if (ask.gpus <= perNode) return { context: rule.context, approvals: null };
+  const approvals = cfg.multiNode
+    .filter((a) => a.cluster === ask.cluster && a.namespace === ask.namespace && a.thread === ask.thread && ask.gpus <= a.maxGpus)
+    .map((a) => JSON.stringify([a.cluster, a.namespace, a.thread, a.maxGpus, a.record]));
+  if (approvals.length === 0) {
     throw new Refusal("multi_node_unapproved", `${ask.gpus} ${ask.gpuType} GPUs is more than one node holds (${perNode}); that needs Ryan's multi-node approval.`);
   }
-  return { context: rule.context, multiNode: true };
+  return { context: rule.context, approvals };
 }

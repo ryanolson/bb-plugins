@@ -8,7 +8,7 @@ test("agent renewal cannot shorten a panel extension and make the offline timer 
   const { id, ns, result } = await world.lease(THREAD_A, "review-f6-renew", 4, { hours: 2 });
   assert.equal(result.code, 0);
   world.cluster.setDgd(ns, "worker", 4);
-  const extended = await world.harness.behavior.callRpc("extend", { leaseId: id, minutes: 360 });
+  const extended = (await world.harness.behavior.callRpc("extend", { leaseId: id, minutes: 360 })) as { expiresAt: number; synced: boolean };
   assert.equal(extended.synced, true);
   assert.equal(extended.expiresAt, world.clock.now() + 8 * HOUR);
   assert.equal(Date.parse(ns.expiresAt!), extended.expiresAt);

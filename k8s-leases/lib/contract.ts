@@ -33,7 +33,8 @@ const LEASE_TARGET = { ...TARGET, uid: UID, leaseId: LEASE_ID };
 
 /** What `k8s-guard inspect` reports, per the guard contract. Extra fields are ignored. */
 export const INSPECT = z.object({
-  uid: z.string(),
+  /** Checked as a UID: a malformed one must read as a failed lookup, never as a re-created namespace. */
+  uid: UID,
   thread: z.string().nullable(),
   expires_at: z.string().nullable(),
   dgd_gpus: z.number().int().min(0),

@@ -51,6 +51,7 @@ export const MIGRATIONS = [
     expires_after INTEGER NOT NULL
   )`,
   `CREATE TABLE profiles (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL)`,
+  `CREATE TABLE approvals_used (approval TEXT PRIMARY KEY, lease_id TEXT NOT NULL, at INTEGER NOT NULL)`,
   `CREATE TABLE heartbeats (host_id TEXT PRIMARY KEY, last_ok_at INTEGER, last_try_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT NOT NULL)`,
   `CREATE TABLE flags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,7 +127,8 @@ export interface AcquireRequest {
   gpuType: string;
   gpus: number;
   hours: number;
-  multiNode: boolean;
+  /** For a multi-node lease, the approvals that match it; the first one not yet used is used up. */
+  approvals: string[] | null;
 }
 
 /** Flags raised after this many failed reconciles in a row. */
@@ -143,7 +145,7 @@ export function createStore(db: Db, now: () => number) {
   const q = {
     get: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE id = ?"),
     live: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE ${LIVE} ORDER BY created_at, id`),
-    all: db.prepare<[], LeaseRow>("SELECT * FROM leases ORDER BY created_at DESC, id LIMIT 500"),
+    ended: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE NOT ${LIVE} ORDER BY COALESCE(ended_at, created_at) DESC, id LIMIT 200`),
     liveOn: db.prepare<[string, string], LeaseRow>(`SELECT * FROM leases WHERE cluster = ? AND namespace = ? AND ${LIVE}`),
     used: db.prepare<[string], { used: number | null }>(`SELECT SUM(gpus) AS used FROM leases WHERE gpu_type = ? AND ${LIVE}`),
     usedAll: db.prepare<[], { gpu_type: string; used: number }>(`SELECT gpu_type, SUM(gpus) AS used FROM leases WHERE ${LIVE} GROUP BY gpu_type`),
@@ -204,8 +206,9 @@ export function createStore(db: Db, now: () => number) {
       return q.live.all();
     },
 
+    /** Every live lease, then the latest 200 ended ones. */
     all(): LeaseRow[] {
-      return q.all.all();
+      return [...q.live.all(), ...q.ended.all()];
     },
 
     activeOfThread(thread: string): LeaseRow[] {
@@ -244,10 +247,18 @@ export function createStore(db: Db, now: () => number) {
         if (used + req.gpus > limit) {
           throw new Refusal("over_limit", `${req.gpus} ${req.gpuType} GPUs would make ${used + req.gpus}; the limit is ${limit} (${used} held).`);
         }
+        if (req.approvals !== null) {
+          const used = db.prepare<[string], { lease_id: string }>("SELECT lease_id FROM approvals_used WHERE approval = ?");
+          const free = req.approvals.find((key) => used.get(key) === undefined);
+          if (free === undefined) {
+            throw new Refusal("multi_node_unapproved", `Each multi-node approval for ${req.namespace} is used already; one approval covers one lease.`);
+          }
+          db.prepare("INSERT INTO approvals_used (approval, lease_id, at) VALUES (?, ?, ?)").run(free, req.id, t);
+        }
         db.prepare(
           `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
-        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.multiNode ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000));
+        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.approvals !== null ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000));
         return mustGet(req.id);
       }).immediate();
     },
@@ -282,13 +293,15 @@ export function createStore(db: Db, now: () => number) {
       }).immediate();
     },
 
-    /** The owner returns the lease. Releasing a lease already in teardown changes nothing. */
+    /** The owner returns the lease, and a revoking one skips the rest of its grace. Otherwise nothing changes. */
     release(id: string, thread: string | undefined, cfg: Config): LeaseRow {
       return db.transaction(() => {
         sweepExpired(cfg.graceMs);
         const row = owned(id, thread);
-        if (row.state !== "active") return row;
-        db.prepare("UPDATE leases SET state = 'releasing', reason = 'released', revoked_at = ?, op_token = NULL, op_deadline = NULL WHERE id = ?").run(now(), id);
+        if (row.state !== "active" && row.state !== "revoking") return row;
+        db.prepare(
+          "UPDATE leases SET state = 'releasing', reason = COALESCE(reason, 'released'), revoked_at = COALESCE(revoked_at, ?), op_token = NULL, op_deadline = NULL WHERE id = ?",
+        ).run(now(), id);
         return mustGet(id);
       }).immediate();
     },
@@ -302,6 +315,10 @@ export function createStore(db: Db, now: () => number) {
         if (row.renewals >= cfg.maxRenewals) throw new Refusal("renewals_used", `Lease ${id} has used its ${cfg.maxRenewals} renewal(s).`);
         const t = now();
         const after = wholeSecond(Math.min(row.expires_at + row.hours * 3_600_000, t + cfg.maxLeaseMs));
+        // After a panel extension the hour limit could pull the expiry in; a renewal only ever adds time.
+        if (after <= row.expires_at) {
+          throw new Refusal("renew_not_needed", `Lease ${id} already runs until ${new Date(row.expires_at).toISOString()}; a renewal would not add time.`);
+        }
         db.prepare("UPDATE leases SET expires_at = ?, renewals = renewals + 1 WHERE id = ?").run(after, id);
         db.prepare("INSERT INTO extensions (lease_id, at, minutes, source, expires_before, expires_after) VALUES (?, ?, ?, 'renew', ?, ?)").run(
           id,
