@@ -3,9 +3,10 @@
 // and returns what the guard said. It decides nothing; the server does.
 import { execFile } from "node:child_process";
 import { accessSync, constants } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { HOST_TIMEOUTS, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
+import { HOST_TIMEOUTS, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
 import { guardArgv, guardEnv, readGuardOutput, readInspect, type GuardMethod, type GuardOutcome, type GuardTarget } from "./lib/guard.ts";
 
 
@@ -66,6 +67,27 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
   return experimental_defineHostEntry({
     contract: hostContract,
     handlers: {
+      profiles: async ({ command }, context) => {
+        const path = command.startsWith("~/") ? join(homedir(), command.slice(2)) : command;
+        const ran = await run(path, ["--list"], process.env, timeouts.profiles, context.signal);
+        if (ran.missing) return { ok: false as const, code: "profiles_reader_missing", error: `${command} is not installed` };
+        if (ran.timedOut) return { ok: false as const, code: "profiles_timeout", error: `${command} --list ran past ${timeouts.profiles} ms` };
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(ran.stdout);
+        } catch {
+          return { ok: false as const, code: "profiles_output", error: `${command} --list printed no JSON (exit ${ran.exitCode})` };
+        }
+        if (ran.exitCode !== 0) {
+          const failures = (parsed as { failures?: Array<{ code?: unknown; message?: unknown }> }).failures;
+          const first = Array.isArray(failures) ? failures[0] : undefined;
+          const code = typeof first?.code === "string" && /^[a-z0-9_]{1,64}$/.test(first.code) ? first.code : "profiles_invalid";
+          return { ok: false as const, code, error: typeof first?.message === "string" ? first.message.slice(0, 500) : `${command} --list exited ${ran.exitCode}` };
+        }
+        const profiles = PROFILES.safeParse(parsed);
+        if (!profiles.success) return { ok: false as const, code: "profiles_invalid", error: profiles.error.message.slice(0, 500) };
+        return { ok: true as const, value: profiles.data };
+      },
       probe: async ({ run: settings }, context) => {
         if (findExecutable(settings.command, process.env.PATH) === null) return { ok: false, detail: `${settings.command} is not on PATH` };
         // The same path the guard takes to check its authority.

@@ -48,4 +48,4 @@ A lease frees its GPUs only when a host reports its namespace gone.
 
 ## Refusal codes of acquire
 
-`not_your_thread`, `cluster_not_allowed`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`.
+`not_your_thread`, `cluster_not_allowed`, `cluster_never`, `cluster_read_only`, `cluster_profile_incomplete`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `gpu_type_no_limit`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`.

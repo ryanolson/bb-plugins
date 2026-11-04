@@ -4,8 +4,8 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-/** A kube context name. A leading `-` is refused so it can never read as a flag. */
-export const CLUSTER = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,252}$/, "not a cluster (kube context) name");
+/** A cluster's profile name, or a kube context. A leading `-` is refused so it can never read as a flag. */
+export const CLUSTER = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,252}$/, "not a cluster or kube context name");
 /** A Kubernetes namespace name (RFC 1123 label). */
 export const NAMESPACE = z.string().regex(/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/, "not a namespace name");
 /** A Kubernetes object UID. */
@@ -27,7 +27,8 @@ export const GUARD_RUN = z
   .strict();
 export type GuardRun = z.infer<typeof GUARD_RUN>;
 
-const TARGET = { run: GUARD_RUN, cluster: CLUSTER, namespace: NAMESPACE };
+/** Every guard call names the kube context (`--context`), never the profile name. */
+const TARGET = { run: GUARD_RUN, context: CLUSTER, namespace: NAMESPACE };
 const LEASE_TARGET = { ...TARGET, uid: UID, leaseId: LEASE_ID };
 
 /** What `k8s-guard inspect` reports, per the guard contract. Extra fields are ignored. */
@@ -42,6 +43,25 @@ export const INSPECT = z.object({
 });
 export type Inspect = z.infer<typeof INSPECT>;
 
+/**
+ * The cluster profiles (schema 1), as `k8s-check --list` prints them. Only
+ * the keys the plugin reads are checked; the reader owns the rest.
+ */
+export const PROFILES = z.object({
+  schema_version: z.literal(1),
+  clusters: z.record(
+    CLUSTER,
+    z.object({
+      context: CLUSTER,
+      allowed: z.enum(["first-choice", "qa-idle", "never"]),
+      bot_can_write: z.boolean().optional(),
+      gpu_type: z.string().optional(),
+      gpus_per_node: z.number().int().positive().optional(),
+    }),
+  ),
+});
+export type Profiles = z.infer<typeof PROFILES>;
+
 /** A guard failure keeps its code, so `not_found` is never mistaken for a lookup that failed. */
 const FAILURE = z.object({ ok: z.literal(false), code: z.string(), error: z.string() }).strict();
 export type GuardFailure = z.infer<typeof FAILURE>;
@@ -51,6 +71,12 @@ export const hostContract = defineRpcContract({
   probe: {
     input: z.object({ run: GUARD_RUN }).strict(),
     output: z.object({ ok: z.boolean(), detail: z.string() }).strict(),
+    experimental_retryable: true,
+  },
+  /** The host's cluster profiles, read with `k8s-check --list`. */
+  profiles: {
+    input: z.object({ command: z.string().regex(/^(~\/|\/)[^\0]*$|^[A-Za-z0-9._-]+$/) }).strict(),
+    output: z.union([z.object({ ok: z.literal(true), value: PROFILES }).strict(), FAILURE]),
     experimental_retryable: true,
   },
   inspect: {
@@ -75,7 +101,7 @@ export type HostMethod = keyof typeof hostContract;
 
 export type HostTimeouts = Record<HostMethod, number>;
 /** How long each guard run may take on the host. `down` runs the runbook's teardown section, then deletes. */
-export const HOST_TIMEOUTS: HostTimeouts = { probe: 20_000, inspect: 60_000, expire: 120_000, extend: 60_000, down: 600_000 };
+export const HOST_TIMEOUTS: HostTimeouts = { profiles: 20_000, probe: 20_000, inspect: 60_000, expire: 120_000, extend: 60_000, down: 600_000 };
 /** The server waits this much longer than the host, so the host's own timeout reports first. */
 export const HOST_CALL_MARGIN_MS = 15_000;
 export type WriteMethod = "expire" | "down" | "extend";

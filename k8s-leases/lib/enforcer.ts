@@ -22,7 +22,7 @@ export class HostUnreachable extends Error {
 
 export type HostCall = <M extends "inspect" | WriteMethod>(
   method: M,
-  lease: Pick<LeaseRow, "cluster" | "namespace" | "uid" | "id">,
+  lease: Pick<LeaseRow, "context" | "namespace" | "uid" | "id">,
 ) => Promise<{ hostId: string; result: M extends "inspect" ? { ok: true; value: Inspect } | GuardFailure : { ok: true } | GuardFailure }>;
 
 export interface EnforcerDeps {

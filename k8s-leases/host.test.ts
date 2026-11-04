@@ -63,6 +63,13 @@ if (mode === "bb_down") { process.stderr.write("Error: Cannot connect to BB serv
 process.stdout.write("[]");
 `,
   );
+  script(
+    "k8s-check",
+    `
+if (mode === "profiles_bad") { process.stdout.write(JSON.stringify({ failures: [{ code: "profiles_invalid", message: "unknown key gpu_typo" }] })); process.exit(1); }
+process.stdout.write(JSON.stringify({ schema_version: 1, bot: { user: "bot-x" }, clusters: { "lab-a": { context: "proxy.example.test-lab-a", allowed: "first-choice", source: ["t"], bot_can_write: true, gpu_type: "gb300", gpus_per_node: 4 } } }));
+`,
+  );
   process.env.PATH = dir;
 });
 
@@ -76,7 +83,7 @@ after(() => {
   if (dir.startsWith(join(tmpdir(), "k8s-leases-host-test-"))) rmSync(dir, { recursive: true, force: true });
 });
 
-const target = { run: RUN, cluster: "test-cluster-a", namespace: "dyntest-a" };
+const target = { run: RUN, context: "test-context-a", namespace: "dyntest-a" };
 const leaseTarget = { ...target, uid: UID, leaseId: "lse_test000001" };
 
 test("inspect runs the guard with an explicit --context, and the bb server URL and kubeconfig", async () => {
@@ -86,7 +93,7 @@ test("inspect runs the guard with an explicit --context, and the bb server URL a
     ok: true,
     value: { uid: UID, thread: "thr_aaaa1111", expires_at: "2026-11-05T12:00:00Z", dgd_gpus: 4, pod_gpus: 2, gpu_type: "gb300", gpu_pods_left: 1 },
   });
-  assert.deepEqual(calls(), [{ name: "k8s-guard", argv: ["inspect", "--context", "test-cluster-a", "dyntest-a"], server: RUN.serverUrl, kubeconfig: RUN.kubeconfig }]);
+  assert.deepEqual(calls(), [{ name: "k8s-guard", argv: ["inspect", "--context", "test-context-a", "dyntest-a"], server: RUN.serverUrl, kubeconfig: RUN.kubeconfig }]);
   await harness.experimental_dispose();
 });
 
@@ -97,7 +104,7 @@ test("expire, down and extend pass the namespace UID and the lease", async () =>
   }
   assert.deepEqual(
     calls().map((c) => c.argv),
-    ["expire", "down", "extend"].map((m) => [m, "--context", "test-cluster-a", "dyntest-a", "--uid", UID, "--lease", "lse_test000001"]),
+    ["expire", "down", "extend"].map((m) => [m, "--context", "test-context-a", "dyntest-a", "--uid", UID, "--lease", "lse_test000001"]),
   );
   await harness.experimental_dispose();
 });
@@ -126,7 +133,7 @@ test("a guard that hangs is stopped at the deadline", async () => {
 test("names that could read as flags are refused before any process runs", async () => {
   const harness = experimental_createHostEntryHarness(createHostEntry());
   await assert.rejects(harness.experimental_call("inspect", { ...target, namespace: "--all-namespaces" }));
-  await assert.rejects(harness.experimental_call("inspect", { ...target, cluster: "-A" }));
+  await assert.rejects(harness.experimental_call("inspect", { ...target, context: "-A" }));
   await assert.rejects(harness.experimental_call("down", { ...leaseTarget, uid: "--force" }));
   assert.deepEqual(calls(), []);
   await harness.experimental_dispose();
@@ -156,5 +163,25 @@ test("an unset kubeconfig is not passed; the guard inherits KUBECONFIG", async (
     delete process.env.KUBECONFIG;
   }
   assert.equal(calls()[0]!.kubeconfig, "/inherited/config");
+  await harness.experimental_dispose();
+});
+
+test("profiles: k8s-check --list, with ~ expanded, and its failure code kept", async () => {
+  const harness = experimental_createHostEntryHarness(createHostEntry());
+  const savedHome = process.env.HOME;
+  process.env.HOME = dir.slice(0, dir.lastIndexOf("/"));
+  try {
+    const command = `~/${dir.slice(dir.lastIndexOf("/") + 1)}/k8s-check`;
+    const read = (await harness.experimental_call("profiles", { command })) as { ok: boolean; value?: { clusters: Record<string, { context: string }> } };
+    assert.equal(read.ok, true);
+    assert.equal(read.value!.clusters["lab-a"]!.context, "proxy.example.test-lab-a");
+    assert.deepEqual(calls().at(-1)!.argv, ["--list"]);
+    process.env.FAKE_MODE = "profiles_bad";
+    assert.deepEqual(await harness.experimental_call("profiles", { command }), { ok: false, code: "profiles_invalid", error: "unknown key gpu_typo" });
+  } finally {
+    process.env.HOME = savedHome;
+  }
+  const missing = (await harness.experimental_call("profiles", { command: "/no/such/k8s-check" })) as { ok: boolean; code: string };
+  assert.deepEqual([missing.ok, missing.code], [false, "profiles_reader_missing"]);
   await harness.experimental_dispose();
 });

@@ -6,7 +6,8 @@ import { INSPECT, type GuardFailure, type GuardRun, type Inspect } from "./contr
 export type GuardMethod = "inspect" | "expire" | "down" | "extend";
 
 export interface GuardTarget {
-  cluster: string;
+  /** The kube context, from the cluster's profile. */
+  context: string;
   namespace: string;
   uid?: string;
   leaseId?: string;
@@ -14,7 +15,7 @@ export interface GuardTarget {
 
 /** The guard's argv. Every name was checked against its schema, so none can read as a flag. */
 export function guardArgv(method: GuardMethod, target: GuardTarget): string[] {
-  const argv = [method, "--context", target.cluster, target.namespace];
+  const argv = [method, "--context", target.context, target.namespace];
   if (method === "inspect") return argv;
   if (target.uid === undefined || target.leaseId === undefined) throw new Error(`${method} needs a UID and a lease`);
   return [...argv, "--uid", target.uid, "--lease", target.leaseId];

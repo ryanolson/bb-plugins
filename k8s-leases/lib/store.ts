@@ -17,6 +17,7 @@ export const MIGRATIONS = [
     id TEXT PRIMARY KEY,
     thread_id TEXT NOT NULL,
     cluster TEXT NOT NULL,
+    context TEXT NOT NULL,
     namespace TEXT NOT NULL,
     uid TEXT NOT NULL,
     gpu_type TEXT NOT NULL,
@@ -49,6 +50,7 @@ export const MIGRATIONS = [
     expires_before INTEGER NOT NULL,
     expires_after INTEGER NOT NULL
   )`,
+  `CREATE TABLE profiles (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL)`,
   `CREATE TABLE heartbeats (host_id TEXT PRIMARY KEY, last_ok_at INTEGER, last_try_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT NOT NULL)`,
   `CREATE TABLE flags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +66,7 @@ export interface LeaseRow {
   id: string;
   thread_id: string;
   cluster: string;
+  context: string;
   namespace: string;
   uid: string;
   gpu_type: string;
@@ -117,6 +120,7 @@ export interface AcquireRequest {
   id: string;
   thread: string;
   cluster: string;
+  context: string;
   namespace: string;
   uid: string;
   gpuType: string;
@@ -241,9 +245,9 @@ export function createStore(db: Db, now: () => number) {
           throw new Refusal("over_limit", `${req.gpus} ${req.gpuType} GPUs would make ${used + req.gpus}; the limit is ${limit} (${used} held).`);
         }
         db.prepare(
-          `INSERT INTO leases (id, thread_id, cluster, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
-        ).run(req.id, req.thread, req.cluster, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.multiNode ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000));
+          `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)`,
+        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.multiNode ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000));
         return mustGet(req.id);
       }).immediate();
     },
@@ -385,6 +389,18 @@ export function createStore(db: Db, now: () => number) {
         `INSERT INTO heartbeats (host_id, last_ok_at, last_try_at, ok, detail) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(host_id) DO UPDATE SET last_ok_at = COALESCE(excluded.last_ok_at, last_ok_at), last_try_at = excluded.last_try_at, ok = excluded.ok, detail = excluded.detail`,
       ).run(hostId, ok ? t : null, t, ok ? 1 : 0, detail);
+    },
+
+    saveProfiles(hostId: string, json: string): void {
+      db.prepare("INSERT INTO profiles (id, host_id, at, json) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET host_id = excluded.host_id, at = excluded.at, json = excluded.json").run(
+        hostId,
+        now(),
+        json,
+      );
+    },
+
+    profiles(): { host_id: string; at: number; json: string } | undefined {
+      return db.prepare<[], { host_id: string; at: number; json: string }>("SELECT host_id, at, json FROM profiles WHERE id = 1").get();
     },
 
     heartbeats(): HeartbeatRow[] {

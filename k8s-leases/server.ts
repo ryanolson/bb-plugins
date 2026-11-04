@@ -18,10 +18,12 @@ import {
   LEASE_ID,
   NAMESPACE,
   THREAD_ID,
+  PROFILES,
   UID,
   hostContract,
   rpcContract,
   type LeaseView,
+  type Profiles,
   type Snapshot,
 } from "./lib/contract.ts";
 import { HostUnreachable, createEnforcer, type HostCall, type ThreadFate } from "./lib/enforcer.ts";
@@ -55,6 +57,7 @@ function showJson(row: LeaseRow) {
     lease_id: row.id,
     state: row.state,
     cluster: row.cluster,
+    context: row.context,
     namespace: row.namespace,
     uid: row.uid,
     thread: row.thread_id,
@@ -145,10 +148,10 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const attempts: string[] = [];
       for (const hostId of hostOrder(cfg)) {
         try {
-          const input = { run: cfg.run, cluster: lease.cluster, namespace: lease.namespace, uid: lease.uid, leaseId: lease.id };
+          const input = { run: cfg.run, context: lease.context, namespace: lease.namespace, uid: lease.uid, leaseId: lease.id };
           const result =
             method === "inspect"
-              ? await host.call("inspect", { run: cfg.run, cluster: lease.cluster, namespace: lease.namespace }, { hostId, timeoutMs: HOST_TIMEOUTS.inspect + HOST_CALL_MARGIN_MS })
+              ? await host.call("inspect", { run: cfg.run, context: lease.context, namespace: lease.namespace }, { hostId, timeoutMs: HOST_TIMEOUTS.inspect + HOST_CALL_MARGIN_MS })
               : await host.call(method, input, { hostId, timeoutMs: HOST_TIMEOUTS[method] + HOST_CALL_MARGIN_MS });
           if (!result.ok && result.code === "guard_missing") {
             attempts.push(`${hostId}: ${result.error}`);
@@ -179,6 +182,31 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       }
     }
 
+    /** Read the cluster profiles from the first host that can; keep the last good copy. */
+    async function refreshProfiles(cfg: Config): Promise<Profiles | null> {
+      for (const hostId of hostOrder(cfg)) {
+        try {
+          const read = await host.call("profiles", { command: cfg.profilesCommand }, { hostId, timeoutMs: HOST_TIMEOUTS.profiles + HOST_CALL_MARGIN_MS });
+          if (read.ok) {
+            store.saveProfiles(hostId, JSON.stringify(read.value));
+            return read.value;
+          }
+          bb.log.warn(`profiles on ${hostId}: ${read.code}: ${read.error}`);
+        } catch (error) {
+          bb.log.warn(`profiles on ${hostId}: ${message(error)}`);
+        }
+      }
+      return null;
+    }
+
+    /** Profiles read within the heartbeat window, or null: then the fallback clusters setting applies. */
+    function currentProfiles(): Profiles | null {
+      const saved = store.profiles();
+      if (saved === undefined || saved.at <= now() - HEARTBEAT_WINDOW_MS) return null;
+      const parsed = PROFILES.safeParse(JSON.parse(saved.json));
+      return parsed.success ? parsed.data : null;
+    }
+
     const enforcer = createEnforcer({ store, config, now, host: hostCall, threadFate, log: (text) => bb.log.warn(text) });
 
     let ticking = false;
@@ -197,6 +225,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             }
           }),
         );
+        await refreshProfiles(cfg);
         store.sweepExpired(cfg.graceMs);
         const queue = store.live().map((row) => row.id);
         await Promise.all(
@@ -228,7 +257,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const gpus = parsed(z.number().int().min(1), input.gpus, "--gpus");
       const hours = parsed(z.coerce.number().positive().finite(), input.hours, "--hours");
       const cfg = await config();
-      const { multiNode } = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, cfg);
+      const { context, multiNode } = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, cfg, currentProfiles() ?? (await refreshProfiles(cfg)));
       // Cheap checks first; the transaction checks them all again.
       if (!store.freshHeartbeat(HEARTBEAT_WINDOW_MS, cfg.hosts)) {
         throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${HEARTBEAT_WINDOW_MS / 60_000} minutes.`);
@@ -244,7 +273,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       // Confirm what the guard read, on a host, with the bot.
       let seen;
       try {
-        seen = await hostCall("inspect", { cluster, namespace, uid, id: "" });
+        seen = await hostCall("inspect", { context, namespace, uid, id: "" });
       } catch (error) {
         throw new Refusal("enforcement_unhealthy", message(error));
       }
@@ -262,7 +291,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       if (allocation > 0 && ns.gpu_type !== null && ns.gpu_type !== gpuType) {
         throw new Refusal("gpu_type_mismatch", `${namespace} holds ${ns.gpu_type} GPUs, not ${gpuType}.`);
       }
-      const row = store.acquire({ id: newLeaseId(), thread, cluster, namespace, uid, gpuType, gpus, hours, multiNode }, cfg, HEARTBEAT_WINDOW_MS);
+      const row = store.acquire({ id: newLeaseId(), thread, cluster, context, namespace, uid, gpuType, gpus, hours, multiNode }, cfg, HEARTBEAT_WINDOW_MS);
       publish();
       return { lease_id: row.id, expires_at: iso(row.expires_at) };
     }

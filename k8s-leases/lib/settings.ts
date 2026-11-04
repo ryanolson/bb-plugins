@@ -72,10 +72,17 @@ export const SETTINGS = {
     default: 24,
     experimental_schema: z.number().positive().max(24 * 14),
   },
+  profilesCommand: {
+    type: "string",
+    label: "Cluster profiles reader",
+    description: "Run with --list on each host to print the cluster profiles as JSON. The profiles decide which clusters are allowed, their GPU type, and GPUs per node.",
+    default: "~/.agents/skills/k8s-clusters/scripts/k8s-check",
+    experimental_schema: z.string().regex(/^(~\/|\/)[^\0]*$|^[A-Za-z0-9._-]+$/, "Use ~/path, an absolute path, or a command name."),
+  },
   clusters: {
     type: "string",
-    label: "Allowed clusters",
-    description: 'The kube contexts a lease may name, each with its GPUs per node by type, as JSON: {"<context>":{"gpusPerNode":{"gb300":4}}}.',
+    label: "Fallback clusters",
+    description: 'Used only when no host can read the cluster profiles: cluster names (used as the kube context too), each with its GPUs per node by type, as JSON: {"<name>":{"gpusPerNode":{"gb300":4}}}.',
     experimental_multiline: true,
     default: "{}",
     experimental_schema: json(CLUSTERS, 'Use JSON like {"<context>":{"gpusPerNode":{"gb300":4}}}.'),
@@ -83,7 +90,7 @@ export const SETTINGS = {
   firstRunApprovals: {
     type: "string",
     label: "First-run approvals",
-    description: 'Clusters whose first run Ryan approved, each with its record, as JSON: {"<context>":"<record>"}.',
+    description: 'Clusters (profile names) whose first run Ryan approved, each with its record, as JSON: {"<name>":"<record>"}.',
     experimental_multiline: true,
     default: "{}",
     experimental_schema: json(FIRST_RUNS, 'Use JSON like {"<context>":"<record>"}.'),
@@ -149,6 +156,7 @@ export interface Config {
   multiNode: MultiNodeApproval[];
   hosts: string[];
   run: GuardRun;
+  profilesCommand: string;
 }
 
 type Values = { [K in keyof typeof SETTINGS]: (typeof SETTINGS)[K]["default"] extends number ? number : string };
@@ -177,6 +185,7 @@ export function parseConfig(values: Values): Config {
     firstRuns: parse(FIRST_RUNS, values.firstRunApprovals, {}),
     multiNode: parse(MULTI_NODE, values.multiNodeApprovals, []),
     hosts: parse(HOSTS, values.hosts, []),
+    profilesCommand: values.profilesCommand,
     run: {
       command: values.guardCommand,
       serverUrl: values.bbServerUrl,

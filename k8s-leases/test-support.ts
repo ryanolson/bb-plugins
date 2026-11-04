@@ -162,6 +162,8 @@ type Cli = (argv: string[], threadId?: string) => Promise<{ code: number; json: 
 export class FakeGuard {
   readonly calls: GuardCall[] = [];
   readonly downHosts = new Set<string>();
+  /** What `k8s-check --list` prints on the hosts; null: the hosts cannot read profiles. */
+  profiles: unknown = null;
   /** bb unreachable from the guard: authority falls back to the namespace's `expires-at`. */
   bbOffline = false;
   /** The next `down` deletes, then its response is lost. */
@@ -179,7 +181,7 @@ export class FakeGuard {
     this.clock = clock;
   }
 
-  private async authority(method: string, input: { cluster: string; uid: string; leaseId: string }, ns: FakeNamespace): Promise<string | null> {
+  private async authority(method: string, input: { context: string; uid: string; leaseId: string }, ns: FakeNamespace): Promise<string | null> {
     if (ns.uid !== input.uid) return "uid_mismatch";
     if (this.bbOffline) {
       if (method === "extend") return "offline";
@@ -189,7 +191,7 @@ export class FakeGuard {
     const shown = await this.cli(["lease", "show", input.leaseId]);
     if (shown.code !== 0) return "lease_unknown";
     const lease = shown.json;
-    if (lease.cluster !== input.cluster || lease.uid !== input.uid || lease.namespace !== ns.name) return "lease_mismatch";
+    if (lease.context !== input.context || lease.uid !== input.uid || lease.namespace !== ns.name) return "lease_mismatch";
     if (method === "extend") return lease.state === "active" ? null : "lease_not_active";
     return lease.state === "revoking" || lease.state === "releasing" ? null : "lease_active";
   }
@@ -197,9 +199,12 @@ export class FakeGuard {
   async handle(method: string, input: any, hostId: string): Promise<unknown> {
     if (this.downHosts.has(hostId)) throw new Error(`host ${hostId} is unreachable`);
     if (method === "probe") return { ok: true, detail: "ok" };
-    const ns = this.cluster.get(input.cluster, input.namespace);
+    if (method === "profiles") {
+      return this.profiles === null ? { ok: false, code: "profiles_missing", error: "no profiles file" } : { ok: true, value: this.profiles };
+    }
+    const ns = this.cluster.get(input.context, input.namespace);
     const record = (outcome: string) =>
-      this.calls.push({ hostId, method, cluster: input.cluster, namespace: input.namespace, uid: input.uid, leaseId: input.leaseId, outcome });
+      this.calls.push({ hostId, method, cluster: input.context, namespace: input.namespace, uid: input.uid, leaseId: input.leaseId, outcome });
     if (ns === undefined) {
       record("not_found");
       return { ok: false, code: "not_found", error: `namespace ${input.namespace} not found` };
@@ -357,13 +362,18 @@ export async function setup(settings: Record<string, string | number> = {}) {
     return { id: result.json.lease_id, ns, result };
   }
 
-  function acquire(thread: string, ns: FakeNamespace, gpus: number, opts: { gpuType?: string; hours?: number; asThread?: string; uid?: string } = {}) {
+  function acquire(
+    thread: string,
+    ns: FakeNamespace,
+    gpus: number,
+    opts: { gpuType?: string; hours?: number; asThread?: string; uid?: string; clusterName?: string } = {},
+  ) {
     return cli(
       [
         "lease",
         "acquire",
         "--cluster",
-        ns.cluster,
+        opts.clusterName ?? ns.cluster,
         "--namespace",
         ns.name,
         "--uid",
