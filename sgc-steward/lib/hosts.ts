@@ -3,14 +3,15 @@
 // `bb sgc hosts`, its digest, and the page's Hosts tab all print this one
 // model, so the three never disagree. Pure: the server reads bb and hands the
 // answers in. No zod here: the page imports this file.
-/** The parts of `bb concurrency-limit status --json` the view reads. */
+/** The concurrency-limit configuration, as `bb concurrency-limit status --json` prints it. */
 export interface LimitStatus {
   globalLimit: number | null;
   hosts: Array<{
     id: string;
     name: string;
     status: string;
-    availableParallelism: number;
+    /** Null until bb has measured the host's processors. */
+    availableParallelism: number | null;
     automaticLimit: number;
     effectiveLimit: number;
     /** Null when the host is on its automatic limit. */

@@ -1,24 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { HostsDigest, HostsView } from "./lib/hosts.ts";
-import { LIMIT_STATUS_ARGS, readOnlyBb } from "./lib/hosts-read.ts";
+import { LIMIT_READ } from "./lib/hosts-read.ts";
 import { setup } from "./test-support.ts";
-import { EXPECTED_HOSTS, EXPECTED_UNPLACED, HOSTS, IDLE, LIMITS_JSON, MINUTE, NOW, QUEUE, RUNNING, THREADS } from "./test-support-hosts.ts";
+import { EXPECTED_HOSTS, EXPECTED_UNPLACED, HOSTS, IDLE, LIMITS_RPC, MINUTE, NOW, QUEUE, RUNNING, THREADS } from "./test-support-hosts.ts";
 
-/** The only reads the Hosts view may make of bb's SDK. */
-const SDK_READS = new Set(["hosts.list", "threads.listRunning", "threads.count", "threads.queue.list", "threads.list"]);
+/** The only reads the Hosts view may make of bb's SDK; `plugins.callRpc` only as the limits read. */
+const SDK_READS = new Set(["hosts.list", "threads.listRunning", "threads.count", "threads.queue.list", "threads.list", "plugins.callRpc"]);
 
-/** The plugin on the fake bb state, with every bb CLI run it makes recorded. */
-async function hostsSetup(options: { limits?: () => Promise<string> } = {}) {
-  const bbRuns: string[][] = [];
-  const { harness } = await setup({
-    runBb: async (args) => {
-      bbRuns.push([...args]);
-      return options.limits === undefined ? LIMITS_JSON : options.limits();
-    },
-    now: () => NOW,
-  });
+/** The plugin on the fake bb state. */
+async function hostsSetup(options: { limits?: () => Promise<unknown> } = {}) {
+  const { harness } = await setup({ now: () => NOW });
   const sdk = harness.inspection.sdk;
+  sdk.stub("plugins.callRpc", async (args: unknown) => {
+    const { pluginId, method } = args as { pluginId: string; method: string };
+    assert.deepEqual({ pluginId, method }, LIMIT_READ);
+    return options.limits === undefined ? structuredClone(LIMITS_RPC) : options.limits();
+  });
   sdk.stub("hosts.list", async () => HOSTS.map((host) => ({ ...host })));
   sdk.stub("threads.listRunning", async () => RUNNING.map((row) => ({ ...row })));
   sdk.stub("threads.count", async (args: unknown) => {
@@ -38,7 +36,7 @@ async function hostsSetup(options: { limits?: () => Promise<string> } = {}) {
   });
   const from = sdk.calls.length;
   const sdkCalls = () => sdk.calls.slice(from);
-  return { harness, bbRuns, sdkCalls };
+  return { harness, sdkCalls };
 }
 
 test("bb sgc hosts --json shows each of the five hosts correctly", async () => {
@@ -97,8 +95,8 @@ test("bb sgc hosts --digest names the hosts at their limit and the waiting turns
   ]);
 });
 
-test("the Hosts view never runs a write: only SDK reads, and only bb concurrency-limit status", async () => {
-  const { harness, bbRuns, sdkCalls } = await hostsSetup();
+test("the Hosts view never runs a write: only SDK reads, and only the limits read of the concurrency-limit plugin", async () => {
+  const { harness, sdkCalls } = await hostsSetup();
   for (const argv of [["hosts"], ["hosts", "--json"], ["hosts", "--digest"], ["hosts", "--digest", "--json"]]) {
     assert.equal((await harness.behavior.runCli(argv, {})).exitCode, 0, argv.join(" "));
   }
@@ -109,44 +107,32 @@ test("the Hosts view never runs a write: only SDK reads, and only bb concurrency
     [],
     "an SDK call outside the reads",
   );
-  assert.equal(bbRuns.length, 5);
-  for (const args of bbRuns) assert.deepEqual(args, [...LIMIT_STATUS_ARGS]);
-});
-
-test("the bb runner refuses any command but the limit status, before it runs", async () => {
-  const runs: string[][] = [];
-  const bb = readOnlyBb(async (args) => (runs.push([...args]), "{}"));
-  for (const args of [
-    ["concurrency-limit", "host", "host_at", "9"],
-    ["concurrency-limit", "global", "4"],
-    ["concurrency-limit", "status"],
-    ["concurrency-limit", "status", "--json", "--host", "x"],
-  ]) {
-    await assert.rejects(bb(args), /read only/, args.join(" "));
+  const rpcs = sdkCalls().filter((call) => call.path === "plugins.callRpc");
+  assert.equal(rpcs.length, 5);
+  for (const call of rpcs) {
+    const { pluginId, method, input } = call.args[0] as { pluginId: string; method: string; input: unknown };
+    assert.deepEqual({ pluginId, method, input }, { ...LIMIT_READ, input: null });
   }
-  assert.deepEqual(runs, []);
-  assert.equal(await bb([...LIMIT_STATUS_ARGS]), "{}");
-  assert.deepEqual(runs, [[...LIMIT_STATUS_ARGS]]);
 });
 
 test("when the limits cannot be read, the counts still show, without limits, and the command exits 1", async () => {
-  const { harness } = await hostsSetup({ limits: async () => Promise.reject(new Error("spawn bb ENOENT")) });
+  const { harness } = await hostsSetup({ limits: async () => Promise.reject(new Error("plugin concurrency-limit is not running")) });
   const result = await harness.behavior.runCli(["hosts", "--json"], {});
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr ?? "", /Could not read the limits: .*spawn bb ENOENT/);
+  assert.match(result.stderr ?? "", /Could not read the limits: .*plugin concurrency-limit is not running/);
   const view = JSON.parse(result.stdout) as HostsView;
-  assert.match(view.limitError ?? "", /spawn bb ENOENT/);
+  assert.match(view.limitError ?? "", /plugin concurrency-limit is not running/);
   assert.deepEqual(
     view.hosts.map((host) => [host.name, host.running, host.idle, host.waiting, host.limit, host.atLimit]),
     EXPECTED_HOSTS.map((host) => [host.name, host.running, host.idle, host.waiting, null, false]),
   );
   const rpc = (await harness.behavior.callRpc("hosts.list", null)) as HostsView;
-  assert.match(rpc.limitError ?? "", /spawn bb ENOENT/, "the panel shows the same trouble");
+  assert.match(rpc.limitError ?? "", /plugin concurrency-limit is not running/, "the panel shows the same trouble");
 });
 
-test("limits that are not bb's JSON are a limit error, not a crash", async () => {
-  const { harness } = await hostsSetup({ limits: async () => "Error: unknown command" });
+test("limits in a shape the view does not know are a limit error, not a crash", async () => {
+  const { harness } = await hostsSetup({ limits: async () => ({ globalLimit: null, hosts: [{ id: "host_at" }] }) });
   const result = await harness.behavior.runCli(["hosts", "--json"], {});
   assert.equal(result.exitCode, 1);
-  assert.match((JSON.parse(result.stdout) as HostsView).limitError ?? "", /not JSON/);
+  assert.match((JSON.parse(result.stdout) as HostsView).limitError ?? "", /unexpected shape: hosts\.0\.name/);
 });

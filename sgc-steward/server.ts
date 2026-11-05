@@ -62,7 +62,7 @@ import {
 } from "./lib/contract.ts";
 import { readHostFile } from "./lib/host-file.ts";
 import { formatDigest, formatHosts, hostsDigest } from "./lib/hosts.ts";
-import { readHosts, readOnlyBb, runBbCli, type RunBb } from "./lib/hosts-read.ts";
+import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { createTodos } from "./todos.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
@@ -88,8 +88,6 @@ export interface SgcStewardOptions {
    * is still not on Linear after this long is dropped: the post failed.
    */
   postWindowMs?: number;
-  /** Stand-in for the bb CLI, which the Hosts view runs only for the limits. */
-  runBb?: RunBb;
   /** Stand-in for the clock the Hosts view measures waits with. */
   now?: () => number;
 }
@@ -107,7 +105,6 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
   // Two tries of 30 seconds each, the checks after them, and a wide margin.
   const postWindowMs = options.postWindowMs ?? 10 * 60 * 1000;
   const makeClient = options.createClient ?? ((apiKey: string) => createLinearClient({ apiKey }));
-  const runBb = readOnlyBb(options.runBb ?? runBbCli);
   const now = options.now ?? Date.now;
 
   return async function sgcSteward(bb: BbPluginApi): Promise<void> {
@@ -714,7 +711,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "deliveries.dismiss": ({ id }) => dismissed(asks.dismissDelivery(id)),
       "records.dismiss": ({ askId }) => dismissed(asks.dismissRecord(askId)),
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
-      "hosts.list": () => readHosts(bb.sdk, runBb, now),
+      "hosts.list": () => readHosts(bb.sdk, now),
       ...todos.rpc,
     });
 
@@ -901,7 +898,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             async run(input) {
               let view;
               try {
-                view = await readHosts(bb.sdk, runBb, now);
+                view = await readHosts(bb.sdk, now);
               } catch (error) {
                 throw new PluginCliError(`Could not read bb: ${message(error)}`, { code: "bb_error" });
               }

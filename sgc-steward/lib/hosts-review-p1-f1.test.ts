@@ -1,23 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { HostsView } from "./hosts.ts";
-import { LIMIT_STATUS_ARGS } from "./hosts-read.ts";
+import { LIMIT_READ } from "./hosts-read.ts";
 import { setup } from "../test-support.ts";
-import { HOSTS, IDLE, LIMITS, LIMITS_JSON, NOW, RUNNING } from "../test-support-hosts.ts";
+import { HOSTS, IDLE, LIMITS, LIMITS_RPC, NOW, RUNNING } from "../test-support-hosts.ts";
 
 test("hosts review F1: unknown processor capacity keeps each host's effective limit", async (t) => {
-  let status = LIMITS_JSON;
+  let status: unknown = LIMITS_RPC;
   const enrolled: Array<{ id: string; name: string; status: string }> = HOSTS.map((host) => ({ ...host }));
-  const { harness } = await setup({
-    key: null,
-    now: () => NOW,
-    runBb: async (args) => {
-      assert.deepEqual(args, LIMIT_STATUS_ARGS);
-      return status;
-    },
-  });
+  const { harness } = await setup({ key: null, now: () => NOW });
   t.after(() => harness.lifecycle.dispose());
   const sdk = harness.inspection.sdk;
+  sdk.stub("plugins.callRpc", async (args: unknown) => {
+    const { pluginId, method } = args as { pluginId: string; method: string };
+    assert.deepEqual({ pluginId, method }, LIMIT_READ);
+    return structuredClone(status);
+  });
   sdk.stub("hosts.list", async () => enrolled.map((host) => ({ ...host })));
   sdk.stub("threads.listRunning", async () => RUNNING.map((thread) => ({ ...thread })));
   sdk.stub("threads.count", async () => structuredClone(IDLE));
@@ -30,10 +28,10 @@ test("hosts review F1: unknown processor capacity keeps each host's effective li
   const unprobed = { id: "host_unprobed", name: "unprobed", status: "disconnected" };
   enrolled.push(unprobed);
   // bb returns null before its capacity detector reaches a host, with an automatic limit of one.
-  status = JSON.stringify({
+  status = {
     ...LIMITS,
     hosts: [...LIMITS.hosts, { ...unprobed, availableParallelism: null, automaticLimit: 1, effectiveLimit: 1, override: null }],
-  });
+  };
 
   const result = await harness.behavior.runCli(["hosts", "--json"]);
   assert.equal(result.exitCode, 0, result.stderr);

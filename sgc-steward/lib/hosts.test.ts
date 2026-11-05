@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { formatDigest, formatHosts, hostsDigest, hostsView, waitText } from "./hosts.ts";
 import { parseLimitStatus } from "./hosts-read.ts";
-import { EXPECTED_HOSTS, EXPECTED_UNPLACED, LIMITS, LIMITS_JSON, MINUTE, NOW, input } from "../test-support-hosts.ts";
+import { EXPECTED_HOSTS, EXPECTED_UNPLACED, LIMITS, LIMITS_RPC, MINUTE, NOW, input } from "../test-support-hosts.ts";
 
 test("each of the five hosts shows its own state in the view model", () => {
   const view = hostsView(input());
@@ -106,8 +106,8 @@ test("a wait reads in seconds, minutes, or hours and minutes", () => {
   assert.deepEqual([waitText(null), waitText(40_000), waitText(14 * MINUTE), waitText(135 * MINUTE)], ["-", "40 s", "14 min", "2 h 15 min"]);
 });
 
-test("the limits parse from bb's own JSON, and anything else is refused with what was wrong", () => {
-  assert.deepEqual(parseLimitStatus(LIMITS_JSON), LIMITS);
-  assert.throws(() => parseLimitStatus("not json"), /not JSON/);
-  assert.throws(() => parseLimitStatus(JSON.stringify({ globalLimit: null, hosts: [{ id: "host_x" }] })), /unexpected shape/);
+test("the limits parse from the concurrency-limit configuration, and anything else is refused with what was wrong", () => {
+  assert.deepEqual(parseLimitStatus(LIMITS_RPC), LIMITS);
+  assert.throws(() => parseLimitStatus(null), /unexpected shape/);
+  assert.throws(() => parseLimitStatus({ globalLimit: null, hosts: [{ id: "host_x" }] }), /unexpected shape: hosts\.0\.name/);
 });

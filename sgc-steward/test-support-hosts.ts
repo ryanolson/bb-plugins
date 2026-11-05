@@ -14,7 +14,7 @@ export const HOSTS = [
   { id: "host_auto", name: "auto", status: "connected" },
 ] as const;
 
-/** As `bb concurrency-limit status --json` prints it. */
+/** The configuration without bb's overrides list, which the view does not read. */
 export const LIMITS: LimitStatus = {
   globalLimit: null,
   hosts: [
@@ -26,12 +26,12 @@ export const LIMITS: LimitStatus = {
   ],
 };
 
-/** The limits as bb prints them, with the overrides list bb adds. */
-export const LIMITS_JSON = JSON.stringify({
+/** As the concurrency-limit plugin's `getConfiguration` RPC returns it. */
+export const LIMITS_RPC = {
   globalLimit: null,
   hostOverrides: LIMITS.hosts.filter((host) => host.override !== null).map((host) => ({ hostId: host.id, limit: host.override })),
   hosts: LIMITS.hosts,
-});
+};
 
 /** As `bb.sdk.threads.listRunning` returns them: starting or active threads. */
 export const RUNNING = [
