@@ -24,7 +24,7 @@ import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
 /** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles PR #17, branch k8s-guard. */
-export const GUARD_COMMIT = "d92ec1a1fa27f33bdca1d878a0c2491799150867";
+export const GUARD_COMMIT = "6f78ae0bded3643674e3eb1d70bc8a15459ee467";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
@@ -308,5 +308,53 @@ test("p3 f3 on the real guard: an extend that lands late cannot pull the expiry 
   await Promise.allSettled([first, second]);
   assert.equal(state().objects[ns]!["ConfigMap/wcep-agent-lease"]!.data.expires_at, lease.expires_at, "the late extend pulled the expiry back");
   rmSync(join(world.dir, "hold-replace"));
+  await p.harness.lifecycle.dispose();
+});
+
+test("a down with GPU pods left: the real guard reports deleted with pods left, and the lease stays charged until inspect says not_found", { skip }, async () => {
+  let downResult: any = null;
+  let terminating: { ns: string; obj: any; pods: any[] } | null = null;
+  const p = await plugin({
+    hostCall: async (method, input, _hostId, real) => {
+      const before = method === "down" ? state() : null;
+      const result = await real();
+      if (method === "down" && downResult === null) {
+        downResult = result;
+        // A real API server keeps a deleting namespace, terminating, until its pods are gone.
+        const obj = before!.namespaces[input.namespace];
+        obj.metadata.deletionTimestamp = new Date().toISOString();
+        obj.status = { phase: "Terminating" };
+        terminating = { ns: input.namespace, obj, pods: before!.pods[input.namespace] ?? [] };
+        const st = state();
+        st.namespaces[input.namespace] = obj;
+        st.objects[input.namespace] = {};
+        st.pods[input.namespace] = terminating.pods;
+        py("set", st);
+      }
+      return result;
+    },
+  });
+  await p.tick();
+  const { id, ns } = await leased(p, "cpodsleft");
+  py("add-dgd", { ns, name: "worker", gpus: 4, lease: id });
+  const st = state();
+  (st as any).terminate_pods_on_delete = false; // the GPU pods outlive their DGD
+  py("set", st);
+  await p.harness.behavior.runCli(["lease", "release", id], { threadId: world.me });
+  assert.equal(downResult?.ok, true, `down: ${JSON.stringify(downResult)}`);
+  assert.ok((downResult?.gpu_pods_left ?? 0) > 0, `down reported no GPU pods left: ${JSON.stringify(downResult)}`);
+  await p.tick();
+  await p.tick();
+  assert.equal((await p.show(id)).state, "releasing", "the GPUs were freed while the namespace was still terminating");
+  const flags = JSON.parse((await p.harness.behavior.runCli(["flags", "--json"])).stdout) as Array<{ kind: string; lease_id: string }>;
+  assert.equal(flags.filter((f) => f.lease_id === id && f.kind === "gpu_pods_left").length, 1);
+  // The pods finish; the namespace goes.
+  const gone = state();
+  delete gone.namespaces[ns];
+  delete gone.objects[ns];
+  delete gone.pods[ns];
+  py("set", gone);
+  await p.tick();
+  assert.equal((await p.show(id)).state, "released");
   await p.harness.lifecycle.dispose();
 });
