@@ -7,6 +7,7 @@
 // writers from holding one slot.
 import type Database from "better-sqlite3";
 import { CHARGED, type LeaseState } from "./contract.ts";
+import { own } from "./own.ts";
 import { Refusal } from "./refusal.ts";
 import type { Config } from "./settings.ts";
 
@@ -48,6 +49,7 @@ export const MIGRATIONS = [
     stuck_flagged INTEGER NOT NULL DEFAULT 0
   );
 CREATE UNIQUE INDEX leases_live_namespace ON leases(context, namespace) WHERE state IN ('active','revoking','releasing');
+CREATE UNIQUE INDEX leases_live_uid ON leases(uid) WHERE state IN ('active','revoking','releasing');
 CREATE INDEX leases_state ON leases(state);
 CREATE TABLE extensions (
     lease_id TEXT NOT NULL,
@@ -158,6 +160,8 @@ export function createStore(db: Db, now: () => number) {
     ended: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE NOT ${LIVE} ORDER BY COALESCE(ended_at, created_at) DESC, id LIMIT 200`),
     // By kube context, not profile name: two profile names for one context are one cluster.
     liveOn: db.prepare<[string, string], LeaseRow>(`SELECT * FROM leases WHERE context = ? AND namespace = ? AND ${LIVE}`),
+    // Two kube contexts can reach one cluster: the namespace UID is the namespace.
+    liveUid: db.prepare<[string], LeaseRow>(`SELECT * FROM leases WHERE uid = ? AND ${LIVE}`),
     used: db.prepare<[string], { used: number | null }>(`SELECT SUM(gpus) AS used FROM leases WHERE gpu_type = ? AND ${LIVE}`),
     usedAll: db.prepare<[], { gpu_type: string; used: number }>(`SELECT gpu_type, SUM(gpus) AS used FROM leases WHERE ${LIVE} GROUP BY gpu_type`),
     byThread: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE thread_id = ? AND state = 'active'"),
@@ -251,9 +255,9 @@ export function createStore(db: Db, now: () => number) {
         if (!freshHeartbeat(heartbeatMs, cfg.hosts)) {
           throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${heartbeatMs / 60_000} minutes.`);
         }
-        const held = q.liveOn.get(req.context, req.namespace);
+        const held = q.liveOn.get(req.context, req.namespace) ?? q.liveUid.get(req.uid);
         if (held !== undefined) throw new Refusal("namespace_leased", `${req.namespace} on ${req.cluster} already has lease ${held.id} (${held.state}).`);
-        const limit = cfg.limits[req.gpuType] ?? 0;
+        const limit = own(cfg.limits, req.gpuType) ?? 0;
         const used = q.used.get(req.gpuType)?.used ?? 0;
         if (used + req.gpus > limit) {
           throw new Refusal("over_limit", `${req.gpus} ${req.gpuType} GPUs would make ${used + req.gpus}; the limit is ${limit} (${used} held).`);
@@ -365,13 +369,16 @@ export function createStore(db: Db, now: () => number) {
       }).immediate();
     },
 
-    /** Start teardown. Only an active lease is revoked; one already in teardown keeps its deadline. */
-    revoke(id: string, reason: string, graceDeadline: number): LeaseRow {
+    /** Start teardown, with the grace period from now or from the expiry, whichever ends first. Only an active lease is revoked; one in teardown keeps its deadline. */
+    revoke(id: string, reason: string, graceMs: number): LeaseRow {
       return db.transaction(() => {
+        // An expired lease keeps the deadline its expiry set, the same one the offline timer uses.
+        const t = now();
         db.prepare(
-          `UPDATE leases SET state = 'revoking', reason = ?, revoked_at = ?, grace_deadline = ?, op_token = NULL, op_deadline = NULL
+          `UPDATE leases SET state = 'revoking', reason = CASE WHEN expires_at <= ? THEN 'expired' ELSE ? END, revoked_at = ?,
+             grace_deadline = MIN(? + ?, expires_at + ?), op_token = NULL, op_deadline = NULL
            WHERE id = ? AND state = 'active'`,
-        ).run(reason, now(), graceDeadline, id);
+        ).run(t, reason, t, t, graceMs, graceMs, id);
         return mustGet(id);
       }).immediate();
     },

@@ -30,6 +30,7 @@ import {
 } from "./lib/contract.ts";
 import { createEnforcer, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
 import { createHosts } from "./lib/hosts.ts";
+import { own } from "./lib/own.ts";
 import { checkAsk } from "./lib/policy.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { SETTINGS, parseConfig, type Config } from "./lib/settings.ts";
@@ -165,7 +166,14 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
 
     /** The settings as last read, for the sync host-order helpers. */
     let latest: Config | null = null;
-    const current = async (): Promise<Config> => (latest = await config());
+    /** Bumped by every settings change, so a read that started before one can never replace it. */
+    let settingsVersion = 0;
+    const current = async (): Promise<Config> => {
+      const version = settingsVersion;
+      const read = await config();
+      if (version === settingsVersion) latest = read;
+      return latest ?? read;
+    };
 
     /** Hosts with a good probe inside the heartbeat window, freshest first. */
     function healthy(): string[] {
@@ -325,7 +333,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       store.sweepExpired(cfg.graceMs);
       const held = store.liveOn(context, namespace);
       if (held !== undefined) throw new Refusal("namespace_leased", `${namespace} on ${cluster} already has lease ${held.id} (${held.state}).`);
-      const limit = cfg.limits[gpuType] ?? 0;
+      const limit = own(cfg.limits, gpuType) ?? 0;
       if (store.used(gpuType) + gpus > limit) {
         throw new Refusal("over_limit", `${gpus} ${gpuType} GPUs would pass the limit of ${limit} (${store.used(gpuType)} held).`);
       }
@@ -353,7 +361,9 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       }
       // Settings or profiles can change while the host calls run: check again
       // with what holds now, with no await between this and the transaction.
-      const fresh = await current();
+      // The newest settings, read after any await: the check and the transaction run with nothing between them.
+      await current();
+      const fresh = latest!;
       const recheck = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles());
       if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during acquire; try again.`);
       const row = store.acquire(
@@ -434,8 +444,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             run: (input, ctx) =>
               json(async () => {
                 const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
+                // A direct read: release checks no limit, and must not wait behind the settings cache.
                 const cfg = await config();
-                latest = cfg;
                 const row = store.release(id, ctx.threadId, cfg);
                 publish();
                 // A release tears down at once, not at the next tick.
@@ -536,7 +546,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             const beat = beats.get(hostId);
             return { hostId, at: beat?.last_ok_at ?? null, ok: beat?.ok === 1, detail: beat?.detail ?? "no heartbeat yet" };
           }),
-          capacity: types.map((gpuType) => ({ gpuType, limit: cfg.limits[gpuType] ?? 0, used: used.get(gpuType) ?? 0 })),
+          capacity: types.map((gpuType) => ({ gpuType, limit: own(cfg.limits, gpuType) ?? 0, used: used.get(gpuType) ?? 0 })),
           maxExtendHours: cfg.maxExtendMs / 3_600_000,
         };
       },
@@ -570,6 +580,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
     settings.onChange((next, prev) => {
       const changed = (Object.keys(next) as Array<keyof typeof next>).filter((key) => next[key] !== prev[key]);
       if (changed.length === 0) return;
+      settingsVersion += 1;
       latest = parseConfig(next);
       const clip = (value: unknown) => String(value).slice(0, 300);
       store.flag(null, "settings_changed", `Settings changed: ${changed.map((key) => `${key}: ${clip(prev[key])} -> ${clip(next[key])}`).join("; ")}`);

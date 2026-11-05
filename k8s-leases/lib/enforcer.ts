@@ -184,7 +184,7 @@ export function createEnforcer(deps: EnforcerDeps) {
       ? `${allocation} GPUs of type ${ns.gpu_type ?? "unknown"} on a ${lease.gpu_type} lease`
       : `${allocation} GPUs on a lease of ${lease.gpus} (DGD specs ${ns.dgd_gpus}, pods ${ns.pod_gpus})`;
     db().flag(lease.id, "over_allocation", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): ${what}. Revoked; DGDs scaled to 0.`);
-    return db().revoke(lease.id, "over_allocation", now() + cfg.graceMs);
+    return db().revoke(lease.id, "over_allocation", cfg.graceMs);
   }
 
   async function observe(lease: LeaseRow, cfg: Config): Promise<void> {
@@ -252,7 +252,7 @@ export function createEnforcer(deps: EnforcerDeps) {
         if (fate !== "archived" && fate !== "deleted" && fate !== "missing") return;
         const fresh = db().find(lease.id);
         if (fresh?.state !== "active") return;
-        await teardown(db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs), cfg);
+        await teardown(db().revoke(lease.id, `thread_${fate}`, cfg.graceMs), cfg);
         deps.changed();
       })().finally(() => threadChecks.delete(lease.id)),
       `lease ${lease.id}: thread check`,
@@ -301,7 +301,7 @@ export function createEnforcer(deps: EnforcerDeps) {
     threadGone(threadId: string, fate: "archived" | "deleted", cfg: Config): Promise<void> {
       const work = db()
         .activeOfThread(threadId)
-        .map((lease) => dispatch(db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs).id, cfg));
+        .map((lease) => dispatch(db().revoke(lease.id, `thread_${fate}`, cfg.graceMs).id, cfg));
       return Promise.all(work).then(() => undefined);
     },
   };
