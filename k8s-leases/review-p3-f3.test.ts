@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HOST_ONE, HOUR, MIN, THREAD_A, setup } from "./test-support.ts";
 
-test("an extend that times out can still commit after a newer synced extension and trigger the offline timer early", { todo: "p3 f3 [boundary]: needs k8s-guard's monotonic extend (STRGT-897); proved on the real guard by contract.test.ts, the gate once 897 merges" }, async () => {
+test("an extend that times out can still commit after a newer synced extension and trigger the offline timer early", async () => {
   const world = await setup();
   await world.tick();
   const { id, ns, result } = await world.lease(THREAD_A, "review-p3-extend-timeout", 4, { hours: 1 });
@@ -22,7 +22,11 @@ test("an extend that times out can still commit after a newer synced extension a
       assert.equal(shown.uid, input.uid);
       pendingExpiry = shown.expires_at;
       // The API request is already sent when the guard reaches its timeout.
-      land = () => { ns.expiresAt = pendingExpiry; };
+      // Adjusted by the implementer for the merged guard (STRGT-897): its write is a replace with the
+      // resourceVersion it read, and it never moves expires-at earlier. The contract test proves this
+      // on the real guard ("p3 f3 on the real guard").
+      const readRv = ns.recordRv;
+      land = () => { world.cluster.replaceExpiry(ns, pendingExpiry, readRv); };
       world.clock.advance(MIN);
       return { ok: false, code: "guard_timeout", error: "extend timed out with its Kubernetes write still in flight" };
     }

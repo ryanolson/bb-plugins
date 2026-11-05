@@ -58,6 +58,8 @@ export interface FakeNamespace {
   dgds: Map<string, number>;
   pods: Pod[];
   deleting: boolean;
+  /** The lease record's resourceVersion: every write to expires-at bumps it. */
+  recordRv: number;
 }
 
 let uidCounter = 0;
@@ -86,6 +88,7 @@ export class FakeCluster {
       dgds: new Map(),
       pods: [],
       deleting: false,
+      recordRv: 1,
     };
     this.namespaces.set(this.key(cluster, name), ns);
     return ns;
@@ -121,6 +124,19 @@ export class FakeCluster {
       ns.pods = ns.pods.filter((pod) => !pod.terminating);
       if (ns.deleting && ns.pods.length === 0) this.namespaces.delete(key);
     }
+  }
+
+  /**
+   * k8s-guard extend's write, as merged (STRGT-897): a replace that carries
+   * the resourceVersion it read, so a late write after a newer one conflicts;
+   * and it never moves expires-at earlier.
+   */
+  replaceExpiry(ns: FakeNamespace, value: string, readRv: number): "written" | "unchanged" | "conflict" {
+    if (readRv !== ns.recordRv) return "conflict";
+    if (ns.expiresAt !== null && Date.parse(ns.expiresAt) >= Date.parse(value)) return "unchanged";
+    ns.expiresAt = value;
+    ns.recordRv += 1;
+    return "written";
   }
 
   inspect(ns: FakeNamespace): Inspect {
@@ -220,8 +236,12 @@ export class FakeGuard {
     }
     if (method === "expire") this.cluster.scaleToZero(ns);
     if (method === "extend") {
+      const readRv = ns.recordRv;
       const shown = await this.cli(["lease", "show", input.leaseId]);
-      ns.expiresAt = shown.json.expires_at;
+      if (this.cluster.replaceExpiry(ns, shown.json.expires_at, readRv) === "conflict") {
+        record("refused:record_conflict");
+        return { ok: false, code: "record_conflict", error: "the lease record changed under this extend" };
+      }
     }
     if (method === "down") {
       if (this.failDown) {
