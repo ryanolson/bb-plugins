@@ -20,7 +20,7 @@
 // `down` runs once per lease, on one host at a time, on its own lane.
 // `extend` runs one at a time per lease. After the plugin unloads, nothing
 // touches the database, and every promise has a handler from the start.
-import { UID, type GuardFailure, type Inspect } from "./contract.ts";
+import { UID, allocationOf, type GuardFailure, type Inspect } from "./contract.ts";
 import type { HostAnswer, Hosts } from "./hosts.ts";
 import type { LeaseRow, Store } from "./store.ts";
 import type { Config } from "./settings.ts";
@@ -210,13 +210,13 @@ export function createEnforcer(deps: EnforcerDeps) {
 
   /** Revoke for an over-allocation, or null when the namespace fits its lease. */
   function overAllocated(lease: LeaseRow, ns: Inspect, cfg: Config): LeaseRow | null {
-    const allocation = Math.max(ns.dgd_gpus, ns.pod_gpus);
+    const allocation = allocationOf(ns);
     // GPUs of an unknown type cannot be charged to this lease's type.
     const wrongType = allocation > 0 && ns.gpu_type !== lease.gpu_type;
     if (allocation <= lease.gpus && !wrongType) return null;
     const what = wrongType
       ? `${allocation} GPUs of type ${ns.gpu_type ?? "unknown"} on a ${lease.gpu_type} lease`
-      : `${allocation} GPUs on a lease of ${lease.gpus} (DGD specs ${ns.dgd_gpus}, pods ${ns.pod_gpus})`;
+      : `${allocation} GPUs on a lease of ${lease.gpus} (DGD specs ${ns.dgd_gpus}, pods ${ns.pod_gpus}, guard allocation ${ns.allocation ?? "not given"})`;
     db().flag(lease.id, "over_allocation", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): ${what}. Revoked; DGDs scaled to 0.`);
     return db().revoke(lease.id, "over_allocation", cfg.graceMs);
   }

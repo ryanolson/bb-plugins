@@ -41,8 +41,17 @@ export const INSPECT = z.object({
   pod_gpus: z.number().int().min(0),
   gpu_type: z.string().nullable(),
   gpu_pods_left: z.number().int().min(0),
+  /** The guard's own count: per DGD the larger of its spec and its live pods, plus GPU pods no DGD owns. */
+  allocation: z.number().int().min(0).optional(),
+  /** The lease the namespace's lease record names. */
+  lease_id: z.string().nullable().optional(),
 });
 export type Inspect = z.infer<typeof INSPECT>;
+
+/** The GPUs a namespace holds: the largest of the guard's allocation, the DGD specs and the pods. */
+export function allocationOf(ns: Inspect): number {
+  return Math.max(ns.dgd_gpus, ns.pod_gpus, ns.allocation ?? 0);
+}
 
 /**
  * The cluster profiles (schema 1), as `k8s-check --list` prints them. Only

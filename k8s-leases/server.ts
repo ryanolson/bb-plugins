@@ -20,6 +20,7 @@ import {
   THREAD_ID,
   PROFILES,
   UID,
+  allocationOf,
   hostContract,
   rpcContract,
   type GuardFailure,
@@ -366,7 +367,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const ns = result.value;
       if (ns.uid !== uid) throw new Refusal("uid_mismatch", `${namespace} has UID ${ns.uid}, not ${uid}.`);
       if (ns.thread !== thread) throw new Refusal("not_your_namespace", `${namespace} is labelled for ${ns.thread ?? "no thread"}, not ${thread}.`);
-      const allocation = Math.max(ns.dgd_gpus, ns.pod_gpus);
+      const allocation = allocationOf(ns);
       if (allocation > gpus) throw new Refusal("namespace_over_lease", `${namespace} already holds ${allocation} GPUs, more than ${gpus}.`);
       if (allocation > 0 && ns.gpu_type !== gpuType) {
         throw new Refusal("gpu_type_mismatch", `${namespace} holds ${allocation} GPUs of type ${ns.gpu_type ?? "unknown"}, not ${gpuType}.`);
