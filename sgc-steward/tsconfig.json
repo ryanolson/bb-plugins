@@ -28,6 +28,8 @@
     "server.asks.test.ts",
     "server.todos.test.ts",
     "server.answer-of.test.ts",
+    "server.hosts.test.ts",
+    "test-support-hosts.ts",
     "test-support.ts",
     "app.tsx",
     "components",

@@ -2,12 +2,13 @@
 // that tells you, once per question or todo, that new ones came. The page has
 // a tab per list, each at its own route: Questions holds the two kinds of
 // question, Linear blocks and bb questions agents asked with `bb sgc ask`, and
-// Todos holds your todos from Linear.
+// Todos holds your todos from Linear. Hosts shows each host's threads against
+// bb's concurrency limit, read only.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
 // permission) and a bb toast otherwise. The badge is the lasting signal.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import {
@@ -21,10 +22,12 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, TodoView, rpcContract } from "./lib/contract.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
+import { limitText, UNPLACED_NAME, waitText, type HostsView } from "./lib/hosts.ts";
 import {
   announcement,
   askAnswerInput,
   filterCards,
+  hostsBadge,
   labelChoices,
   noticeTab,
   orderCards,
@@ -582,11 +585,11 @@ function Todos({ todos, todoError, known }: { todos: TodoView[]; todoError: stri
 }
 
 /** The tab bar: each tab with its open count, and a dot when something on it failed. */
-function TabBar({ active, badges, onSelect }: { active: PanelTab; badges: Record<PanelTab, TabBadge> | null; onSelect: (tab: PanelTab) => void }) {
+function TabBar({ active, badges, onSelect }: { active: PanelTab; badges: Partial<Record<PanelTab, TabBadge>>; onSelect: (tab: PanelTab) => void }) {
   return (
     <div role="tablist" aria-label="SGC Steward" className="flex gap-1 border-b border-border">
       {PANEL_TABS.map(({ id, label }) => {
-        const badge = badges?.[id];
+        const badge = badges[id];
         const selected = id === active;
         return (
           <button
@@ -710,6 +713,111 @@ function QuestionFilter({
   );
 }
 
+// --- hosts ----------------------------------------------------------------
+
+const HOSTS_REFRESH_MS = 30_000;
+
+/** The Hosts view: read once for the tab's badge, and every 30 seconds while the tab is open. */
+function useHosts(active: boolean) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [view, setView] = useState<HostsView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Loads overlap when the tab opens or Refresh is pressed; only the newest may land, so an older read never replaces newer counts.
+  const latest = useRef(0);
+  const load = useCallback(() => {
+    const request = ++latest.current;
+    rpc.call("hosts.list", null).then(
+      (next) => {
+        if (request !== latest.current) return;
+        setView(next);
+        setError(null);
+      },
+      (cause: unknown) => {
+        if (request === latest.current) setError(errorText(cause));
+      },
+    );
+  }, [rpc]);
+  useEffect(load, [load]);
+  useEffect(() => {
+    if (!active) return;
+    load();
+    const timer = setInterval(load, HOSTS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [active, load]);
+  return { view, error, load };
+}
+
+function HostCell({ children, className }: { children: ReactNode; className?: string }) {
+  return <td className={cn("px-2 py-1.5 tabular-nums", className)}>{children}</td>;
+}
+
+/** The Hosts tab: the same rows and numbers as `bb sgc hosts`, from the same view model. */
+function Hosts({ view, error, onRefresh, now }: { view: HostsView | null; error: string | null; onRefresh: () => void; now: number }) {
+  const loose = view?.unplaced;
+  return (
+    <>
+      <div className="flex items-center gap-3 text-sm text-muted-foreground">
+        <span className="min-w-0 flex-1">
+          {view === null
+            ? "Loading…"
+            : `Checked ${relativeTime(view.checkedAt, now)}. Global limit: ${view.globalLimit === null ? "none" : `${view.globalLimit}${view.globalAtLimit ? ", reached" : ""}`}. Running: ${view.running}.`}
+        </span>
+        <Button variant="outline" size="sm" onClick={onRefresh}>
+          <Icon name="ArrowReloadHorizontal" className="size-4" />
+          Refresh
+        </Button>
+      </div>
+      {error === null ? null : <Notice tone="error">Could not read bb: {error}</Notice>}
+      {view?.limitError ? <Notice tone="error">Could not read the limits: {view.limitError}</Notice> : null}
+      {view === null ? null : (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs text-muted-foreground">
+              <tr>
+                {["Host", "Status", "Running", "Idle", "Waiting", "Oldest wait", "Limit"].map((title) => (
+                  <th key={title} scope="col" className="px-2 py-1.5 font-medium">
+                    {title}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {view.hosts.map((host) => (
+                <tr key={host.id} className={cn("border-t border-border", host.status !== "connected" && "text-muted-foreground")}>
+                  <HostCell>
+                    <span title={host.id}>{host.name}</span>
+                  </HostCell>
+                  <HostCell>{host.status}</HostCell>
+                  <HostCell>{host.running}</HostCell>
+                  <HostCell>{host.idle}</HostCell>
+                  <HostCell className={cn(host.waiting > 0 && "font-medium text-destructive")}>{host.waiting}</HostCell>
+                  <HostCell>{waitText(host.oldestWaitMs)}</HostCell>
+                  <HostCell className={cn(host.atLimit && "font-medium")}>{limitText(host)}</HostCell>
+                </tr>
+              ))}
+              {loose === undefined || loose.running + loose.idle + loose.waiting === 0 ? null : (
+                <tr className="border-t border-border text-muted-foreground">
+                  <HostCell>{UNPLACED_NAME}</HostCell>
+                  <HostCell>-</HostCell>
+                  <HostCell>{loose.running}</HostCell>
+                  <HostCell>{loose.idle}</HostCell>
+                  <HostCell>{loose.waiting}</HostCell>
+                  <HostCell>{waitText(loose.oldestWaitMs)}</HostCell>
+                  <HostCell>-</HostCell>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Read only. Running threads are starting or active. Waiting counts the threads whose turn bb holds at a limit, with how long the oldest has been
+        queued. Set a limit with <code>bb concurrency-limit host</code>.
+      </p>
+    </>
+  );
+}
+
 /** The SGC page: the last check and its trouble on top, then a tab per list. */
 function SgcPage({ subPath }: { subPath: string }) {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
@@ -717,6 +825,7 @@ function SgcPage({ subPath }: { subPath: string }) {
   const [refreshing, setRefreshing] = useState(false);
   const now = useNow(30_000);
   const tab = tabOf(subPath);
+  const hosts = useHosts(tab === "hosts");
   const [chosen, setChosen] = useState<string[]>([]);
   const [match, setMatch] = useState<LabelMatch>("any");
   const [order, setOrder] = useState<CardOrder>("age");
@@ -764,7 +873,7 @@ function SgcPage({ subPath }: { subPath: string }) {
         ) : null}
         <TabBar
           active={tab}
-          badges={snapshot === null ? null : tabBadges(snapshot)}
+          badges={{ ...(snapshot === null ? {} : tabBadges(snapshot)), hosts: hostsBadge(hosts.view) }}
           onSelect={(next) => navigate.toPluginPanel(PANEL_PATH, { subPath: tabPath(next) })}
         />
         <TabPanel tab="questions" active={tab}>
@@ -813,6 +922,9 @@ function SgcPage({ subPath }: { subPath: string }) {
           {snapshot === null ? null : (
             <Undelivered title="Messages to the steward that did not go out" undelivered={sendsFor("todos", snapshot.undelivered)} unposted={[]} />
           )}
+        </TabPanel>
+        <TabPanel tab="hosts" active={tab}>
+          <Hosts view={hosts.view} error={hosts.error} onRefresh={hosts.load} now={now} />
         </TabPanel>
       </div>
     </div>

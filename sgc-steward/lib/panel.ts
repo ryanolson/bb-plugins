@@ -2,6 +2,7 @@
 // React code so it can be tested without a DOM.
 
 import type { DeliveryView, Panel } from "./contract.ts";
+import type { HostsView } from "./hosts.ts";
 import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
 
 /** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
@@ -132,6 +133,7 @@ export function withDone<T extends { issueId: string }>(list: readonly T[], entr
 export const PANEL_TABS = [
   { id: "questions", label: "Questions", subPath: "" },
   { id: "todos", label: "Todos", subPath: "todos" },
+  { id: "hosts", label: "Hosts", subPath: "hosts" },
 ] as const;
 
 export type PanelTab = (typeof PANEL_TABS)[number]["id"];
@@ -173,12 +175,18 @@ export interface TabBadge {
   alert: boolean;
 }
 
-/** Each tab's badge: open questions, or open todos, and an alert for a failed send, record, or read on that tab. */
-export function tabBadges(view: TabInput): Record<PanelTab, TabBadge> {
+/** Each list tab's badge: open questions, or open todos, and an alert for a failed send, record, or read on that tab. */
+export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts">, TabBadge> {
   return {
     questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
     todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },
   };
+}
+
+/** The Hosts tab's badge: the turns waiting on a limit, on a host or not, and an alert when the limits could not be read. */
+export function hostsBadge(view: HostsView | null): TabBadge {
+  if (view === null) return { count: 0, alert: false };
+  return { count: view.hosts.reduce((sum, host) => sum + host.waiting, view.unplaced.waiting), alert: view.limitError !== null };
 }
 
 /** How a label filter matches, as Linear's does: a question with any of the labels, or with all of them. */

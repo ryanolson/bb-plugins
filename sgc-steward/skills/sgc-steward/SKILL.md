@@ -107,6 +107,7 @@ bb sgc answer-of <id> [--json]
 bb sgc todos [--json] [--cached]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
+bb sgc hosts [--digest] [--json]
 ```
 
 - `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`. `--label <name>` lists only the questions with that label. Give it again for more: a question then needs any one of them, or every one with `--match all`. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`.
@@ -114,4 +115,5 @@ bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <nam
 - `bb sgc answer` posts one unsigned comment on a Linear issue: a header that names each `--block`, then the file's text, quoted line by line. Pass each block the text answers, as `bb sgc questions` prints it. It answers each named block whole, so cover every question still open in it. Linear then treats it as the owner's answer. Use it only to relay the owner's own words, never your own judgment.
 - Number the relayed answers to match: `Q1. A`, `Q2. <text>`.
 - `bb sgc answer` refuses text that starts with `[agent:`, and issues with no open questions.
+- `bb sgc hosts` shows each host: running and idle threads, the turns waiting on bb's concurrency limit with the oldest wait, and the limit, `override` or `automatic`. The steward runs `bb sgc hosts --digest` for its digest: the hosts at their limit, and the hosts with waiting turns and the oldest wait. `--json` gives `atLimit` and `waiting`. It only reads. Change a limit with `bb concurrency-limit host` only on the owner's word. It exits 1 when the limits could not be read, and the counts still show.
 - `bb sgc todo done` marks a todo done as the owner, and the steward treats its message as the owner's word. Run it only to relay the owner's own word that the action is done, never on your own judgment.
