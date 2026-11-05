@@ -175,6 +175,18 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       return latest ?? read;
     };
 
+    /**
+     * Run a check-and-commit with the newest settings: read them, keep the
+     * newer of that read and the onChange snapshot, then run `fn` at once.
+     * `fn` is synchronous, so nothing can change the settings between its
+     * check and its commit. Every handler that checks a limit or a maximum
+     * goes through here.
+     */
+    async function withSettings<T>(fn: (cfg: Config) => T): Promise<T> {
+      await current();
+      return fn(latest!);
+    }
+
     /** Hosts with a good probe inside the heartbeat window, freshest first. */
     function healthy(): string[] {
       const hosts = latest?.hosts ?? [];
@@ -361,16 +373,15 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       }
       // Settings or profiles can change while the host calls run: check again
       // with what holds now, with no await between this and the transaction.
-      // The newest settings, read after any await: the check and the transaction run with nothing between them.
-      await current();
-      const fresh = latest!;
-      const recheck = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles());
-      if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during acquire; try again.`);
-      const row = store.acquire(
-        { id: newLeaseId(), thread, cluster, context, namespace, uid, gpuType, gpus, hours, approvals: recheck.approvals },
-        fresh,
-        HEARTBEAT_WINDOW_MS,
-      );
+      const row = await withSettings((fresh) => {
+        const recheck = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles());
+        if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during acquire; try again.`);
+        return store.acquire(
+          { id: newLeaseId(), thread, cluster, context, namespace, uid, gpuType, gpus, hours, approvals: recheck.approvals },
+          fresh,
+          HEARTBEAT_WINDOW_MS,
+        );
+      });
       publish();
       return { lease_id: row.id, expires_at: iso(row.expires_at) };
     }
@@ -460,8 +471,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             options: jsonFlag,
             run: (input, ctx) =>
               json(async () => {
-                const cfg = await current();
-                const row = store.renew(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), ctx.threadId, cfg);
+                const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
+                const { row, cfg } = await withSettings((cfg) => ({ row: store.renew(id, ctx.threadId, cfg), cfg }));
                 await enforcer.sync(row, cfg);
                 publish();
                 return { expires_at: iso(row.expires_at) };
@@ -552,9 +563,9 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       },
       async extend({ leaseId, minutes }) {
         let row: LeaseRow;
-        const cfg = await current();
+        let cfg: Config;
         try {
-          row = store.extend(leaseId, minutes, cfg);
+          ({ row, cfg } = await withSettings((fresh) => ({ row: store.extend(leaseId, minutes, fresh), cfg: fresh })));
         } catch (error) {
           refusal(error);
         }
