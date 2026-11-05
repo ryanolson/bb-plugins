@@ -59,7 +59,7 @@ sequenceDiagram
   - `inspect` goes to every healthy host at once. The first answer that shows more GPUs than the lease, or GPUs of another or unknown type, revokes the lease.
   - A lease that is not active gets a fresh `k8s-guard expire` on every tick, sent to every healthy host at once, whatever `inspect` says. `expire` only reduces, so one success is enough.
   - `down` runs when the grace deadline passes, or at once for a returned lease, started beside `expire`, not after it. It runs once per lease, on one host at a time, with the hosts whose last call failed tried last. A namespace still there 15 minutes after its first `down` raises a `teardown_failing` flag.
-  - A guard result is either a host fault or a refusal. A host fault (spawn error, timeout, no JSON, kubectl or connection error) moves a call on to the next host. A refusal (`pods_left`, `uid_mismatch`, `lease_active`, `lease_ended`, `lease_mismatch`, `lease_not_active`, `not_expired`, `record_conflict`, `not_found`) is an answer: it never moves a call on and never cools a host down. `pods_left` means `down` runs again next tick. `uid_mismatch` on a teardown is flagged as a re-created namespace, and it never frees GPUs on its own.
+  - A guard result is either a host fault or a refusal. A host fault (spawn error, timeout, no JSON, kubectl or connection error) moves a call on to the next host. A refusal (`pods_left`, `uid_mismatch`, `lease_active`, `lease_ended`, `lease_mismatch`, `lease_not_active`, `not_expired`, `record_conflict`, `lease_record_missing`, `not_found`) is an answer: it never moves a call on and never cools a host down. `pods_left` means `down` runs again next tick. `uid_mismatch` on a teardown is flagged as a re-created namespace, and it never frees GPUs on its own. `lease_record_missing` (the namespace has no lease record, because acquire failed after the grant) is flagged once, and tells the user to release the lease.
   - A namespace whose `expires-at` differs from the lease gets `k8s-guard extend`, one at a time per lease. `k8s-guard` decides where a namespace keeps its `expires-at`. The plugin reads it only through `inspect`.
 - **Teardown is narrow.** Every write passes the lease's namespace UID, and the guard refuses a write to a namespace with another UID.
 - **GPUs free late.** A lease frees its GPUs only when at least one host reports its namespace gone or re-created, and no host that answered still sees it. The report must come from a call that started after the last call that saw the namespace. A host that gives no answer frees nothing.
@@ -83,5 +83,11 @@ bb plugin build .
 ```
 
 The plugin's SQLite schema is version 1, in `lib/store.ts`. From the first install on, migrations are append-only: never edit or reorder a shipped statement; add a new one after it.
+
+The contract test runs the plugin against the real `k8s-guard`, through the real host entry, on the guard's own fake `kubectl` and fixtures (`contract/world.py`). It never touches a real cluster. It needs the guard repository checked out at the commit pinned in `contract.test.ts` (`GUARD_COMMIT`). Without `K8S_GUARD_REPO` it is skipped.
+
+```
+K8S_GUARD_REPO=/path/to/dynamo-dotfiles npm run test:contract   # about 70 s
+```
 
 The tests use a fake `k8s-guard` and a fake bb thread lookup (`test-support.ts`). The host entry tests run a fake `k8s-guard` and a fake `bb` on a PATH that holds nothing else.

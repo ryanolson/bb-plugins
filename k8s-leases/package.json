@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node --test --test-timeout=20000 \"lib/*.test.ts\" \"*.test.ts\""
+    "test": "node --test --test-timeout=20000 \"lib/*.test.ts\" \"*.test.ts\"",
+    "test:contract": "node --test --test-timeout=300000 contract.test.ts"
   },
   "engines": {
     "bb": ">=0.47",
