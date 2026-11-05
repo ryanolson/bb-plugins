@@ -106,7 +106,7 @@ The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, co
 - A waiting turn is a thread with a queued row that the `concurrency-limit` plugin holds. Its wait counts from when its oldest held row was queued. A row that first waited behind its own thread's turn counts from then, so the wait can read longer than the hold.
 - When another plugin's wait comes first on a row, bb names only that plugin, and the row does not count.
 - A thread on no host that bb lists, such as a new thread before its workspace, shows on a `(no host)` row.
-- The limits come from `bb concurrency-limit status --json`, which the plugin runs on the bb server with `$BB_CLI`, or `bb` on the PATH. bb gives limits out nowhere else. When that fails, the counts still show without limits, and `bb sgc hosts` exits 1.
+- The limits come from the concurrency-limit plugin's `getConfiguration` RPC, the same read that `bb concurrency-limit status --json` prints. It is the only RPC the plugin calls. When it fails, the counts still show without limits, and `bb sgc hosts` exits 1.
 - The tab reads bb when the page opens, and every 30 seconds while the tab is open. Its count is the waiting turns, and its dot means the limits could not be read.
 - `bb sgc hosts --digest` prints only the flags for the steward: the global limit when it is reached, the hosts at their limit, and the hosts with waiting turns and the oldest wait.
 
@@ -188,7 +188,7 @@ bb plugin logs sgc-steward
 - `lib/settings.ts`: the plugin's settings.
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
-- `lib/hosts-read.ts`: the reads of bb behind the Hosts view, and the bb runner that refuses any command but the limit status.
+- `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
