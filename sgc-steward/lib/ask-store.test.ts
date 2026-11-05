@@ -59,6 +59,8 @@ test("the shipped migration statements never change, because the host refuses a 
     "1ffaddb9383af162",
     "0bbedde4ed482939",
     "e691d98041e2b45c",
+    // The labels of a bb question.
+    "b8210bd76ed99376",
   ];
   assert.deepEqual(STORE_MIGRATIONS.slice(0, shipped.length).map(hash), shipped);
 });
@@ -125,13 +127,13 @@ test("only the asking thread withdraws, and only an open question", () => {
   assert.deepEqual([row.withdrawnBy, row.withdrawReason], ["thr_a", null]);
   assert.equal(store.deliveryFor("withdrawal", "bbq_1", "thr_a"), null, "a thread that withdraws its own question is not told");
   assert.deepEqual(store.listOpen(), []);
-  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, "bb", { message: "m", label: "bbq_1" }, null), "not_open");
 });
 
 test("an answer is saved once, with its delivery and its record, in one step", () => {
   const { store } = open();
   store.admit(ask("bbq_1", { issue: "TEAM-1" }), false);
-  assert.equal(store.answer("bbq_1", { option: "B", text: "Wait." }, { message: "delivered text", label: "bbq_1" }, { issue: "TEAM-1", body: "record" }), "answered");
+  assert.equal(store.answer("bbq_1", { option: "B", text: "Wait." }, "bb", { message: "delivered text", label: "bbq_1" }, { issue: "TEAM-1", body: "record" }), "answered");
   const row = store.get("bbq_1")!;
   assert.equal(row.state, "answered");
   assert.deepEqual(row.answer, { option: "B", text: "Wait." });
@@ -139,9 +141,9 @@ test("an answer is saved once, with its delivery and its record, in one step", (
   assert.equal(delivery.state, "pending");
   assert.equal(delivery.message, "delivered text");
   assert.deepEqual(store.record("bbq_1"), { askId: "bbq_1", issue: "TEAM-1", body: "record", state: "pending", commentId: null, error: null, attempts: 0 });
-  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "again", label: "bbq_1" }, null), "not_open");
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, "bb", { message: "again", label: "bbq_1" }, null), "not_open");
   assert.equal(store.deliveryFor("ask", "bbq_1", "thr_a")!.message, "delivered text", "a second answer changes nothing");
-  assert.equal(store.answer("bbq_9", { option: "A", text: "" }, { message: "m", label: "x" }, null), "not_found");
+  assert.equal(store.answer("bbq_9", { option: "A", text: "" }, "bb", { message: "m", label: "x" }, null), "not_found");
 });
 
 const ANSWER = { ref: "c-1", issueId: "uuid-1", label: "TEAM-1", message: "one" };
@@ -192,7 +194,7 @@ test("a delivery is kept once per source, reference, and thread, and records its
 test("records that did not post are listed until they do", () => {
   const { store } = open();
   store.admit(ask("bbq_1", { issue: "TEAM-1" }), false);
-  store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, { issue: "TEAM-1", body: "record" });
+  store.answer("bbq_1", { option: "A", text: "" }, "bb", { message: "m", label: "bbq_1" }, { issue: "TEAM-1", body: "record" });
   store.markRecord("bbq_1", { ok: false, error: "no key" });
   assert.deepEqual(store.unposted().map((row) => [row.askId, row.state, row.error, row.attempts]), [["bbq_1", "failed", "no key", 1]]);
   store.markRecord("bbq_1", { ok: true, commentId: "c-9" });
@@ -242,7 +244,7 @@ test("the steward withdraws any open question, and its notice and record are sav
   assert.deepEqual([notice.state, notice.label, notice.message], ["pending", "Withdrawal of bbq_1", "told"]);
   assert.deepEqual([store.record("bbq_1")?.issue, store.record("bbq_1")?.body], ["TEAM-1", "recorded"]);
   assert.equal(store.withdraw("bbq_1", steward), "not_open", "a second withdrawal changes nothing");
-  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, { message: "m", label: "bbq_1" }, null), "not_open");
+  assert.equal(store.answer("bbq_1", { option: "A", text: "" }, "bb", { message: "m", label: "bbq_1" }, null), "not_open");
 });
 
 test("a database with the six shipped steps upgrades: its questions stay, and the todo table works", () => {
@@ -288,5 +290,5 @@ test("a database with the nine shipped steps upgrades: a question from before ha
   migrate(db, STORE_MIGRATIONS);
   const store = createAskStore(db, now);
   assert.deepEqual(store.get("bbq_old")!.labels, []);
-  assert.equal(store.answer("bbq_old", { option: null, text: "Yes." }, { message: "m", label: "bbq_old" }, null), "answered");
+  assert.equal(store.answer("bbq_old", { option: null, text: "Yes." }, "bb", { message: "m", label: "bbq_old" }, null), "answered");
 });

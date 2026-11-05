@@ -7,7 +7,7 @@ Answer the questions your agents ask, on Linear check-in issues or with `bb sgc 
 - Pick an option or type an answer on a question's card, then post it. The plugin posts one unsigned comment per answer, numbered to match, that names the block, and the question when the block holds several. A block stays open until each of its questions has an answer. On a needs-decision issue the plugin then removes the label, when no newer question is open.
 - A Todos tab: your open Linear todos with their steps, a Done button with a note, and Undo for a Done from the page. Done comments as you, moves a `human` issue to Done or removes the waiting label from any other, and tells the steward thread.
 - A sidebar badge with the number of open questions, and one notification per new question block or todo, which opens its tab: a system notification while bb is in the background, a bb toast otherwise.
-- A `bb sgc` command: `ask` and `withdraw` for agents, `questions` lists the open questions, `answer` posts a file as the answer to Linear blocks, `todos` and `todo done` list your todos and mark one done, `key` stores the Linear API key from stdin.
+- A `bb sgc` command: `ask` and `withdraw` for agents, `questions` lists the open questions, `answer-of` shows how a bb question was answered, from the plugin's own record, `answer` posts a file as the answer to Linear blocks, `todos` and `todo done` list your todos and mark one done, `key` stores the Linear API key from stdin.
 
 ## How it works
 
@@ -35,6 +35,8 @@ A todo's Done or Undo is kept in the same database before it writes to Linear. I
 - The plugin cannot tell a Done by you from one an agent ran with `bb sgc todo done`: the CLI does not verify its caller. The skill tells agents to run it only to relay your own word that the action is done.
 - Any agent can change plugin settings: every agent runs as you, with full access, and bb has no setting that only you can change. So an agent can name itself in `stewardThread`, then withdraw the questions of other threads and get the messages about your todos. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
 - The `bb sgc` CLI takes the calling thread from `BB_THREAD_ID`, which the bb CLI forwards without checking. So `withdraw` and `ask --thread` trust it, and a process that sets it can withdraw another thread's question or ask for another thread. Withdrawing any thread's question is therefore not in the CLI. It is only in the `sgc_withdraw_question` agent tool. The bb plugin SDK hands that tool, for each call, the thread of the agent session that made the call, and no argument or environment variable sets it.
+
+- `bb sgc answer-of` reports how a bb question was answered from the plugin's own record, never from Linear, so a Linear comment that copies an answer changes nothing. Its `channel` says where the answer came from: `bb` is the plugin's answer RPC, which the page calls. A known limit: bb hands every RPC, from the page, the `bb` CLI, or an agent, to the plugin as the same caller, so an agent can answer a bb question with `bb plugin rpc call sgc-steward asks.answer`, and its answer also shows `channel` `bb`. An agent can also write the plugin's database, which belongs to the user every agent runs as. So `answer-of` proves which path stored the answer, not that you gave it. An answer stored before `channel` was kept shows `null`.
 
 ## For agents
 

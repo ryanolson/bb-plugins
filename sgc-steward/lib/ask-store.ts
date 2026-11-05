@@ -5,7 +5,7 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import { ASK_LIMITS, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
+import { ASK_LIMITS, type AnswerChannel, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
 
 /**
  * Every migration after seen_blocks, in order: the plugin's one migration
@@ -89,6 +89,9 @@ export const STORE_MIGRATIONS: readonly string[] = [
   `CREATE UNIQUE INDEX IF NOT EXISTS todo_actions_pending ON todo_actions (issue_id, kind) WHERE state = 'pending'`,
   // The labels an asker gives a bb question, as a JSON list; a question from before has none.
   `ALTER TABLE asks ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`,
+  // Where the answer came from. Null for an answer stored before, so a check
+  // that needs a known channel refuses it rather than guessing.
+  `ALTER TABLE asks ADD COLUMN answer_channel TEXT`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn";
@@ -97,6 +100,8 @@ export interface AskRow extends Ask {
   state: AskState;
   answer: AskAnswer | null;
   answeredAt: number | null;
+  /** Where the answer came from; null unless answered, and for an answer stored before the channel was kept. */
+  answerChannel: AnswerChannel | null;
   /** The thread that withdrew it; null unless withdrawn, and for a withdrawal from the owner's terminal. */
   withdrawnBy: string | null;
   withdrawReason: string | null;
@@ -208,6 +213,7 @@ interface AskRecord {
   state: AskState;
   answer: string | null;
   answered_at: number | null;
+  answer_channel: AnswerChannel | null;
   withdrawn_by: string | null;
   withdraw_reason: string | null;
   withdrawn_at: number | null;
@@ -251,6 +257,7 @@ function toAsk(row: AskRecord): AskRow {
     state: row.state,
     answer: row.answer === null ? null : (JSON.parse(row.answer) as AskAnswer),
     answeredAt: row.answered_at,
+    answerChannel: row.answer_channel,
     withdrawnBy: row.withdrawn_by,
     withdrawReason: row.withdraw_reason,
     withdrawnAt: row.withdrawn_at,
@@ -368,14 +375,15 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
     },
 
     /**
-     * Save an answer with the delivery to the asking thread and, when the
-     * question names an issue, the record to post. Only an open question
-     * takes an answer, so a second submit or an answer racing a withdraw
-     * changes nothing.
+     * Save an answer, and the channel it came by, with the delivery to the
+     * asking thread and, when the question names an issue, the record to
+     * post. Only an open question takes an answer, so a second submit or an
+     * answer racing a withdraw changes nothing.
      */
     answer(
       id: string,
       answer: AskAnswer,
+      channel: AnswerChannel,
       delivery: { message: string; label: string },
       record: { issue: string; body: string } | null,
     ): "answered" | "not_found" | "not_open" {
@@ -384,8 +392,8 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
         if (row === undefined) return "not_found" as const;
         const at = now();
         const changed = db
-          .prepare("UPDATE asks SET state = 'answered', answer = ?, answered_at = ? WHERE id = ? AND state = 'open'")
-          .run(JSON.stringify(answer), at, id).changes;
+          .prepare("UPDATE asks SET state = 'answered', answer = ?, answered_at = ?, answer_channel = ? WHERE id = ? AND state = 'open'")
+          .run(JSON.stringify(answer), at, channel, id).changes;
         if (changed !== 1) return "not_open" as const;
         insertDelivery.run(`dlv_${token(10)}`, "ask", id, row.thread_id, id, delivery.message, "pending", null, at);
         if (record !== null) insertRecord.run(id, record.issue, record.body, at);
