@@ -51,6 +51,8 @@ if (mode === "garbage") { process.stdout.write("not json"); process.exit(0); }
 if (mode === "hang") { setTimeout(() => {}, 60000); return; }
 if (process.argv[2] === "inspect") {
   process.stdout.write(JSON.stringify({ uid: ${JSON.stringify(UID)}, thread: "thr_aaaa1111", expires_at: "2026-11-05T12:00:00Z", dgd_gpus: 4, pod_gpus: 2, gpu_type: "gb300", gpu_pods_left: 1, extra: true }));
+} else if (process.argv[2] === "down") {
+  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", deleted: true, terminating: true, gpu_pods_left: 2, authority: "lease lse_test000001 is releasing" }));
 } else {
   process.stdout.write(JSON.stringify({ done: process.argv[2] }));
 }
@@ -99,9 +101,10 @@ test("inspect runs the guard with an explicit --context, and the bb server URL a
 
 test("expire, down and extend pass the namespace UID and the lease", async () => {
   const harness = experimental_createHostEntryHarness(createHostEntry());
-  for (const method of ["expire", "down", "extend"] as const) {
-    assert.deepEqual(await harness.experimental_call(method, leaseTarget), { ok: true });
-  }
+  assert.deepEqual(await harness.experimental_call("expire", leaseTarget), { ok: true });
+  // down started the deletion; it reports the GPU pods still terminating.
+  assert.deepEqual(await harness.experimental_call("down", leaseTarget), { ok: true, terminating: true, gpu_pods_left: 2 });
+  assert.deepEqual(await harness.experimental_call("extend", leaseTarget), { ok: true });
   assert.deepEqual(
     calls().map((c) => c.argv),
     ["expire", "down", "extend"].map((m) => [m, "--context", "test-context-a", "dyntest-a", "--uid", UID, "--lease", "lse_test000001"]),

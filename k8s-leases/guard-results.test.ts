@@ -2,7 +2,8 @@
 // - a host fault (spawn error, timeout, no JSON, kubectl or connection error)
 //   fails over to the next host;
 // - a refusal never fails over and never cools a host down;
-// - pods_left retries down on the next tick, on the same plan;
+// - a down that works started the deletion; GPU pods it leaves are flagged
+//   once, and the GPUs stay charged until inspect reports the namespace gone;
 // - uid_mismatch on a teardown counts as a sighting of a re-created
 //   namespace, and never frees GPUs on its own.
 import assert from "node:assert/strict";
@@ -10,7 +11,7 @@ import { test } from "node:test";
 import { HOST_ONE, HOST_TWO, MIN, THREAD_A, setup } from "./test-support.ts";
 
 const HOST_FAULTS = ["guard_missing", "guard_timeout", "guard_output", "guard_error", "kubectl_error", "internal_error"];
-const REFUSALS = ["pods_left", "uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found", "lease_record_missing"];
+const REFUSALS = ["uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found", "lease_record_missing"];
 
 /** A released lease whose down, on host one, answers with `code`. */
 async function releasedWith(code: string | "throw") {
@@ -50,16 +51,27 @@ test("a refusal never fails over and never cools the host down", async () => {
   }
 });
 
-test("pods_left retries down on the next tick, on the same plan, and is not a failure", async () => {
-  const { world, id, downs } = await releasedWith("pods_left");
-  for (let n = 0; n < 4; n += 1) {
+test("a down that leaves GPU pods: deletion started, one gpu_pods_left flag, and the GPUs charged until inspect says not_found", async () => {
+  const world = await setup();
+  await world.tick();
+  const { id, ns } = await world.lease(THREAD_A, "dyntest-podsleft", 4);
+  world.cluster.setDgd(ns, "worker", 4);
+  await world.cli(["lease", "release", id], THREAD_A);
+  assert.ok(ns.deleting, "down did not start the deletion");
+  const charged = async () => ((await world.harness.behavior.callRpc("snapshot", null)) as { capacity: Array<{ gpuType: string; used: number }> }).capacity.find((c) => c.gpuType === "gb300")!.used;
+  for (let n = 0; n < 3; n += 1) {
     world.clock.advance(MIN);
     await world.tick();
   }
-  assert.deepEqual(downs(), [HOST_ONE, HOST_ONE, HOST_ONE, HOST_ONE, HOST_ONE]);
-  const flags = (await world.cli(["flags", "--json"])).json as Array<{ kind: string; lease_id: string }>;
-  assert.ok(!flags.some((f) => f.lease_id === id && f.kind === "teardown_failing"), "pods_left within the stuck window raised a flag");
   assert.equal((await world.cli(["lease", "show", id])).json.state, "releasing");
+  assert.equal(await charged(), 4, "the GPUs were freed while pods were still terminating");
+  const flags = (await world.cli(["flags", "--json"])).json as Array<{ kind: string; lease_id: string }>;
+  assert.equal(flags.filter((f) => f.lease_id === id && f.kind === "gpu_pods_left").length, 1);
+  assert.ok(!flags.some((f) => f.lease_id === id && f.kind === "teardown_failing"), "a working down counted as a failure");
+  world.cluster.settle();
+  await world.tick();
+  assert.equal((await world.cli(["lease", "show", id])).json.state, "released");
+  assert.equal(await charged(), 0);
 });
 
 test("uid_mismatch on a teardown is a sighting of a re-created namespace, and never frees GPUs on its own", async () => {
@@ -86,7 +98,12 @@ test("uid_mismatch on a teardown is a sighting of a re-created namespace, and ne
 });
 
 test("a deletion still not done 15 minutes after its first down is flagged, and not before", async () => {
-  const { world, id } = await releasedWith("pods_left");
+  // down works, but the namespace never goes: its pods never finish terminating.
+  const world = await setup();
+  await world.tick();
+  const { id, ns } = await world.lease(THREAD_A, "dyntest-stuck15", 1);
+  world.cluster.setDgd(ns, "worker", 1);
+  await world.cli(["lease", "release", id], THREAD_A);
   const flagged = async () =>
     ((await world.cli(["flags", "--json"])).json as Array<{ kind: string; lease_id: string }>).some((f) => f.lease_id === id && f.kind === "teardown_failing");
   for (let n = 0; n < 14; n += 1) {

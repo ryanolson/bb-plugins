@@ -16,7 +16,6 @@ import type { GuardFailure } from "./contract.ts";
  */
 export const REFUSALS: ReadonlySet<string> = new Set([
   "not_found",
-  "pods_left",
   "uid_mismatch",
   "lease_active",
   "lease_ended",

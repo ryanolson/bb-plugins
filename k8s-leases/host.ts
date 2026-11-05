@@ -64,7 +64,7 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
     return readGuardOutput(ran.exitCode, ran.stdout, ran.stderr);
   }
 
-  async function write(method: "expire" | "down" | "extend", input: GuardTarget & { run: GuardRun }, signal: AbortSignal) {
+  async function write(method: "expire" | "extend", input: GuardTarget & { run: GuardRun }, signal: AbortSignal) {
     const outcome = await guard(method, input, signal);
     return outcome.ok ? { ok: true as const } : outcome;
   }
@@ -110,7 +110,17 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
       },
       inspect: async (input, context) => readInspect(await guard("inspect", input, context.signal)),
       expire: (input, context) => write("expire", input, context.signal),
-      down: (input, context) => write("down", input, context.signal),
+      down: async (input, context) => {
+        const outcome = await guard("down", input, context.signal);
+        if (!outcome.ok) return outcome;
+        // The deletion started. Pass on what the guard says is still terminating.
+        const value = (typeof outcome.value === "object" && outcome.value !== null ? outcome.value : {}) as { terminating?: unknown; gpu_pods_left?: unknown };
+        return {
+          ok: true as const,
+          ...(typeof value.terminating === "boolean" ? { terminating: value.terminating } : {}),
+          ...(Number.isInteger(value.gpu_pods_left) && (value.gpu_pods_left as number) >= 0 ? { gpu_pods_left: value.gpu_pods_left as number } : {}),
+        };
+      },
       extend: (input, context) => write("extend", input, context.signal),
     },
   });

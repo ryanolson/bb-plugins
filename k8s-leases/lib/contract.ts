@@ -89,9 +89,13 @@ export const hostContract = defineRpcContract({
     input: z.object(LEASE_TARGET).strict(),
     output: z.union([z.object({ ok: z.literal(true) }).strict(), FAILURE]),
   },
+  /** A down that works has started the deletion; GPU pods may still be terminating. */
   down: {
     input: z.object(LEASE_TARGET).strict(),
-    output: z.union([z.object({ ok: z.literal(true) }).strict(), FAILURE]),
+    output: z.union([
+      z.object({ ok: z.literal(true), terminating: z.boolean().optional(), gpu_pods_left: z.number().int().min(0).optional() }).strict(),
+      FAILURE,
+    ]),
   },
   extend: {
     input: z.object(LEASE_TARGET).strict(),

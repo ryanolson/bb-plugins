@@ -234,6 +234,9 @@ export class FakeGuard {
         record("lost");
         throw new Error("the response was lost");
       }
+      record("ok");
+      // As the real guard: the deletion started; pods may still be terminating.
+      return { ok: true, terminating: ns.pods.length > 0, gpu_pods_left: ns.pods.length };
     }
     record("ok");
     return { ok: true };

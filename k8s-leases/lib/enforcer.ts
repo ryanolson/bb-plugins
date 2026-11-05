@@ -30,7 +30,7 @@ export type ThreadFate = "archived" | "deleted" | "missing" | "live" | "unknown"
 
 export type GuardMethod = "inspect" | "expire" | "down" | "extend";
 type InspectResult = { ok: true; value: Inspect } | GuardFailure;
-type WriteResult = { ok: true } | GuardFailure;
+type WriteResult = { ok: true; gpu_pods_left?: number; terminating?: boolean } | GuardFailure;
 
 export interface EnforcerDeps {
   store: Store;
@@ -132,12 +132,16 @@ export function createEnforcer(deps: EnforcerDeps) {
       fail(lease, `k8s-guard ${method}: ${message(error)}`);
       return false;
     }
-    if (reply.result.ok) return true;
+    if (reply.result.ok) {
+      const left = (reply.result as { gpu_pods_left?: number }).gpu_pods_left ?? 0;
+      if (method === "down" && left > 0) {
+        // The deletion started, but GPU pods are still terminating. The GPUs stay charged until inspect reports the namespace gone.
+        db().flagOnce(lease.id, "gpu_pods_left", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the namespace is deleting, with ${left} GPU pod(s) still terminating. Its GPUs stay charged until it is gone.`);
+      }
+      return true;
+    }
     const { code, error } = reply.result;
-    if (code === "pods_left") {
-      // Not a failure: the deletion goes on, and down runs again next tick. A stuck one is flagged by time.
-      db().noteReport(lease.id, `k8s-guard ${method}: ${code}: ${error}`);
-    } else if (code === "uid_mismatch") {
+    if (code === "uid_mismatch") {
       recreated(lease, `k8s-guard ${method}: ${error}`);
     } else if (code === "lease_record_missing") {
       // The namespace has no lease record: acquire failed after the grant. Only a release puts it right.
