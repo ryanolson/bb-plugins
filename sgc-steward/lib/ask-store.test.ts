@@ -59,6 +59,8 @@ test("the shipped migration statements never change, because the host refuses a 
     "1ffaddb9383af162",
     "0bbedde4ed482939",
     "e691d98041e2b45c",
+    // The labels of a bb question.
+    "b8210bd76ed99376",
   ];
   assert.deepEqual(STORE_MIGRATIONS.slice(0, shipped.length).map(hash), shipped);
 });
