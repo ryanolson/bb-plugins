@@ -188,10 +188,10 @@ export function createEnforcer(deps: EnforcerDeps) {
     const due = lease.state === "releasing" || (lease.grace_deadline !== null && now() >= lease.grace_deadline);
     const deletion = due ? down(lease, cfg) : null;
     const expiring = deps.hosts.all<WriteResult>("expire", deps.target(lease, cfg, "expire")).then((replies) => {
-      if (replies.some((reply) => "result" in reply && reply.result.ok)) return true;
       const isRecreated = (reply: (typeof replies)[number]) => "result" in reply && !reply.result.ok && reply.result.code === "uid_mismatch";
-      // Any host that saw a re-created namespace is a sighting. Only inspect frees the GPUs.
+      // Any host that saw a re-created namespace is a sighting, even when another host's expire worked. Only inspect frees the GPUs.
       if (replies.some(isRecreated)) recreated(lease, "k8s-guard expire: a host saw a re-created namespace");
+      if (replies.some((reply) => "result" in reply && reply.result.ok)) return true;
       // Every host saw it: nothing of this lease is left to scale, so it is no failure.
       if (!(replies.length > 0 && replies.every(isRecreated))) fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
       return false;
