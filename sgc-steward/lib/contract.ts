@@ -146,6 +146,34 @@ const notificationSchema = z.object({
 });
 export type QuestionNotification = z.infer<typeof notificationSchema>;
 
+const hostCountsSchema = z.object({
+  running: z.number().int(),
+  idle: z.number().int(),
+  waiting: z.number().int(),
+  oldestWaitSince: z.number().nullable(),
+  oldestWaitMs: z.number().nullable(),
+});
+/** The Hosts view, as lib/hosts.ts builds it; the handler's return type checks the two agree. */
+const hostsViewSchema = z.object({
+  checkedAt: z.number(),
+  globalLimit: z.number().int().nullable(),
+  globalAtLimit: z.boolean(),
+  running: z.number().int(),
+  limitError: z.string().nullable(),
+  hosts: z.array(
+    hostCountsSchema.extend({
+      id: z.string(),
+      name: z.string(),
+      status: z.string(),
+      limit: z.number().int().nullable(),
+      limitSource: z.enum(["override", "automatic"]).nullable(),
+      automaticLimit: z.number().int().nullable(),
+      atLimit: z.boolean(),
+    }),
+  ),
+  unplaced: hostCountsSchema,
+});
+
 export const rpcContract = defineRpcContract({
   /** The questions from the last poll and the bb questions; reads nothing from Linear. */
   "questions.list": { input: z.null(), output: panelSchema },
@@ -191,6 +219,8 @@ export const rpcContract = defineRpcContract({
     input: z.object({ undo: z.string().min(1) }),
     output: z.object({ identifier: z.string(), steward: z.enum(["sent", "failed", "skipped"]) }),
   },
+  /** Per host: running and idle threads, turns waiting on the limit, and the limit. Reads bb only; never changes a limit. */
+  "hosts.list": { input: z.null(), output: hostsViewSchema },
   /** Hand out the questions no window has notified about yet, once each. */
   "notifications.claim": { input: z.null(), output: z.object({ notifications: z.array(notificationSchema) }) },
 });

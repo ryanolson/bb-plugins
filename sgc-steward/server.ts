@@ -61,6 +61,8 @@ import {
   type Snapshot,
 } from "./lib/contract.ts";
 import { readHostFile } from "./lib/host-file.ts";
+import { formatDigest, formatHosts, hostsDigest } from "./lib/hosts.ts";
+import { readHosts, readOnlyBb, runBbCli, type RunBb } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { createTodos } from "./todos.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
@@ -86,6 +88,10 @@ export interface SgcStewardOptions {
    * is still not on Linear after this long is dropped: the post failed.
    */
   postWindowMs?: number;
+  /** Stand-in for the bb CLI, which the Hosts view runs only for the limits. */
+  runBb?: RunBb;
+  /** Stand-in for the clock the Hosts view measures waits with. */
+  now?: () => number;
 }
 
 function message(error: unknown): string {
@@ -101,6 +107,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
   // Two tries of 30 seconds each, the checks after them, and a wide margin.
   const postWindowMs = options.postWindowMs ?? 10 * 60 * 1000;
   const makeClient = options.createClient ?? ((apiKey: string) => createLinearClient({ apiKey }));
+  const runBb = readOnlyBb(options.runBb ?? runBbCli);
+  const now = options.now ?? Date.now;
 
   return async function sgcSteward(bb: BbPluginApi): Promise<void> {
     const settings = bb.settings.define(SETTINGS);
@@ -706,6 +714,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "deliveries.dismiss": ({ id }) => dismissed(asks.dismissDelivery(id)),
       "records.dismiss": ({ askId }) => dismissed(asks.dismissRecord(askId)),
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
+      "hosts.list": () => readHosts(bb.sdk, runBb, now),
       ...todos.rpc,
     });
 
@@ -881,6 +890,30 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             },
           }),
           "answer-of": answerOfCommand(asks),
+          hosts: cliCommand({
+            summary: "Show each host's running and idle threads, the turns waiting on bb's limit, and the limit",
+            description:
+              "Read only: it never changes a limit. Running threads are starting or active; a waiting turn is a thread whose turn the concurrency-limit plugin holds, with how long its oldest row has been queued. Exits 1 when the limits could not be read; the thread counts still show.",
+            options: {
+              json,
+              digest: { type: "boolean", description: "Only the hosts at their limit and the hosts with waiting turns, with the oldest wait" },
+            },
+            async run(input) {
+              let view;
+              try {
+                view = await readHosts(bb.sdk, runBb, now);
+              } catch (error) {
+                throw new PluginCliError(`Could not read bb: ${message(error)}`, { code: "bb_error" });
+              }
+              const shown = input.options.digest ? hostsDigest(view) : view;
+              const text = input.options.digest ? formatDigest(hostsDigest(view)) : formatHosts(view);
+              return {
+                exitCode: view.limitError === null ? 0 : 1,
+                stdout: input.options.json ? JSON.stringify(shown) : text,
+                ...(view.limitError === null ? {} : { stderr: `Could not read the limits: ${view.limitError}` }),
+              };
+            },
+          }),
           answer: cliCommand({
             summary: "Post a file as the unsigned answer to an issue's open questions",
             description:

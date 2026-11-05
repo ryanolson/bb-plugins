@@ -5,6 +5,7 @@ import {
   announcement,
   askAnswerInput,
   filterCards,
+  hostsBadge,
   labelChoices,
   noticeTab,
   orderCards,
@@ -19,6 +20,8 @@ import {
   type Card,
 } from "./panel.ts";
 import { composeAnswer, parseQuestionBlock, type QuestionBlock } from "./questions.ts";
+import { hostsView } from "./hosts.ts";
+import { input } from "../test-support-hosts.ts";
 
 function block(id: string, body: string, createdAt: string): QuestionBlock {
   const parsed = parseQuestionBlock({ id, body, createdAt, author: "user", parentId: null }, "checkin");
@@ -109,9 +112,10 @@ test("a new Done of an issue replaces the page's Undo for its earlier Done", () 
 });
 
 test("each tab has its own route, and a route the page does not know shows Questions", () => {
-  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos"]);
+  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos", "hosts"]);
   assert.equal(tabOf(""), "questions");
   assert.equal(tabOf("todos"), "todos");
+  assert.equal(tabOf("hosts"), "hosts");
   assert.equal(tabOf("todos/extra"), "todos");
   assert.equal(tabOf("ideas"), "questions");
   for (const tab of PANEL_TABS) assert.equal(tabOf(tabPath(tab.id)), tab.id);
@@ -207,4 +211,11 @@ test("the page matches any of the labels chosen unless told all of, as Linear's 
   assert.deepEqual(filterCards(cards, ["release", "infra"], "any").map(cardName), ["a1", "a2", "a3", "i1"]);
   assert.deepEqual(filterCards(cards, ["release", "infra"], "all").map(cardName), ["a1"]);
   assert.deepEqual(filterCards(cards, [], "any").map(cardName), cards.map(cardName), "no label chosen shows every card");
+});
+
+test("the Hosts tab counts the waiting turns, on a host or not, and alerts when the limits could not be read", () => {
+  assert.deepEqual(hostsBadge(null), { count: 0, alert: false }, "before the first read");
+  assert.deepEqual(hostsBadge(hostsView(input())), { count: 3, alert: false });
+  assert.deepEqual(hostsBadge(hostsView(input({ waiting: [] }))), { count: 0, alert: false });
+  assert.deepEqual(hostsBadge(hostsView(input({ limits: null, limitError: "no bb" }))), { count: 3, alert: true });
 });
