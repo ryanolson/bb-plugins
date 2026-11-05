@@ -8,6 +8,24 @@
 // until it succeeds again.
 import type { GuardFailure } from "./contract.ts";
 
+/**
+ * Guard answers that say what is so on the cluster, not that the host is
+ * broken. They never move a call to the next host and never cool a host down.
+ * Every other failure (spawn error, timeout, no JSON, kubectl or connection
+ * error, or an unknown code) is a host fault.
+ */
+export const REFUSALS: ReadonlySet<string> = new Set([
+  "not_found",
+  "pods_left",
+  "uid_mismatch",
+  "lease_active",
+  "lease_ended",
+  "lease_mismatch",
+  "lease_not_active",
+  "not_expired",
+  "record_conflict",
+]);
+
 /** No host could be reached, or none gave an answer. */
 export class HostUnreachable extends Error {
   readonly attempts: string[];
@@ -57,8 +75,8 @@ export function createHosts<Method extends string>(deps: HostsDeps<Method>) {
     return seen !== undefined && seen.failAt > seen.okAt && deps.now() - seen.failAt < deps.cooldownMs;
   }
 
-  /** A guard failure other than `not_found` says the host could not do its part. */
-  const hostFailed = (result: { ok: boolean; code?: string }) => !result.ok && result.code !== "not_found";
+  /** A host fault: the host could not do its part. A refusal is an answer, not a fault. */
+  const hostFailed = (result: { ok: boolean; code?: string }) => !result.ok && !REFUSALS.has(result.code ?? "");
 
   /** Healthy hosts first (freshest probe first), then the rest; hosts cooling down after a failure go last. */
   function order(): string[] {
@@ -102,8 +120,9 @@ export function createHosts<Method extends string>(deps: HostsDeps<Method>) {
 
     /**
      * Send the call to one host at a time, in health order, until one gives an
-     * answer: success, or `not_found`. When every host fails, the first guard
-     * failure is returned; when none can be reached, it throws.
+     * answer: success or a refusal. A host fault moves on to the next host.
+     * When every host faults, the first fault is returned; when none can be
+     * reached, it throws.
      */
     async one<R extends { ok: boolean } | GuardFailure>(method: Method, input: unknown): Promise<{ hostId: string; result: R }> {
       const attempts: string[] = [];

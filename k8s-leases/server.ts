@@ -53,7 +53,7 @@ const RELEASE_WAIT_MS = 20_000;
 /** A thread lookup may take this long; past it the thread counts as unknown, and nothing is revoked. */
 const THREAD_CHECK_MS = 20_000;
 /** A namespace still there this long after its first `down` raises a teardown flag. */
-const STUCK_MS = 5 * 60_000;
+const STUCK_MS = 15 * 60_000;
 
 export interface K8sLeasesOptions {
   now?: () => number;

@@ -113,6 +113,16 @@ export function createEnforcer(deps: EnforcerDeps) {
     }
   }
 
+  /**
+   * A teardown found the namespace re-created (`uid_mismatch`): a sighting,
+   * kept and flagged once for the digest. It never frees the GPUs on its own;
+   * only inspect's merge rule does.
+   */
+  function recreated(lease: LeaseRow, what: string): void {
+    db().noteReport(lease.id, what);
+    db().flagOnce(lease.id, "namespace_recreated", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): ${what}. Its GPUs stay charged until inspect confirms the old namespace is gone.`);
+  }
+
   async function single(method: "down" | "extend", lease: LeaseRow, cfg: Config): Promise<boolean> {
     let reply;
     try {
@@ -123,7 +133,15 @@ export function createEnforcer(deps: EnforcerDeps) {
       return false;
     }
     if (reply.result.ok) return true;
-    fail(lease, `k8s-guard ${method} failed (${reply.result.code}): ${reply.result.error}`);
+    const { code, error } = reply.result;
+    if (code === "pods_left") {
+      // Not a failure: the deletion goes on, and down runs again next tick. A stuck one is flagged by time.
+      db().noteReport(lease.id, `k8s-guard ${method}: ${code}: ${error}`);
+    } else if (code === "uid_mismatch") {
+      recreated(lease, `k8s-guard ${method}: ${error}`);
+    } else {
+      fail(lease, `k8s-guard ${method} failed (${code}): ${error}`);
+    }
     return false;
   }
 
@@ -163,7 +181,10 @@ export function createEnforcer(deps: EnforcerDeps) {
     const deletion = due ? down(lease, cfg) : null;
     const expiring = deps.hosts.all<WriteResult>("expire", deps.target(lease, cfg, "expire")).then((replies) => {
       if (replies.some((reply) => "result" in reply && reply.result.ok)) return true;
-      fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
+      const allRecreated = replies.length > 0 && replies.every((reply) => "result" in reply && !reply.result.ok && reply.result.code === "uid_mismatch");
+      // Every host saw a re-created namespace: nothing of this lease is left to scale. Only inspect frees the GPUs.
+      if (allRecreated) recreated(lease, "k8s-guard expire: every host saw a re-created namespace");
+      else fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
       return false;
     });
     return observed(

@@ -11,7 +11,8 @@ test("a namespace stuck deleting with GPU pods raises a teardown flag despite su
   world.cluster.setDgd(ns, "worker", 4);
   assert.equal((await world.cli(["lease", "release", id], THREAD_A)).json.state, "releasing");
   try {
-    for (let n = 0; n < 5; n += 1) {
+    // Adjusted by the implementer: the driver raised the stuck threshold from 5 to 15 minutes.
+    for (let n = 0; n < 16; n += 1) {
       world.clock.advance(MIN);
       await world.tick();
     }

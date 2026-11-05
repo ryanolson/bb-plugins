@@ -401,6 +401,19 @@ export function createStore(db: Db, now: () => number) {
       db.prepare("UPDATE leases SET last_host = ?, last_checked_at = ?, ns_expires_at = ? WHERE id = ?").run(host, now(), nsExpiresAt, id);
     },
 
+    /** Raise a flag of this kind for this lease, unless one is open already. */
+    flagOnce(id: string, kind: string, detail: string): void {
+      db.transaction(() => {
+        const open = db.prepare<[string, string], { id: number }>("SELECT id FROM flags WHERE lease_id = ? AND kind = ? AND cleared_at IS NULL").get(id, kind);
+        if (open === undefined) addFlag(id, kind, detail);
+      }).immediate();
+    },
+
+    /** Keep what a host reported, without counting it as a failure. */
+    noteReport(id: string, text: string): void {
+      db.prepare("UPDATE leases SET last_error = ?, last_checked_at = ? WHERE id = ?").run(text, now(), id);
+    },
+
     /** A whole reconcile step worked: the failure count starts again. */
     clearFailures(id: string): void {
       db.prepare("UPDATE leases SET failures = 0, last_error = NULL WHERE id = ?").run(id);
