@@ -326,6 +326,8 @@ export async function setup(settings: Record<string, string | number> = {}) {
     now: clock.now,
     newLeaseId: () => `lse_test${String(++ids).padStart(6, "0")}`,
     newToken: () => `tok_${String(++ids).padStart(6, "0")}`,
+    // Production ticks only start work; a test tick settles it, bounded so a stalled fake cannot hang the suite.
+    tickWaitMs: 2_000,
   });
   const created = createFakePluginHost({
     pluginId: "k8s-leases",

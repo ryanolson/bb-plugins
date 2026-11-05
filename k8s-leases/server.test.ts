@@ -82,13 +82,16 @@ test("a lease used against another cluster or namespace UID: refused, by the gua
     HOST_ONE,
   );
   assert.deepEqual((refused as { ok: boolean }).ok, false);
-  // On the host: the namespace re-created under the same name gets no write.
+  // On the host: the namespace re-created under the same name is never
+  // changed. Teardown does not wait on inspect, so writes may reach it, but
+  // each one carries the lease's own UID, and the guard refuses them all.
   world.cluster.namespaces.delete(world.cluster.key(CLUSTER_A, "dyntest-uid"));
   const reborn = world.cluster.create(CLUSTER_A, "dyntest-uid", THREAD_A);
   world.cluster.setDgd(reborn, "worker", 4);
   world.clock.advance(3 * HOUR);
   await world.tick();
-  assert.equal(world.guard.writes().filter((c) => c.cluster === CLUSTER_A && c.namespace === "dyntest-uid").length, 0);
+  const toReborn = world.guard.writes().filter((c) => c.cluster === CLUSTER_A && c.namespace === "dyntest-uid");
+  assert.ok(toReborn.every((c) => c.uid === ns.uid && c.outcome === "refused:uid_mismatch"), JSON.stringify(toReborn));
   assert.equal(reborn.dgds.get("worker"), 4);
   assert.equal(await state(world, id), "torn-down");
 });
@@ -248,8 +251,10 @@ test("a deletion whose response is lost, then the namespace re-created under the
   await world.tick();
   await world.tick();
   assert.equal(await state(world, id), "released");
+  // Writes may reach the new namespace, but only with the old UID, and the guard refuses each one.
   const touching = world.guard.calls.slice(before).filter((c) => c.method !== "inspect");
-  assert.deepEqual(touching, []);
+  assert.ok(touching.every((c) => c.uid === ns.uid && c.outcome === "refused:uid_mismatch"), JSON.stringify(touching));
+  assert.ok(!reborn.deleting);
   assert.equal(reborn.dgds.get("worker"), 2);
   assert.equal(world.cluster.get(CLUSTER_A, ns.name), reborn);
 });

@@ -409,12 +409,12 @@ export function createStore(db: Db, now: () => number) {
       ).run(hostId, ok ? t : null, t, ok ? 1 : 0, detail);
     },
 
-    saveProfiles(hostId: string, json: string): void {
-      db.prepare("INSERT INTO profiles (id, host_id, at, json) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET host_id = excluded.host_id, at = excluded.at, json = excluded.json").run(
-        hostId,
-        now(),
-        json,
-      );
+    /** Keep a profile read, unless the kept one comes from a read that started later. `at` is when the read started. */
+    saveProfiles(hostId: string, json: string, startedAt: number): void {
+      db.prepare(
+        `INSERT INTO profiles (id, host_id, at, json) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET host_id = excluded.host_id, at = excluded.at, json = excluded.json WHERE excluded.at >= profiles.at`,
+      ).run(hostId, startedAt, json);
     },
 
     profiles(): { host_id: string; at: number; json: string } | undefined {

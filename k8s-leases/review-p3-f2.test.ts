@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CLUSTER_A, THREAD_A, setup } from "./test-support.ts";
 
-test("a delayed profile reply cannot overwrite a newer denial and authorize another lease", { todo: 'p3 f2 [race]: an older profile read replaces a newer one; waits on the redesign' }, async () => {
+test("a delayed profile reply cannot overwrite a newer denial and authorize another lease", async () => {
   const world = await setup();
   await world.tick();
   const allowed = {

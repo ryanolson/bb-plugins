@@ -22,11 +22,14 @@ import {
   UID,
   hostContract,
   rpcContract,
+  type GuardFailure,
+  type Inspect,
   type LeaseView,
   type Profiles,
   type Snapshot,
 } from "./lib/contract.ts";
-import { HostUnreachable, createEnforcer, within, type HostCall, type ThreadFate } from "./lib/enforcer.ts";
+import { createEnforcer, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
+import { createHosts } from "./lib/hosts.ts";
 import { checkAsk } from "./lib/policy.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { SETTINGS, parseConfig, type Config } from "./lib/settings.ts";
@@ -36,10 +39,16 @@ import { MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
 export const HEARTBEAT_WINDOW_MS = 10 * 60_000;
 /** The op slot's deadline. */
 export const SLOT_MS = 2 * 60_000;
-/** A tick waits this long for its work; the rest goes on, and the next tick skips what is still running. */
-const TICK_WAIT_MS = 45_000;
-/** A host call running this long marks its host stalled, and the next call tries the other hosts first. */
-const STALL_MS = 30_000;
+/**
+ * How long the schedule handler waits for the work a tick started. None: the
+ * handler starts the work and returns, whatever bb does with overlapping runs.
+ * Tests set a wait so a tick settles its work.
+ */
+const TICK_WAIT_MS = 0;
+/** A host whose guard call failed is tried last by single-host calls for this long, unless it succeeds again. */
+const HOST_COOLDOWN_MS = 5 * 60_000;
+/** A release waits this long for its first teardown step; the teardown goes on after that. */
+const RELEASE_WAIT_MS = 20_000;
 /** A reconcile step waits this long for a `down`; the deletion goes on alone after that. */
 const DOWN_WAIT_MS = 20_000;
 
@@ -142,70 +151,51 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
     const store = createStore(db, now);
     const host = bb.hosts.experimental_client({ contract: hostContract });
 
-    const publish = () => bb.realtime.publish(CHANNEL, { at: now() });
+    // One abort signal for every host call of this plugin load; it fires on unload.
+    const life = new AbortController();
+    let disposed = false;
+    bb.onDispose(() => {
+      disposed = true;
+      life.abort();
+    });
 
-    /** Start times of the host calls in flight, by host. */
-    const inFlight = new Map<string, Set<{ start: number }>>();
-
-    /** Whether a host has a call that has run past `STALL_MS`: it is tried last. */
-    function stalled(hostId: string): boolean {
-      const since = now() - STALL_MS;
-      return [...(inFlight.get(hostId) ?? [])].some((call) => call.start <= since);
-    }
-
-    /** Track one host call, so a host that hangs is tried last by the next one. */
-    async function tracked<T>(hostId: string, call: () => Promise<T>): Promise<T> {
-      const entry = { start: now() };
-      const calls = inFlight.get(hostId) ?? new Set<{ start: number }>();
-      inFlight.set(hostId, calls);
-      calls.add(entry);
-      try {
-        return await call();
-      } finally {
-        calls.delete(entry);
-      }
-    }
-
-    /** Hosts in the order to try: not stalled first, then freshest heartbeat, then the settings' order. */
-    function hostOrder(cfg: Config): string[] {
-      const seen = new Map(store.heartbeats().map((row) => [row.host_id, row.last_ok_at ?? -1]));
-      return [...cfg.hosts].sort((a, b) => Number(stalled(a)) - Number(stalled(b)) || (seen.get(b) ?? -1) - (seen.get(a) ?? -1));
-    }
-
-    /**
-     * Call the host entry, failing over to the next host when one cannot be
-     * reached or its guard fails: a host whose own Kubernetes access broke
-     * must not stop a healthy one. Only `not_found` is taken as the answer at
-     * once. When every host fails, the first guard failure is returned.
-     */
-    const hostCall: HostCall = async (method, lease) => {
-      const cfg = await config();
-      const attempts: string[] = [];
-      let firstFailure: { hostId: string; result: unknown } | null = null;
-      for (const hostId of hostOrder(cfg)) {
-        try {
-          const input = { run: cfg.run, context: lease.context, namespace: lease.namespace, uid: lease.uid, leaseId: lease.id };
-          const result = await tracked(hostId, (): Promise<{ ok: true } | { ok: false; code: string; error: string }> =>
-            method === "inspect"
-              ? host.call("inspect", { run: cfg.run, context: lease.context, namespace: lease.namespace }, { hostId, timeoutMs: HOST_TIMEOUTS.inspect + HOST_CALL_MARGIN_MS })
-              : host.call(method, input, { hostId, timeoutMs: HOST_TIMEOUTS[method] + HOST_CALL_MARGIN_MS }),
-          );
-          if (!result.ok && result.code !== "not_found") {
-            attempts.push(`${hostId}: ${result.code}: ${result.error}`);
-            firstFailure ??= { hostId, result };
-            continue;
-          }
-          return { hostId, result } as never;
-        } catch (error) {
-          attempts.push(`${hostId}: ${message(error)}`);
-        }
-      }
-      if (firstFailure !== null) {
-        if (attempts.length > 1) bb.log.warn(`k8s-guard ${method} on ${lease.namespace} failed on every host: ${attempts.join("; ")}`);
-        return firstFailure as never;
-      }
-      throw new HostUnreachable(attempts);
+    const publish = () => {
+      if (!disposed) bb.realtime.publish(CHANNEL, { at: now() });
     };
+
+    /** The settings as last read, for the sync host-order helpers. */
+    let latest: Config | null = null;
+    const current = async (): Promise<Config> => (latest = await config());
+
+    /** Hosts with a good probe inside the heartbeat window, freshest first. */
+    function healthy(): string[] {
+      const hosts = latest?.hosts ?? [];
+      const since = now() - HEARTBEAT_WINDOW_MS;
+      return store
+        .heartbeats()
+        .filter((row) => hosts.includes(row.host_id) && row.last_ok_at !== null && row.last_ok_at > since)
+        .sort((a, b) => (b.last_ok_at ?? 0) - (a.last_ok_at ?? 0))
+        .map((row) => row.host_id);
+    }
+
+    const hosts = createHosts<GuardMethod>({
+      call: (hostId, method, input) =>
+        host.call(method, input as never, { hostId, timeoutMs: HOST_TIMEOUTS[method] + HOST_CALL_MARGIN_MS, signal: life.signal }) as Promise<{
+          ok: boolean;
+          code?: string;
+          error?: string;
+        }>,
+      now,
+      healthy,
+      configured: () => latest?.hosts ?? [],
+      cooldownMs: HOST_COOLDOWN_MS,
+    });
+
+    /** The host entry's input for a guard call: always the kube context, never the profile name. */
+    function target(lease: Pick<LeaseRow, "context" | "namespace" | "uid" | "id">, cfg: Config, method: GuardMethod) {
+      const base = { run: cfg.run, context: lease.context, namespace: lease.namespace };
+      return method === "inspect" ? base : { ...base, uid: lease.uid, leaseId: lease.id };
+    }
 
     /**
      * Whether a lease's thread is gone for good: archived, deleted, or
@@ -224,23 +214,6 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       }
     }
 
-    /** Read the cluster profiles from the first host that can; keep the last good copy. */
-    async function refreshProfiles(cfg: Config): Promise<Profiles | null> {
-      for (const hostId of hostOrder(cfg)) {
-        try {
-          const read = await tracked(hostId, () => host.call("profiles", { command: cfg.profilesCommand }, { hostId, timeoutMs: HOST_TIMEOUTS.profiles + HOST_CALL_MARGIN_MS }));
-          if (read.ok) {
-            store.saveProfiles(hostId, JSON.stringify(read.value));
-            return read.value;
-          }
-          bb.log.warn(`profiles on ${hostId}: ${read.code}: ${read.error}`);
-        } catch (error) {
-          bb.log.warn(`profiles on ${hostId}: ${message(error)}`);
-        }
-      }
-      return null;
-    }
-
     /** Profiles read within the heartbeat window, or null: then the fallback clusters setting applies. */
     function currentProfiles(): Profiles | null {
       const saved = store.profiles();
@@ -249,35 +222,76 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       return parsed.success ? parsed.data : null;
     }
 
-    const enforcer = createEnforcer({ store, config, now, host: hostCall, threadFate, log: (text) => bb.log.warn(text), downWaitMs });
+    /**
+     * Read the cluster profiles from the first host that can. A read replaces
+     * the kept copy only if it started after the read that wrote it, so a slow
+     * reply can never bring back a profile a newer read changed.
+     */
+    async function refreshProfiles(cfg: Config): Promise<Profiles | null> {
+      const started = now();
+      for (const hostId of hosts.order()) {
+        try {
+          const read = await host.call("profiles", { command: cfg.profilesCommand }, { hostId, timeoutMs: HOST_TIMEOUTS.profiles + HOST_CALL_MARGIN_MS, signal: life.signal });
+          if (disposed) return null;
+          if (read.ok) {
+            store.saveProfiles(hostId, JSON.stringify(read.value), started);
+            return currentProfiles();
+          }
+          bb.log.warn(`profiles on ${hostId}: ${read.code}: ${read.error}`);
+        } catch (error) {
+          if (disposed) return null;
+          bb.log.warn(`profiles on ${hostId}: ${message(error)}`);
+        }
+      }
+      return null;
+    }
+
+    const enforcer = createEnforcer({
+      store,
+      config: current,
+      now,
+      hosts,
+      target,
+      threadFate,
+      log: (text) => {
+        if (!disposed) bb.log.warn(text);
+      },
+      changed: publish,
+      disposed: () => disposed,
+      downWaitMs,
+    });
 
     /** Probes in flight, by host, so a hung host is not probed twice at once. */
     const probing = new Set<string>();
 
+    async function probe(hostId: string, cfg: Config): Promise<void> {
+      probing.add(hostId);
+      try {
+        const result = await host.call("probe", { run: cfg.run }, { hostId, timeoutMs: HOST_TIMEOUTS.probe + HOST_CALL_MARGIN_MS, signal: life.signal });
+        if (!disposed) store.heartbeat(hostId, result.ok, result.detail);
+      } catch (error) {
+        if (!disposed) store.heartbeat(hostId, false, message(error));
+      } finally {
+        probing.delete(hostId);
+      }
+    }
+
     /**
-     * One tick. Reconciliation starts at once, beside the probes and the
-     * profile read, never after them. Each lease's step runs on its own, and
-     * the tick waits for all of it at most `tickWaitMs`. So no slow host,
-     * lease or probe delays enforcement past the next tick.
+     * One tick: read the lease table and start the work; nothing in it waits
+     * for anything else. Every lease's step, every probe and the profile read
+     * start at once, and each guard call has its own timeout. The tick waits
+     * for that work at most `tickWaitMs`.
      */
     async function tick(): Promise<void> {
-      const cfg = await config();
+      if (disposed) return;
+      const cfg = await current();
       store.sweepExpired(cfg.graceMs);
-      const steps = store.live().map((row) => enforcer.reconcile(row.id));
-      const probes = cfg.hosts
-        .filter((hostId) => !probing.has(hostId))
-        .map(async (hostId) => {
-          probing.add(hostId);
-          try {
-            const probe = await tracked(hostId, () => host.call("probe", { run: cfg.run }, { hostId, timeoutMs: HOST_TIMEOUTS.probe + HOST_CALL_MARGIN_MS }));
-            store.heartbeat(hostId, probe.ok, probe.detail);
-          } catch (error) {
-            store.heartbeat(hostId, false, message(error));
-          } finally {
-            probing.delete(hostId);
-          }
-        });
-      await within(Promise.all([...steps, ...probes, refreshProfiles(cfg)]), tickWaitMs);
+      const work = [
+        ...store.live().map((row) => enforcer.reconcile(row.id)),
+        ...cfg.hosts.filter((hostId) => !probing.has(hostId)).map((hostId) => probe(hostId, cfg)),
+        refreshProfiles(cfg),
+      ];
+      await within(Promise.allSettled(work), tickWaitMs);
       publish();
     }
 
@@ -292,7 +306,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const gpuType = parsed(GPU_TYPE, input.gpuType, "--gpu-type");
       const gpus = parsed(z.number().int().min(1), input.gpus, "--gpus");
       const hours = parsed(z.coerce.number().positive().finite(), input.hours, "--hours");
-      const cfg = await config();
+      const cfg = await current();
       const { context, approvals } = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, cfg, currentProfiles() ?? (await refreshProfiles(cfg)));
       // Cheap checks first; the transaction checks them all again.
       if (!store.freshHeartbeat(HEARTBEAT_WINDOW_MS, cfg.hosts)) {
@@ -309,7 +323,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       // Confirm what the guard read, on a host, with the bot.
       let seen;
       try {
-        seen = await hostCall("inspect", { context, namespace, uid, id: "" });
+        seen = await hosts.one<{ ok: true; value: Inspect } | GuardFailure>("inspect", target({ context, namespace, uid, id: "" }, cfg, "inspect"));
       } catch (error) {
         throw new Refusal("enforcement_unhealthy", message(error));
       }
@@ -329,7 +343,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       }
       // Settings or profiles can change while the host calls run: check again
       // with what holds now, with no await between this and the transaction.
-      const fresh = await config();
+      const fresh = await current();
       const recheck = checkAsk({ thread, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles());
       if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during acquire; try again.`);
       const row = store.acquire(
@@ -413,7 +427,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
                 const row = store.release(id, ctx.threadId, await config());
                 publish();
                 // A release tears down at once: one reconcile now, not at the next tick.
-                if (row.state === "releasing") await enforcer.reconcile(id);
+                if (row.state === "releasing") await within(enforcer.reconcile(id), RELEASE_WAIT_MS);
                 publish();
                 return { state: store.find(id)!.state };
               }),

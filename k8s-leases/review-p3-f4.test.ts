@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HOST_ONE, MIN, THREAD_A, setup } from "./test-support.ts";
 
-test("a failed allocation inspection cannot prevent a returned lease's UID-fenced teardown", { todo: 'p3 f4 [structure]: teardown waits on inspect; waits on the redesign' }, async () => {
+test("a failed allocation inspection cannot prevent a returned lease's UID-fenced teardown", async () => {
   const world = await setup();
   await world.tick();
   const { id, ns, result } = await world.lease(THREAD_A, "review-p3-inspect-release", 4);
