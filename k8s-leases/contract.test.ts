@@ -138,8 +138,11 @@ function agentGuard(thread: string, ...args: string[]): Promise<{ code: number; 
   });
 }
 
-/** A never-reused name, as `k8s-guard ns create` makes: <prefix><issue>-<purpose>-<5-character suffix>. */
-const fresh = (purpose: string) => `${world.prefix}12-${purpose}-${randomUUID().replace(/-/g, "").slice(0, 5)}`;
+/** The length of the random suffix `k8s-guard ns create` gives every namespace name (Ryan, F14). */
+const SUFFIX_LENGTH = 10;
+
+/** A never-reused name, as `k8s-guard ns create` makes: <prefix><issue>-<purpose>-<suffix>. */
+const fresh = (purpose: string) => `${world.prefix}12-${purpose}-${randomUUID().replace(/-/g, "").slice(0, SUFFIX_LENGTH)}`;
 
 /**
  * A namespace as `k8s-guard ns create` leaves it, with a UUID as a real
