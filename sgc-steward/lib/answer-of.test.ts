@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { STORE_MIGRATIONS, createAskStore } from "./ask-store.ts";
 import type { Ask } from "./asks.ts";
-import { answerOf } from "./answer-of.ts";
+import { defineCli } from "@get-bb/plugin-sdk";
+import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { answerOf, answerOfCommand } from "./answer-of.ts";
 
 const ASKED = Date.parse("2026-01-05T10:00:00Z");
 const ANSWERED = Date.parse("2026-01-05T11:30:00Z");
@@ -105,4 +107,21 @@ test("an answer stored before the channel was kept reports no channel, so a chec
   migrate(db, STORE_MIGRATIONS);
   const view = answerOf(createAskStore(db).get("bbq_old")!);
   assert.deepEqual([view.status, view.channel, view.option], ["answered", null, { letter: "A", text: "Approve" }]);
+});
+
+test("a stored answer naming an option its question lacks is refused as corrupt, not printed as a free-text answer", async (t) => {
+  const { db, store } = open();
+  store.admit(ask("bbq_1", { options: [{ letter: "A", text: "Approve", recommended: true }] }), true);
+  db.prepare(`UPDATE asks SET state = 'answered', answer = '{"option":"B","text":""}', answered_at = 1, answer_channel = 'bb' WHERE id = 'bbq_1'`).run();
+  assert.throws(() => answerOf(store.get("bbq_1")!), /option B, which it does not have/);
+  const { bb, harness } = createFakePluginHost({ pluginId: "sgc-steward" });
+  t.after(() => harness.lifecycle.dispose());
+  bb.cli.register(defineCli({ name: "sgc", summary: "Read stored answers", commands: { "answer-of": answerOfCommand(store) } }));
+  const json = await harness.behavior.runCli(["answer-of", "bbq_1", "--json"]);
+  assert.equal(json.exitCode, 1);
+  assert.deepEqual(JSON.parse(json.stdout), { ok: false, error: { code: "corrupt", message: "bbq_1 has an answer for option B, which it does not have" } });
+  const text = await harness.behavior.runCli(["answer-of", "bbq_1"]);
+  assert.equal(text.exitCode, 1);
+  assert.equal(text.stdout, "");
+  assert.match(text.stderr, /option B, which it does not have/);
 });

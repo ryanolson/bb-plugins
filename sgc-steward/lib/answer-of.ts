@@ -67,13 +67,20 @@ export function answerOfCommand(asks: Pick<AskStore, "get">) {
   return cliCommand({
     summary: "Show how a bb question was answered, from the plugin's own record",
     description:
-      "Reads only the plugin's stored question, never Linear, so a Linear comment cannot change what it prints. Exits 0 for a known id, open, answered, or withdrawn, and 1 for an unknown one. channel bb means the answer came through the plugin's answer RPC, which the page calls; bb cannot tell the owner from an agent calling that RPC.",
+      "Reads only the plugin's stored question, never Linear, so a Linear comment cannot change what it prints. Exits 0 for a known id, open, answered, or withdrawn, and 1 for an unknown one, or for a stored answer that names an option its question does not have. channel bb means the answer came through the plugin's answer RPC, which the page calls; bb cannot tell the owner from an agent calling that RPC.",
     positionals: [{ name: "id", description: "Question id, like bbq_k3x9mz2p4q", required: true }],
     options: { json: { type: "boolean", description: "Print machine-readable JSON" } },
     async run(input) {
       const row = asks.get(input.positionals.id);
       if (row === null) throw new PluginCliError(`No bb question ${input.positionals.id}.`, { code: "not_found" });
-      const view = answerOf(row);
+      let view: AnswerOf;
+      try {
+        view = answerOf(row);
+      } catch (error) {
+        // Only a row edited outside the plugin names a missing option. Refuse
+        // it, rather than print it as a free-text answer.
+        throw new PluginCliError(error instanceof Error ? error.message : String(error), { code: "corrupt" });
+      }
       return { exitCode: 0, stdout: input.options.json ? JSON.stringify(view) : answerOfText(view) };
     },
   });
