@@ -1,18 +1,24 @@
-// One reconcile step for one lease.
+// What each tick does for each lease.
 //
-// The server decides; the host entry only runs k8s-guard.
+// The server decides; the host entry only runs k8s-guard. A tick reads the
+// lease table and starts three independent parts per lease, awaiting nothing
+// before it starts them:
 //
-// - Teardown does not wait on inspect. A lease that is not active gets
-//   `expire` on every step, sent to every healthy host at once (it only
-//   reduces, so one success is enough), and `down` once it is due.
-// - Inspect goes to every healthy host at once. The first answer that shows
-//   an over-allocation revokes the lease. The lease ends, and frees its GPUs,
-//   only when at least one host reports its namespace gone or re-created and
-//   no answering host still sees it. A host that gives no answer frees nothing.
-// - `down` runs once per lease, on one host at a time, on its own lane; a
-//   step waits for it only briefly. `extend` runs one at a time per lease.
-// - Steps on one lease may overlap. Each reads its lease again before it acts.
-// - After the plugin unloads, nothing touches the database.
+// - Teardown, for a lease that is not active: a fresh `expire` to every
+//   healthy host at once (it only reduces, so one success is enough), and,
+//   when due, `down`, started at the same moment, not after `expire`.
+// - Observe: a fresh `inspect` to every healthy host at once. The first answer
+//   that shows an over-allocation revokes the lease and starts its teardown.
+//   The lease ends, and frees its GPUs, only when at least one host reports
+//   its namespace gone or re-created, no answering host still sees it, and
+//   those reports come from calls started after the last call that saw it.
+//   A host that gives no answer frees nothing.
+// - Thread check, for an active lease: bb's thread lookup, with its own
+//   timeout. Only when it finishes does it revoke a lease whose thread is gone.
+//
+// `down` runs once per lease, on one host at a time, on its own lane.
+// `extend` runs one at a time per lease. After the plugin unloads, nothing
+// touches the database, and every promise has a handler from the start.
 import { UID, type GuardFailure, type Inspect } from "./contract.ts";
 import type { HostAnswer, Hosts } from "./hosts.ts";
 import type { LeaseRow, Store } from "./store.ts";
@@ -27,7 +33,6 @@ type WriteResult = { ok: true } | GuardFailure;
 
 export interface EnforcerDeps {
   store: Store;
-  config: () => Promise<Config>;
   now: () => number;
   hosts: Hosts<GuardMethod>;
   /** The host entry's input for a guard call on this lease. */
@@ -38,8 +43,10 @@ export interface EnforcerDeps {
   changed: () => void;
   /** True once the plugin has unloaded. */
   disposed: () => boolean;
-  /** How long a step waits for a `down` it started before it lets the deletion go on alone. */
-  downWaitMs: number;
+  /** How long the thread check may take; past it the thread counts as unknown. */
+  threadCheckMs: number;
+  /** A namespace still there this long after its first `down` is flagged. */
+  stuckMs: number;
 }
 
 function message(error: unknown): string {
@@ -60,7 +67,7 @@ export async function within(work: Promise<unknown>, ms: number): Promise<boolea
   }
 }
 
-/** Thrown inside a step once the plugin has unloaded; ends the step quietly. */
+/** Thrown once the plugin has unloaded; ends the work quietly. */
 class Unloaded extends Error {}
 
 function describe(reply: HostAnswer<{ ok: boolean; code?: string; error?: string }>): string {
@@ -68,19 +75,31 @@ function describe(reply: HostAnswer<{ ok: boolean; code?: string; error?: string
   return reply.result.ok ? `${reply.hostId}: ok` : `${reply.hostId}: ${reply.result.code}: ${reply.result.error}`;
 }
 
+const LIVE = ["active", "revoking", "releasing"];
+
 export function createEnforcer(deps: EnforcerDeps) {
   const { now } = deps;
   /** The `down` in flight for each lease. */
   const deletions = new Map<string, Promise<boolean>>();
-  /** Leases whose last `down` failed: they keep their failures counted until a `down` works. */
-  const downFailed = new Set<string>();
   /** The `extend` chain of each lease. */
   const extending = new Map<string, Promise<boolean>>();
+  /** The thread check in flight for each lease. */
+  const threadChecks = new Map<string, Promise<void>>();
+  /** The sequence number of the latest inspect call that saw each lease's namespace. */
+  const lastSeen = new Map<string, number>();
 
   /** The store, only while the plugin is loaded. */
   function db(): Store {
     if (deps.disposed()) throw new Unloaded();
     return deps.store;
+  }
+
+  /** Give a promise a handler now, so it can never reject unobserved; return it for whoever awaits it. */
+  function observed<T>(work: Promise<T>, what: string): Promise<T> {
+    work.catch((error: unknown) => {
+      if (!(error instanceof Unloaded) && !deps.disposed()) deps.log(`${what}: ${message(error)}`);
+    });
+    return work;
   }
 
   function fail(lease: LeaseRow, what: string): void {
@@ -91,69 +110,65 @@ export function createEnforcer(deps: EnforcerDeps) {
     }
   }
 
-  /** Observe detached work, so no rejection goes unhandled, before or after unload. */
-  function detach(work: Promise<unknown>, what: string): void {
-    work.catch((error: unknown) => {
-      if (!(error instanceof Unloaded) && !deps.disposed()) deps.log(`${what}: ${message(error)}`);
-    });
-  }
-
   async function single(method: "down" | "extend", lease: LeaseRow, cfg: Config): Promise<boolean> {
+    let reply;
     try {
-      const { result } = await deps.hosts.one<WriteResult>(method, deps.target(lease, cfg, method));
-      if (result.ok) return true;
-      fail(lease, `k8s-guard ${method} failed (${result.code}): ${result.error}`);
+      reply = await deps.hosts.one<WriteResult>(method, deps.target(lease, cfg, method));
     } catch (error) {
-      if (error instanceof Unloaded || deps.disposed()) throw new Unloaded();
+      if (deps.disposed()) throw new Unloaded();
       fail(lease, `k8s-guard ${method}: ${message(error)}`);
+      return false;
     }
+    if (reply.result.ok) return true;
+    fail(lease, `k8s-guard ${method} failed (${reply.result.code}): ${reply.result.error}`);
     return false;
   }
 
-  /** Start the lease's `down`, or null when one is already running. */
-  function down(lease: LeaseRow, cfg: Config): Promise<boolean> | null {
-    if (deletions.has(lease.id)) return null;
-    const started = single("down", lease, cfg).then((ok) => {
-      if (ok) downFailed.delete(lease.id);
-      else downFailed.add(lease.id);
-      deps.changed();
-      return ok;
-    });
-    deletions.set(lease.id, started);
-    detach(
-      started.finally(() => deletions.delete(lease.id)),
+  /** Start the lease's `down`, unless one is already running. */
+  function down(lease: LeaseRow, cfg: Config): Promise<boolean> {
+    const running = deletions.get(lease.id);
+    if (running !== undefined) return running;
+    db().markDownStarted(lease.id);
+    const started = observed(
+      single("down", lease, cfg).finally(() => {
+        deletions.delete(lease.id);
+        if (!deps.disposed()) deps.changed();
+      }),
       `lease ${lease.id}: down`,
     );
+    deletions.set(lease.id, started);
     return started;
   }
 
   /** Sync the namespace's expires-at to the lease, after any sync already running for it. */
   function extend(lease: LeaseRow, cfg: Config): Promise<boolean> {
     const previous = extending.get(lease.id) ?? Promise.resolve(true);
-    const next = previous.catch(() => false).then(() => single("extend", db().find(lease.id) ?? lease, cfg));
-    extending.set(lease.id, next);
-    detach(
-      next.finally(() => {
-        if (extending.get(lease.id) === next) extending.delete(lease.id);
-      }),
+    const next = observed(
+      previous.catch(() => false).then(() => single("extend", db().find(lease.id) ?? lease, cfg)),
       `lease ${lease.id}: extend`,
     );
+    extending.set(lease.id, next);
+    void next.finally(() => {
+      if (extending.get(lease.id) === next) extending.delete(lease.id);
+    }).catch(() => undefined);
     return next;
   }
 
-  /** Scale to 0 on every healthy host, and delete when due. True when it all worked. */
-  async function teardown(lease: LeaseRow, cfg: Config): Promise<boolean> {
-    const replies = await deps.hosts.all<WriteResult>("expire", deps.target(lease, cfg, "expire"), lease.id);
-    const expired = replies.some((reply) => "result" in reply && reply.result.ok);
-    if (!expired) fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
+  /** Scale to 0 on every healthy host and, when due, delete, both started now. */
+  function teardown(lease: LeaseRow, cfg: Config): Promise<void> {
     const due = lease.state === "releasing" || (lease.grace_deadline !== null && now() >= lease.grace_deadline);
-    let deleted = true;
-    if (due) {
-      // Wait only for a deletion this step started; one already running goes on alone.
-      const deletion = down(lease, cfg);
-      deleted = deletion !== null && (await within(deletion, deps.downWaitMs)) && (await deletion);
-    }
-    return expired && deleted && !downFailed.has(lease.id);
+    const deletion = due ? down(lease, cfg) : null;
+    const expiring = deps.hosts.all<WriteResult>("expire", deps.target(lease, cfg, "expire")).then((replies) => {
+      if (replies.some((reply) => "result" in reply && reply.result.ok)) return true;
+      fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
+      return false;
+    });
+    return observed(
+      Promise.all([expiring, deletion ?? Promise.resolve(true)]).then(([expired, deleted]) => {
+        if (expired && deleted) db().clearFailures(lease.id);
+      }),
+      `lease ${lease.id}: teardown`,
+    );
   }
 
   /** Revoke for an over-allocation, or null when the namespace fits its lease. */
@@ -169,95 +184,117 @@ export function createEnforcer(deps: EnforcerDeps) {
     return db().revoke(lease.id, "over_allocation", now() + cfg.graceMs);
   }
 
-  async function step(id: string): Promise<void> {
-    const cfg = await deps.config();
-    db().sweepExpired(cfg.graceMs);
-    let lease = db().find(id);
-    if (lease === undefined || !["active", "revoking", "releasing"].includes(lease.state)) return;
-    if (lease.state === "active") {
-      const fate = await deps.threadFate(lease.thread_id);
-      if (fate === "archived" || fate === "deleted" || fate === "missing") lease = db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs);
-    }
+  async function observe(lease: LeaseRow, cfg: Config): Promise<void> {
+    const id = lease.id;
     const uid = lease.uid;
-    // A holder, so the inspect callback can start the teardown and the step can see it.
-    const torn: { work: Promise<boolean> | null } = { work: lease.state === "active" ? null : teardown(lease, cfg) };
-
-    const replies = await deps.hosts.all<InspectResult>("inspect", deps.target(lease, cfg, "inspect"), lease.id, (reply) => {
+    let revokedHere = false;
+    const replies = await deps.hosts.all<InspectResult>("inspect", deps.target(lease, cfg, "inspect"), (reply) => {
+      if (deps.disposed() || !("result" in reply) || !reply.result.ok || reply.result.value.uid !== uid) return;
+      lastSeen.set(id, Math.max(lastSeen.get(id) ?? 0, reply.seq));
       // Act on the first answer that shows an over-allocation, without waiting for the rest.
-      if (deps.disposed() || torn.work !== null || !("result" in reply) || !reply.result.ok || reply.result.value.uid !== uid) return;
       const fresh = db().find(id);
-      if (fresh?.state !== "active") return;
+      if (fresh?.state !== "active" || revokedHere) return;
       const revoked = overAllocated(fresh, reply.result.value, cfg);
       if (revoked !== null) {
-        torn.work = teardown(revoked, cfg);
+        revokedHere = true;
+        void teardown(revoked, cfg);
         deps.changed();
       }
     });
 
     // Only well-formed answers count; a malformed UID is no answer.
     const answered = replies.filter(
-      (reply): reply is { hostId: string; result: InspectResult } =>
+      (reply): reply is { hostId: string; seq: number; result: InspectResult } =>
         "result" in reply && (reply.result.ok ? UID.safeParse(reply.result.value.uid).success : reply.result.code === "not_found"),
     );
     const sees = answered.filter((reply) => reply.result.ok && reply.result.value.uid === uid);
-    const gone = answered.filter((reply) => !reply.result.ok || reply.result.value.uid !== uid);
-    if (gone.length > 0 && sees.length === 0) {
+    // A report of "gone" counts only if its call started after the last call that saw the namespace.
+    const seenAt = lastSeen.get(id) ?? 0;
+    const gone = answered.filter((reply) => (!reply.result.ok || reply.result.value.uid !== uid) && reply.seq > seenAt);
+    if (sees.length === 0 && gone.length > 0) {
       db().end(id, gone.some((reply) => reply.result.ok) ? "namespace_recreated" : "namespace_gone");
-      if (torn.work !== null) detach(torn.work, `lease ${id}: teardown`);
+      lastSeen.delete(id);
       deps.changed();
       return;
     }
-
-    let worked = true;
     if (sees.length === 0) {
-      worked = false;
-      fail(lease, `inspect: no host saw the namespace: ${replies.map(describe).join("; ") || "no host configured"}`);
-    } else {
-      const views = sees.map((reply) => ({ hostId: reply.hostId, ns: (reply.result as { ok: true; value: Inspect }).value }));
-      const expiries = views.map(({ ns }) => (ns.expires_at === null ? null : Date.parse(ns.expires_at)));
-      const first = expiries[0] ?? null;
-      db().noteSeen(id, views[0]!.hostId, first !== null && Number.isFinite(first) ? first : null);
-      db().sweepExpired(cfg.graceMs);
-      const fresh = db().find(id)!;
-      if (torn.work === null && fresh.state !== "active") torn.work = teardown(fresh, cfg);
-      // Every host that sees the namespace must agree with the lease's expiry.
-      if (torn.work === null && expiries.some((at) => at !== fresh.expires_at)) worked = await extend(fresh, cfg);
+      if (answered.length === 0) fail(lease, `inspect: no host answered: ${replies.map(describe).join("; ") || "no host configured"}`);
+      return;
     }
-    if (torn.work !== null) worked = (await torn.work) && worked;
-    if (worked) db().clearFailures(id);
-    deps.changed();
+    const views = sees.map((reply) => (reply.result as { ok: true; value: Inspect }).value);
+    const expiries = views.map((ns) => (ns.expires_at === null ? null : Date.parse(ns.expires_at)));
+    const first = expiries[0] ?? null;
+    db().noteSeen(id, sees[0]!.hostId, first !== null && Number.isFinite(first) ? first : null);
+    db().sweepExpired(cfg.graceMs);
+    const fresh = db().find(id)!;
+    if (fresh.state !== "active") {
+      db().flagIfStuck(id, deps.stuckMs);
+      return;
+    }
+    // Every host that sees the namespace must agree with the lease's expiry.
+    const synced = !expiries.some((at) => at !== fresh.expires_at) || (await extend(fresh, cfg));
+    if (synced && !revokedHere) db().clearFailures(id);
   }
 
-  async function run(id: string): Promise<void> {
+  /** bb's thread lookup, with its own timeout; revokes only when it finishes. */
+  function checkThread(lease: LeaseRow, cfg: Config): Promise<void> {
+    const running = threadChecks.get(lease.id);
+    if (running !== undefined) return running;
+    const lookup = observed(deps.threadFate(lease.thread_id), `lease ${lease.id}: thread lookup`);
+    const check = observed(
+      (async () => {
+        let fate: ThreadFate = "unknown";
+        if (await within(lookup, deps.threadCheckMs)) fate = await lookup;
+        if (fate !== "archived" && fate !== "deleted" && fate !== "missing") return;
+        const fresh = db().find(lease.id);
+        if (fresh?.state !== "active") return;
+        await teardown(db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs), cfg);
+        deps.changed();
+      })().finally(() => threadChecks.delete(lease.id)),
+      `lease ${lease.id}: thread check`,
+    );
+    threadChecks.set(lease.id, check);
+    return check;
+  }
+
+  /**
+   * Start the work for one lease, awaiting nothing first. The promise settles
+   * when all of it has; it never rejects.
+   */
+  function dispatch(id: string, cfg: Config): Promise<void> {
+    const parts: Promise<unknown>[] = [];
     try {
-      await step(id);
+      db().sweepExpired(cfg.graceMs);
+      const lease = db().find(id);
+      if (lease === undefined || !LIVE.includes(lease.state)) return Promise.resolve();
+      if (lease.state !== "active") parts.push(teardown(lease, cfg));
+      parts.push(observed(observe(lease, cfg), `lease ${id}: observe`));
+      if (lease.state === "active") parts.push(checkThread(lease, cfg));
     } catch (error) {
-      if (error instanceof Unloaded || deps.disposed()) return;
-      deps.log(`lease ${id}: reconcile failed: ${message(error)}`);
+      if (!(error instanceof Unloaded) && !deps.disposed()) deps.log(`lease ${id}: dispatch failed: ${message(error)}`);
     }
+    return Promise.allSettled(parts).then(() => undefined);
   }
 
   return {
-    /** Reconcile one lease now. Never rejects. */
-    reconcile: run,
+    dispatch,
 
     /** Move the namespace's expires-at to the lease's expiry now. True when the guard did it. */
-    async sync(lease: LeaseRow): Promise<boolean> {
+    async sync(lease: LeaseRow, cfg: Config): Promise<boolean> {
       try {
-        return await extend(lease, await deps.config());
+        return await extend(lease, cfg);
       } catch (error) {
         if (error instanceof Unloaded) return false;
         throw error;
       }
     },
 
-    /** Revoke every active lease of a thread bb reports gone, then reconcile them. */
-    async threadGone(threadId: string, fate: "archived" | "deleted"): Promise<void> {
-      const cfg = await deps.config();
-      for (const lease of db().activeOfThread(threadId)) {
-        db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs);
-        await run(lease.id);
-      }
+    /** Revoke every active lease of a thread bb reports gone, then start its teardown. */
+    threadGone(threadId: string, fate: "archived" | "deleted", cfg: Config): Promise<void> {
+      const work = db()
+        .activeOfThread(threadId)
+        .map((lease) => dispatch(db().revoke(lease.id, `thread_${fate}`, now() + cfg.graceMs).id, cfg));
+      return Promise.all(work).then(() => undefined);
     },
   };
 }

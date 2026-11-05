@@ -18,8 +18,12 @@ export class HostUnreachable extends Error {
   }
 }
 
-/** One host's reply to a fanned-out call: a guard result, or the reason the host gave none. */
-export type HostAnswer<R> = { hostId: string; result: R } | { hostId: string; unreachable: string };
+/**
+ * One host's reply to a fanned-out call: a guard result, or the reason the
+ * host gave none. `seq` orders the calls by when they started: it only grows,
+ * even within one millisecond.
+ */
+export type HostAnswer<R> = { hostId: string; seq: number; result: R } | { hostId: string; seq: number; unreachable: string };
 
 export interface HostsDeps<Method extends string> {
   /** The raw host RPC. Rejects when the host cannot be reached. */
@@ -39,8 +43,7 @@ function message(error: unknown): string {
 export function createHosts<Method extends string>(deps: HostsDeps<Method>) {
   /** Last success and last failure of a guard call, by host. */
   const outcomes = new Map<string, { okAt: number; failAt: number }>();
-  /** Fanned-out calls in flight, so overlapping steps share one call per host. */
-  const sharing = new Map<string, Promise<HostAnswer<unknown>>>();
+  let seq = 0;
 
   function note(hostId: string, ok: boolean): void {
     const seen = outcomes.get(hostId) ?? { okAt: -Infinity, failAt: -Infinity };
@@ -66,38 +69,34 @@ export function createHosts<Method extends string>(deps: HostsDeps<Method>) {
   }
 
   async function answer<R>(hostId: string, method: Method, input: unknown): Promise<HostAnswer<R>> {
+    seq += 1;
+    const mine = seq;
     try {
       const result = await deps.call(hostId, method, input);
       note(hostId, !hostFailed(result));
-      return { hostId, result: result as R };
+      return { hostId, seq: mine, result: result as R };
     } catch (error) {
       note(hostId, false);
-      return { hostId, unreachable: message(error) };
+      return { hostId, seq: mine, unreachable: message(error) };
     }
   }
 
   return {
     /**
-     * Send the call to every healthy host at once (every configured host when
-     * none is healthy). `onAnswer` sees each reply as it arrives. Overlapping
-     * callers with the same `key` share one call per host.
+     * Send a fresh call to every healthy host at once (every configured host
+     * when none is healthy). Calls are never shared: an earlier call still
+     * running may have done its work before a later write landed. `onAnswer`
+     * sees each reply as it arrives.
      */
-    all<R>(method: Method, input: unknown, key: string, onAnswer: (answer: HostAnswer<R>) => void = () => undefined): Promise<HostAnswer<R>[]> {
+    all<R>(method: Method, input: unknown, onAnswer: (answer: HostAnswer<R>) => void = () => undefined): Promise<HostAnswer<R>[]> {
       const targets = deps.healthy().length > 0 ? deps.healthy() : deps.configured();
       return Promise.all(
-        targets.map((hostId) => {
-          const shareKey = `${key}|${method}|${hostId}`;
-          let pending = sharing.get(shareKey) as Promise<HostAnswer<R>> | undefined;
-          if (pending === undefined) {
-            pending = answer<R>(hostId, method, input);
-            sharing.set(shareKey, pending);
-            void pending.finally(() => sharing.delete(shareKey));
-          }
-          return pending.then((reply) => {
+        targets.map((hostId) =>
+          answer<R>(hostId, method, input).then((reply) => {
             onAnswer(reply);
             return reply;
-          });
-        }),
+          }),
+        ),
       );
     },
 

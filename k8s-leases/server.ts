@@ -49,15 +49,16 @@ const TICK_WAIT_MS = 0;
 const HOST_COOLDOWN_MS = 5 * 60_000;
 /** A release waits this long for its first teardown step; the teardown goes on after that. */
 const RELEASE_WAIT_MS = 20_000;
-/** A reconcile step waits this long for a `down`; the deletion goes on alone after that. */
-const DOWN_WAIT_MS = 20_000;
+/** A thread lookup may take this long; past it the thread counts as unknown, and nothing is revoked. */
+const THREAD_CHECK_MS = 20_000;
+/** A namespace still there this long after its first `down` raises a teardown flag. */
+const STUCK_MS = 5 * 60_000;
 
 export interface K8sLeasesOptions {
   now?: () => number;
   newLeaseId?: () => string;
   newToken?: () => string;
   tickWaitMs?: number;
-  downWaitMs?: number;
 }
 
 function message(error: unknown): string {
@@ -140,7 +141,6 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
   const newLeaseId = options.newLeaseId ?? (() => `lse_${randomBytes(8).toString("hex")}`);
   const newToken = options.newToken ?? (() => `tok_${randomUUID()}`);
   const tickWaitMs = options.tickWaitMs ?? TICK_WAIT_MS;
-  const downWaitMs = options.downWaitMs ?? DOWN_WAIT_MS;
 
   return async function k8sLeases(bb: BbPluginApi): Promise<void> {
     const settings = bb.settings.define(SETTINGS);
@@ -227,14 +227,22 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
      * the kept copy only if it started after the read that wrote it, so a slow
      * reply can never bring back a profile a newer read changed.
      */
+    let profileReads = 0;
+    let profileKept = 0;
     async function refreshProfiles(cfg: Config): Promise<Profiles | null> {
       const started = now();
+      // Ordered by a counter, not the clock: two reads can start in the same millisecond.
+      profileReads += 1;
+      const mine = profileReads;
       for (const hostId of hosts.order()) {
         try {
           const read = await host.call("profiles", { command: cfg.profilesCommand }, { hostId, timeoutMs: HOST_TIMEOUTS.profiles + HOST_CALL_MARGIN_MS, signal: life.signal });
           if (disposed) return null;
           if (read.ok) {
-            store.saveProfiles(hostId, JSON.stringify(read.value), started);
+            if (mine > profileKept) {
+              profileKept = mine;
+              store.saveProfiles(hostId, JSON.stringify(read.value), started);
+            }
             return currentProfiles();
           }
           bb.log.warn(`profiles on ${hostId}: ${read.code}: ${read.error}`);
@@ -248,7 +256,6 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
 
     const enforcer = createEnforcer({
       store,
-      config: current,
       now,
       hosts,
       target,
@@ -258,7 +265,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       },
       changed: publish,
       disposed: () => disposed,
-      downWaitMs,
+      threadCheckMs: THREAD_CHECK_MS,
+      stuckMs: STUCK_MS,
     });
 
     /** Probes in flight, by host, so a hung host is not probed twice at once. */
@@ -284,12 +292,14 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
      */
     async function tick(): Promise<void> {
       if (disposed) return;
-      const cfg = await current();
+      // The settings as last read: reading them again must not stand before the dispatch.
+      const cfg = latest ?? (await current());
       store.sweepExpired(cfg.graceMs);
       const work = [
-        ...store.live().map((row) => enforcer.reconcile(row.id)),
+        ...store.live().map((row) => enforcer.dispatch(row.id, cfg)),
         ...cfg.hosts.filter((hostId) => !probing.has(hostId)).map((hostId) => probe(hostId, cfg)),
         refreshProfiles(cfg),
+        current(),
       ];
       await within(Promise.allSettled(work), tickWaitMs);
       publish();
@@ -424,10 +434,12 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             run: (input, ctx) =>
               json(async () => {
                 const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
-                const row = store.release(id, ctx.threadId, await config());
+                const cfg = await config();
+                latest = cfg;
+                const row = store.release(id, ctx.threadId, cfg);
                 publish();
-                // A release tears down at once: one reconcile now, not at the next tick.
-                if (row.state === "releasing") await within(enforcer.reconcile(id), RELEASE_WAIT_MS);
+                // A release tears down at once, not at the next tick.
+                if (row.state === "releasing") await within(enforcer.dispatch(id, cfg), RELEASE_WAIT_MS);
                 publish();
                 return { state: store.find(id)!.state };
               }),
@@ -438,8 +450,9 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             options: jsonFlag,
             run: (input, ctx) =>
               json(async () => {
-                const row = store.renew(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), ctx.threadId, await config());
-                await enforcer.sync(row);
+                const cfg = await current();
+                const row = store.renew(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), ctx.threadId, cfg);
+                await enforcer.sync(row, cfg);
                 publish();
                 return { expires_at: iso(row.expires_at) };
               }),
@@ -529,13 +542,14 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       },
       async extend({ leaseId, minutes }) {
         let row: LeaseRow;
+        const cfg = await current();
         try {
-          row = store.extend(leaseId, minutes, await config());
+          row = store.extend(leaseId, minutes, cfg);
         } catch (error) {
           refusal(error);
         }
         publish();
-        const synced = await enforcer.sync(row);
+        const synced = await enforcer.sync(row, cfg);
         publish();
         return { expiresAt: row.expires_at, synced };
       },
@@ -544,11 +558,11 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
     bb.background.schedule("reconcile", "* * * * *", tick);
 
     bb.events.on("thread.archived", async ({ thread }) => {
-      await enforcer.threadGone(thread.id, "archived");
+      await enforcer.threadGone(thread.id, "archived", await current());
       publish();
     });
     bb.events.on("thread.deleted", async ({ thread }) => {
-      await enforcer.threadGone(thread.id, "deleted");
+      await enforcer.threadGone(thread.id, "deleted", await current());
       publish();
     });
 
@@ -556,6 +570,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
     settings.onChange((next, prev) => {
       const changed = (Object.keys(next) as Array<keyof typeof next>).filter((key) => next[key] !== prev[key]);
       if (changed.length === 0) return;
+      latest = parseConfig(next);
       const clip = (value: unknown) => String(value).slice(0, 300);
       store.flag(null, "settings_changed", `Settings changed: ${changed.map((key) => `${key}: ${clip(prev[key])} -> ${clip(next[key])}`).join("; ")}`);
       publish();

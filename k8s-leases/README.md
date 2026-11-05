@@ -54,14 +54,14 @@ sequenceDiagram
 - **One process decides.** Every `bb k8s` call runs in the bb server. Each check-and-write is one SQLite transaction with no await inside. So two hosts cannot take the same GPUs, and two writes cannot hold one slot.
 - **Acquire** confirms the namespace on a host first: its UID, and its `wcep.agent/thread` label, which must be the calling thread. Then it checks the cluster's profile (not `never`, `bot_can_write`, its GPU type, which must have a limit), the first-run approval, the hours, one node or a multi-node approval, a heartbeat in the last 10 minutes, the limit, and that no other lease holds the namespace.
 - **The slot.** `op begin` works only while the lease is active and its one slot is free or past its 2-minute deadline.
-- **Reconcile.** A schedule runs every minute. It starts the work and returns: a step for every live lease, a probe of every host, and a read of the profiles, all at once. Each guard call has its own timeout, so no slow host or call holds up the others.
-  - An expired lease, or a lease whose thread bb reports archived, deleted or missing, moves to `revoking`.
+- **Reconcile.** A schedule runs every minute. It reads the lease table and starts the work, awaiting nothing first: for every live lease a teardown (if not active), an inspection, and a thread check (if active), plus a probe of every host and a read of the profiles. Each call has its own timeout, so no slow host, lookup or call holds up the others.
+  - An expired lease moves to `revoking` at once. The thread check asks bb about the lease's thread, with a 20-second limit. When it finishes and bb reports the thread archived, deleted or missing, the lease moves to `revoking`.
   - `inspect` goes to every healthy host at once. The first answer that shows more GPUs than the lease, or GPUs of another or unknown type, revokes the lease.
-  - A lease that is not active gets `k8s-guard expire` on every step, sent to every healthy host at once, whatever `inspect` says. `expire` only reduces, so one success is enough.
-  - `down` runs when the grace deadline passes, or at once for a returned lease. It runs once per lease, on one host at a time, with the hosts whose last call failed tried last.
+  - A lease that is not active gets a fresh `k8s-guard expire` on every tick, sent to every healthy host at once, whatever `inspect` says. `expire` only reduces, so one success is enough.
+  - `down` runs when the grace deadline passes, or at once for a returned lease, started beside `expire`, not after it. It runs once per lease, on one host at a time, with the hosts whose last call failed tried last. A namespace still there 5 minutes after its first `down` raises a `teardown_failing` flag.
   - A namespace whose `expires-at` differs from the lease gets `k8s-guard extend`, one at a time per lease. `k8s-guard` decides where a namespace keeps its `expires-at`. The plugin reads it only through `inspect`.
 - **Teardown is narrow.** Every write passes the lease's namespace UID, and the guard refuses a write to a namespace with another UID.
-- **GPUs free late.** A lease frees its GPUs only when at least one host reports its namespace gone or re-created, and no host that answered still sees it. A host that gives no answer frees nothing.
+- **GPUs free late.** A lease frees its GPUs only when at least one host reports its namespace gone or re-created, and no host that answered still sees it. The report must come from a call that started after the last call that saw the namespace. A host that gives no answer frees nothing.
 - **Extend.** The panel lists every lease. Each active lease has an Extend button: +30 min, +1 h, +2 h, or a custom amount. The plugin moves the expiry, records the extension, and runs `k8s-guard extend` at once.
 
 ## Known limits

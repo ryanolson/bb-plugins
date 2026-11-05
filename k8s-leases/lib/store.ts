@@ -38,7 +38,9 @@ export const MIGRATIONS = [
     last_host TEXT,
     last_checked_at INTEGER,
     failures INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    down_first_at INTEGER,
+    stuck_flagged INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE UNIQUE INDEX leases_live_namespace ON leases(context, namespace) WHERE state IN ('active','revoking','releasing')`,
   `CREATE INDEX leases_state ON leases(state)`,
@@ -89,6 +91,9 @@ export interface LeaseRow {
   last_checked_at: number | null;
   failures: number;
   last_error: string | null;
+  /** When the first `down` of this lease started. */
+  down_first_at: number | null;
+  stuck_flagged: number;
 }
 
 export interface ExtensionRow {
@@ -394,6 +399,25 @@ export function createStore(db: Db, now: () => number) {
       return db.transaction(() => {
         db.prepare("UPDATE leases SET failures = failures + 1, last_error = ?, last_checked_at = ? WHERE id = ?").run(error, now(), id);
         return mustGet(id).failures === FAILURES_BEFORE_FLAG;
+      }).immediate();
+    },
+
+    /** Note the first `down` of a lease, so a deletion that never finishes can be flagged. */
+    markDownStarted(id: string): void {
+      db.prepare("UPDATE leases SET down_first_at = COALESCE(down_first_at, ?) WHERE id = ?").run(now(), id);
+    },
+
+    /** Flag a deletion that has not finished `afterMs` after its first `down`, once per lease. */
+    flagIfStuck(id: string, afterMs: number): void {
+      db.transaction(() => {
+        const row = mustGet(id);
+        if (row.down_first_at === null || row.stuck_flagged === 1 || now() - row.down_first_at < afterMs) return;
+        db.prepare("UPDATE leases SET stuck_flagged = 1 WHERE id = ?").run(id);
+        addFlag(
+          id,
+          "teardown_failing",
+          `Lease ${id} (${row.namespace} on ${row.cluster}): its namespace still exists ${Math.round((now() - row.down_first_at) / 60_000)} min after the first delete. Its GPUs stay charged.`,
+        );
       }).immediate();
     },
 
