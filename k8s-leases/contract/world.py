@@ -44,7 +44,7 @@ if command == 'init':
     tbot = home / '.local/bin/tbot'
     tbot.parent.mkdir(parents=True)
     write_exec(tbot, '#!/bin/sh\nexit 0\n')
-    bot.write_text(g.kubeconfig(str(tbot)))
+    bot.write_text(g.kubeconfig(str(tbot), destination=bot.parent))
     (world / 'runner.py').write_text(g.RUNNER)
     bin_dir = world / 'bin'
     bin_dir.mkdir()
@@ -81,6 +81,15 @@ elif command == 'add-ns':
     st['objects'].setdefault(args['name'], {})
     st['pods'].setdefault(args['name'], [])
     save(st)
+    if args.get('ledger'):
+        # The thread ledger line `k8s-guard ns create` writes, so owner commands find their namespace.
+        ledger = Path(args['ledger'])
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        line = {'time': g.iso_ms(g.hours_from_now(0)), 'thread': args['thread'], 'cluster': g.PROFILE, 'context': g.CTX,
+                'namespace': args['name'], 'uid': args['uid'], 'object': f'Namespace/{args["name"]}', 'gpus': 0,
+                'direction': 'up', 'lease': None, 'issue': args.get('issue', '12'), 'created': True}
+        with open(ledger, 'a') as f:
+            f.write(json.dumps(line) + '\n')
 elif command == 'add-dgd':
     st = load()
     obj = g.gpu_dgd(args['name'], args['gpus'], args['lease'])

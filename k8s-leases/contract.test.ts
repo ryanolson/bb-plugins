@@ -24,7 +24,7 @@ import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
 /** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles PR #17, branch k8s-guard. */
-export const GUARD_COMMIT = "89b19ebec2312a3ad879924de88bffe2d4bdd2c3";
+export const GUARD_COMMIT = "d92ec1a1fa27f33bdca1d878a0c2491799150867";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
@@ -122,8 +122,11 @@ async function plugin(options: { hostCall?: (method: string, input: any, hostId:
  * Run the real guard as the agent of thread `thread`, as an agent runs it.
  * Asynchronous: the guard's `bb` calls come back into this process.
  */
+/** Each thread's storage, where its guard ledger lives. */
+const storageOf = (thread: string) => join(world.dir, `storage-${thread}`);
+
 function agentGuard(thread: string, ...args: string[]): Promise<{ code: number; json: any }> {
-  const storage = mkdtempSync(join(world.dir, "storage-"));
+  const storage = storageOf(thread);
   return new Promise((resolve) => {
     const child = execFile(
       world.guard,
@@ -135,11 +138,18 @@ function agentGuard(thread: string, ...args: string[]): Promise<{ code: number; 
   });
 }
 
-/** A namespace as `k8s-guard ns create` leaves it, with a UUID as a real cluster gives, and a lease taken on it through the guard. */
-async function leased(p: Awaited<ReturnType<typeof plugin>>, name: string, gpus = 4) {
-  const ns = world.prefix + name;
+/** A never-reused name, as `k8s-guard ns create` makes: <prefix><issue>-<purpose>-<5-character suffix>. */
+const fresh = (purpose: string) => `${world.prefix}12-${purpose}-${randomUUID().replace(/-/g, "").slice(0, 5)}`;
+
+/**
+ * A namespace as `k8s-guard ns create` leaves it, with a UUID as a real
+ * cluster gives and the line it writes in the thread's ledger, and a lease
+ * taken on it through the guard.
+ */
+async function leased(p: Awaited<ReturnType<typeof plugin>>, purpose: string, gpus = 4) {
+  const ns = fresh(purpose);
   const uid = randomUUID();
-  py("add-ns", { name: ns, thread: world.me, uid });
+  py("add-ns", { name: ns, thread: world.me, uid, ledger: join(storageOf(world.me), "k8s-ledger.jsonl") });
   const got = await agentGuard(world.me, "--context", world.ctx, "-n", ns, "lease", "acquire", "--gpus", String(gpus), "--hours", "1");
   assert.equal(got.code, 0, `k8s-guard lease acquire: ${JSON.stringify(got.json)}`);
   return { ns, uid, id: got.json.lease_id as string };
@@ -155,7 +165,7 @@ const writesTo = (ns: string) =>
 test("acquire through the real guard: the lease holds the profile name, the kube context and the namespace UID", { skip }, async () => {
   const p = await plugin();
   await p.tick();
-  const { id, ns, uid } = await leased(p, "12-cacquire");
+  const { id, ns, uid } = await leased(p, "cacquire");
   const lease = await p.show(id);
   assert.deepEqual([lease.state, lease.cluster, lease.context, lease.namespace, lease.uid], ["active", world.profile, world.ctx, ns, uid]);
   assert.equal(state().objects[ns]!["ConfigMap/wcep-agent-lease"]!.data.lease_id, id);
@@ -165,7 +175,7 @@ test("acquire through the real guard: the lease holds the profile name, the kube
 test("expiry: the real guard scales the DGDs to 0 on the plugin's word, then deletes after the grace period", { skip }, async () => {
   const p = await plugin();
   await p.tick();
-  const { id, ns } = await leased(p, "12-cexpire");
+  const { id, ns } = await leased(p, "cexpire");
   py("add-dgd", { ns, name: "worker", gpus: 4, lease: id });
   p.clock.advance(HOUR + MIN);
   await p.tick();
@@ -187,7 +197,7 @@ test("expiry: the real guard scales the DGDs to 0 on the plugin's word, then del
 test("a namespace re-created under the same name: the real guard refuses every teardown write, and the new namespace is untouched", { skip }, async () => {
   const p = await plugin();
   await p.tick();
-  const { id, ns } = await leased(p, "12-crecreate");
+  const { id, ns } = await leased(p, "crecreate");
   py("add-dgd", { ns, name: "worker", gpus: 4, lease: id });
   assert.equal(JSON.parse((await p.harness.behavior.runCli(["lease", "release", id], { threadId: world.me })).stdout).state !== undefined, true);
   // Whatever the release did, the namespace is now gone and made again with a new UID.
@@ -220,7 +230,7 @@ test("a deletion whose response is lost, then the namespace re-created: the new 
     },
   });
   await p.tick();
-  const { id, ns } = await leased(p, "12-clost");
+  const { id, ns } = await leased(p, "clost");
   await p.harness.behavior.runCli(["lease", "release", id], { threadId: world.me });
   if (state().namespaces[ns] !== undefined) {
     // The guard keeps the namespace until its GPU pods are gone; let them go and tick again.
@@ -238,15 +248,16 @@ test("a deletion whose response is lost, then the namespace re-created: the new 
 
 test("a host that inspects the wrong namespace cannot free the lease's GPUs", { skip }, async () => {
   let misroute = false;
+  const decoy = fresh("cdecoy");
   const p = await plugin({
     hostCall: (method, input, hostId, real) =>
-      misroute && method === "inspect" && hostId === "host_one" && input.namespace.endsWith("12-cmisroute")
-        ? (p.host.experimental_call("inspect", { ...input, namespace: world.prefix + "12-cdecoy" }) as Promise<unknown>)
+      misroute && method === "inspect" && hostId === "host_one" && input.namespace.includes("-cmisroute-")
+        ? (p.host.experimental_call("inspect", { ...input, namespace: decoy }) as Promise<unknown>)
         : real(),
   });
   await p.tick();
-  py("add-ns", { name: world.prefix + "12-cdecoy", thread: world.me, uid: randomUUID() });
-  const { id } = await leased(p, "12-cmisroute");
+  py("add-ns", { name: decoy, thread: world.me, uid: randomUUID() });
+  const { id } = await leased(p, "cmisroute");
   misroute = true; // from here on, host one answers for the decoy namespace
   for (let n = 0; n < 3; n += 1) await p.tick();
   assert.equal((await p.show(id)).state, "active");
@@ -256,7 +267,7 @@ test("a host that inspects the wrong namespace cannot free the lease's GPUs", { 
 test("an inspect answer with an empty UID frees nothing", { skip }, async () => {
   const p = await plugin();
   await p.tick();
-  const { id, ns } = await leased(p, "12-cemptyuid");
+  const { id, ns } = await leased(p, "cemptyuid");
   const st = state();
   st.namespaces[ns].metadata.uid = "";
   py("set", st);
@@ -268,7 +279,7 @@ test("an inspect answer with an empty UID frees nothing", { skip }, async () => 
 test("p3 f3 on the real guard: an extend that lands late cannot pull the expiry back", { skip }, async () => {
   const p = await plugin();
   await p.tick();
-  const { id, ns } = await leased(p, "12-cextend");
+  const { id, ns } = await leased(p, "cextend");
   await p.tick(); // expires-at in step with the lease
   // A: the panel extends by 30 min; its guard call is held just before its write.
   writeFileSync(join(world.dir, "hold-replace"), "");
