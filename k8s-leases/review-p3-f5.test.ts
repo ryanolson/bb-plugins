@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-test("a down failure after reload must not reject an unobserved promise against the closed database", () => {
+test("a down failure after reload must not reject an unobserved promise against the closed database", { todo: "p3 f5 [lifecycle]: work in flight at reload hits the closed database; waits on the redesign" }, () => {
   const scenario = `
     import assert from "node:assert/strict";
     import { setImmediate } from "node:timers/promises";

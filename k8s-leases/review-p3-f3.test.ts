@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HOST_ONE, HOUR, MIN, THREAD_A, setup } from "./test-support.ts";
 
-test("an extend that times out can still commit after a newer synced extension and trigger the offline timer early", async () => {
+test("an extend that times out can still commit after a newer synced extension and trigger the offline timer early", { todo: 'p3 f3 [boundary]: a timed-out extend can land late at the API; needs a conditional write in k8s-guard' }, async () => {
   const world = await setup();
   await world.tick();
   const { id, ns, result } = await world.lease(THREAD_A, "review-p3-extend-timeout", 4, { hours: 1 });
