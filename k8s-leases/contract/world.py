@@ -43,14 +43,18 @@ if command == 'init':
     # tbot as the dotfiles install it for one user, in the (fake) passwd home, as the guard's own tests do.
     tbot = home / '.local/bin/tbot'
     tbot.parent.mkdir(parents=True)
-    write_exec(tbot, '#!/bin/sh\nexit 0\n')
+    # The guard's fake tbot, which prints an ExecCredential, where it has one; else a stub.
+    write_exec(tbot, getattr(g, 'FAKE_TBOT', '#!/bin/sh\nexit 0\n'))
     bot.write_text(g.kubeconfig(str(tbot), destination=bot.parent))
     (world / 'runner.py').write_text(g.RUNNER)
     bin_dir = world / 'bin'
     bin_dir.mkdir()
     write_exec(bin_dir / 'kubectl-fake', g.FAKE_KUBECTL)
-    # kubectl: the guard's fake, held at its first `replace` while a hold file exists.
-    write_exec(bin_dir / 'kubectl', f'''#!/usr/bin/env python3
+    # kubectl: the guard's fake, held at its first `replace` while a hold file exists. The guard runs
+    # kubectl only from a pinned path, checked against the sha256 in the profiles (as its own tests do).
+    pinned = world / 'pinned/kubectl'
+    pinned.parent.mkdir()
+    write_exec(pinned, f'''#!/usr/bin/env python3
 import os, sys, time
 world = {str(world)!r}
 if 'replace' in sys.argv and os.path.exists(os.path.join(world, 'hold-replace')) and not os.path.exists(os.path.join(world, 'held')):
@@ -59,10 +63,13 @@ if 'replace' in sys.argv and os.path.exists(os.path.join(world, 'hold-replace'))
         time.sleep(0.05)
 os.execv(sys.executable, [sys.executable, {str(bin_dir / 'kubectl-fake')!r}, *sys.argv[1:]])
 ''')
+    (bin_dir / 'kubectl').symlink_to(pinned)
     write_exec(bin_dir / 'tsh', g.FAKE_TSH)
     write_exec(bin_dir / 'k8s-guard', f'#!/bin/sh\nexec python3 -I {world / "runner.py"} {g.GUARD} "$@"\n')
     profiles = world / 'profiles.toml'
-    profiles.write_text(g.EXAMPLE.read_text() + g.EXTRA_PROFILE)
+    import hashlib, re
+    pin = hashlib.sha256(pinned.read_bytes()).hexdigest()
+    profiles.write_text(re.sub(r'kubectl_sha256 = "[0-9a-f]*"', f'kubectl_sha256 = "{pin}"', g.EXAMPLE.read_text() + g.EXTRA_PROFILE))
     save({'namespaces': {}, 'objects': {}, 'pods': {}})
     print(json.dumps({
         'env': {
@@ -70,6 +77,7 @@ os.execv(sys.executable, [sys.executable, {str(bin_dir / 'kubectl-fake')!r}, *sy
             'XDG_STATE_HOME': str(world / 'state'), 'FAKE_K8S_STATE': str(state),
             'FAKE_KUBECTL_LOG': str(world / 'kubectl.log'), 'FAKE_TSH_LOG': str(world / 'tsh.log'),
             'K8S_GUARD_DOWN_WAIT_SECONDS': '0', 'K8S_GUARD_POLL_SECONDS': '0',
+            'FAKE_KUBECTL': str(pinned), 'FAKE_TBOT_LOG': str(world / 'tbot.log'),
         },
         'bin': str(bin_dir), 'guard': str(bin_dir / 'k8s-guard'), 'kubeconfig': str(bot),
         'check': str(repo / 'dot_agents/skills/k8s-clusters/scripts/executable_k8s-check'),

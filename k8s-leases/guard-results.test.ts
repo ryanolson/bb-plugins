@@ -65,6 +65,8 @@ test("a down that leaves GPU pods: deletion started, one gpu_pods_left flag, and
   }
   assert.equal((await world.cli(["lease", "show", id])).json.state, "releasing");
   assert.equal(await charged(), 4, "the GPUs were freed while pods were still terminating");
+  // Not done: each tick checks again with another down (the guard sends no second delete).
+  assert.ok(world.guard.calls.filter((c) => c.method === "down" && c.leaseId === id).length >= 4, "down was not re-checked on each tick");
   const flags = (await world.cli(["flags", "--json"])).json as Array<{ kind: string; lease_id: string }>;
   assert.equal(flags.filter((f) => f.lease_id === id && f.kind === "gpu_pods_left").length, 1);
   assert.ok(!flags.some((f) => f.lease_id === id && f.kind === "teardown_failing"), "a working down counted as a failure");
