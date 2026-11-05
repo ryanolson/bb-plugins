@@ -139,6 +139,14 @@ export function createEnforcer(deps: EnforcerDeps) {
       db().noteReport(lease.id, `k8s-guard ${method}: ${code}: ${error}`);
     } else if (code === "uid_mismatch") {
       recreated(lease, `k8s-guard ${method}: ${error}`);
+    } else if (code === "lease_record_missing") {
+      // The namespace has no lease record: acquire failed after the grant. Only a release puts it right.
+      db().noteReport(lease.id, `k8s-guard ${method}: ${error}`);
+      db().flagOnce(
+        lease.id,
+        "lease_record_missing",
+        `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the namespace has no lease record, so its expires-at cannot follow the lease. Release it with \`bb k8s lease release ${lease.id}\`, which tears the namespace down.`,
+      );
     } else {
       fail(lease, `k8s-guard ${method} failed (${code}): ${error}`);
     }
@@ -181,10 +189,11 @@ export function createEnforcer(deps: EnforcerDeps) {
     const deletion = due ? down(lease, cfg) : null;
     const expiring = deps.hosts.all<WriteResult>("expire", deps.target(lease, cfg, "expire")).then((replies) => {
       if (replies.some((reply) => "result" in reply && reply.result.ok)) return true;
-      const allRecreated = replies.length > 0 && replies.every((reply) => "result" in reply && !reply.result.ok && reply.result.code === "uid_mismatch");
-      // Every host saw a re-created namespace: nothing of this lease is left to scale. Only inspect frees the GPUs.
-      if (allRecreated) recreated(lease, "k8s-guard expire: every host saw a re-created namespace");
-      else fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
+      const isRecreated = (reply: (typeof replies)[number]) => "result" in reply && !reply.result.ok && reply.result.code === "uid_mismatch";
+      // Any host that saw a re-created namespace is a sighting. Only inspect frees the GPUs.
+      if (replies.some(isRecreated)) recreated(lease, "k8s-guard expire: a host saw a re-created namespace");
+      // Every host saw it: nothing of this lease is left to scale, so it is no failure.
+      if (!(replies.length > 0 && replies.every(isRecreated))) fail(lease, `k8s-guard expire worked on no host: ${replies.map(describe).join("; ") || "no host configured"}`);
       return false;
     });
     return observed(

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { HOST_ONE, HOST_TWO, MIN, THREAD_A, setup } from "./test-support.ts";
 
 const HOST_FAULTS = ["guard_missing", "guard_timeout", "guard_output", "guard_error", "kubectl_error", "internal_error"];
-const REFUSALS = ["pods_left", "uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found"];
+const REFUSALS = ["pods_left", "uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found", "lease_record_missing"];
 
 /** A released lease whose down, on host one, answers with `code`. */
 async function releasedWith(code: string | "throw") {
@@ -97,4 +97,29 @@ test("a deletion still not done 15 minutes after its first down is flagged, and 
   world.clock.advance(MIN);
   await world.tick();
   assert.equal(await flagged(), true, "not flagged at 15 minutes");
+});
+
+test("lease_record_missing on extend: no failover, no cool-down, and one digest flag telling the user to release", async () => {
+  const world = await setup();
+  await world.tick();
+  const { id, ns } = await world.lease(THREAD_A, "dyntest-norecord", 1);
+  const extends_: string[] = [];
+  const handle = world.guard.handle.bind(world.guard);
+  world.guard.handle = async (method, input, hostId) => {
+    if (method === "extend" && input.namespace === ns.name) {
+      extends_.push(hostId);
+      return { ok: false, code: "lease_record_missing", error: `${ns.name} has no lease record; \`lease acquire\` writes it` };
+    }
+    return handle(method, input, hostId);
+  };
+  const extended = (await world.harness.behavior.callRpc("extend", { leaseId: id, minutes: 30 })) as { synced: boolean };
+  assert.equal(extended.synced, false);
+  assert.deepEqual(extends_, [HOST_ONE], "lease_record_missing failed over to the next host");
+  await world.tick();
+  await world.tick();
+  assert.deepEqual(extends_, [HOST_ONE, HOST_ONE, HOST_ONE], "the next ticks did not ask the same host first");
+  const flags = (await world.cli(["flags", "--json"])).json as Array<{ kind: string; lease_id: string; detail: string }>;
+  const raised = flags.filter((f) => f.lease_id === id && f.kind === "lease_record_missing");
+  assert.equal(raised.length, 1);
+  assert.match(raised[0]!.detail, /release/);
 });

@@ -24,6 +24,7 @@ export const REFUSALS: ReadonlySet<string> = new Set([
   "lease_not_active",
   "not_expired",
   "record_conflict",
+  "lease_record_missing",
 ]);
 
 /** No host could be reached, or none gave an answer. */

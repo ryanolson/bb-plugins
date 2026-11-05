@@ -401,11 +401,11 @@ export function createStore(db: Db, now: () => number) {
       db.prepare("UPDATE leases SET last_host = ?, last_checked_at = ?, ns_expires_at = ? WHERE id = ?").run(host, now(), nsExpiresAt, id);
     },
 
-    /** Raise a flag of this kind for this lease, unless one is open already. */
+    /** Raise a flag of this kind for this lease once, ever: a cleared one is not raised again. */
     flagOnce(id: string, kind: string, detail: string): void {
       db.transaction(() => {
-        const open = db.prepare<[string, string], { id: number }>("SELECT id FROM flags WHERE lease_id = ? AND kind = ? AND cleared_at IS NULL").get(id, kind);
-        if (open === undefined) addFlag(id, kind, detail);
+        const raised = db.prepare<[string, string], { id: number }>("SELECT id FROM flags WHERE lease_id = ? AND kind = ?").get(id, kind);
+        if (raised === undefined) addFlag(id, kind, detail);
       }).immediate();
     },
 
