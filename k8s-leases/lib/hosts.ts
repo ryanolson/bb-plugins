@@ -20,10 +20,10 @@ export class HostUnreachable extends Error {
 
 /**
  * One host's reply to a fanned-out call: a guard result, or the reason the
- * host gave none. `seq` orders the calls by when they started: it only grows,
- * even within one millisecond.
+ * host gave none. `seq` is when the call started and `done` when its reply
+ * came, on one counter that only grows, even within one millisecond.
  */
-export type HostAnswer<R> = { hostId: string; seq: number; result: R } | { hostId: string; seq: number; unreachable: string };
+export type HostAnswer<R> = { hostId: string; seq: number; done: number; result: R } | { hostId: string; seq: number; done: number; unreachable: string };
 
 export interface HostsDeps<Method extends string> {
   /** The raw host RPC. Rejects when the host cannot be reached. */
@@ -74,10 +74,10 @@ export function createHosts<Method extends string>(deps: HostsDeps<Method>) {
     try {
       const result = await deps.call(hostId, method, input);
       note(hostId, !hostFailed(result));
-      return { hostId, seq: mine, result: result as R };
+      return { hostId, seq: mine, done: ++seq, result: result as R };
     } catch (error) {
       note(hostId, false);
-      return { hostId, seq: mine, unreachable: message(error) };
+      return { hostId, seq: mine, done: ++seq, unreachable: message(error) };
     }
   }
 

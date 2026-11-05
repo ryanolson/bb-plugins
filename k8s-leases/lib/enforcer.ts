@@ -10,9 +10,10 @@
 // - Observe: a fresh `inspect` to every healthy host at once. The first answer
 //   that shows an over-allocation revokes the lease and starts its teardown.
 //   The lease ends, and frees its GPUs, only when at least one host reports
-//   its namespace gone or re-created, no answering host still sees it, and
-//   those reports come from calls started after the last call that saw it.
-//   A host that gives no answer frees nothing.
+//   its namespace gone or re-created, no answering host still sees it, the
+//   report comes from a call that started after the last sighting came back,
+//   and no other inspect of the lease is still running. A host that gives no
+//   answer frees nothing.
 // - Thread check, for an active lease: bb's thread lookup, with its own
 //   timeout. Only when it finishes does it revoke a lease whose thread is gone.
 //
@@ -85,8 +86,10 @@ export function createEnforcer(deps: EnforcerDeps) {
   const extending = new Map<string, Promise<boolean>>();
   /** The thread check in flight for each lease. */
   const threadChecks = new Map<string, Promise<void>>();
-  /** The sequence number of the latest inspect call that saw each lease's namespace. */
+  /** When the latest reply that saw each lease's namespace came back, on the hosts' call counter. */
   const lastSeen = new Map<string, number>();
+  /** Inspect fan-outs still running, by lease. */
+  const inspecting = new Map<string, number>();
 
   /** The store, only while the plugin is loaded. */
   function db(): Store {
@@ -188,30 +191,34 @@ export function createEnforcer(deps: EnforcerDeps) {
     const id = lease.id;
     const uid = lease.uid;
     let revokedHere = false;
-    const replies = await deps.hosts.all<InspectResult>("inspect", deps.target(lease, cfg, "inspect"), (reply) => {
-      if (deps.disposed() || !("result" in reply) || !reply.result.ok || reply.result.value.uid !== uid) return;
-      lastSeen.set(id, Math.max(lastSeen.get(id) ?? 0, reply.seq));
-      // Act on the first answer that shows an over-allocation, without waiting for the rest.
-      const fresh = db().find(id);
-      if (fresh?.state !== "active" || revokedHere) return;
-      const revoked = overAllocated(fresh, reply.result.value, cfg);
-      if (revoked !== null) {
-        revokedHere = true;
-        void teardown(revoked, cfg);
-        deps.changed();
-      }
-    });
+    inspecting.set(id, (inspecting.get(id) ?? 0) + 1);
+    const replies = await deps.hosts
+      .all<InspectResult>("inspect", deps.target(lease, cfg, "inspect"), (reply) => {
+        if (deps.disposed() || !("result" in reply) || !reply.result.ok || reply.result.value.uid !== uid) return;
+        lastSeen.set(id, Math.max(lastSeen.get(id) ?? 0, reply.done));
+        // Act on the first answer that shows an over-allocation, without waiting for the rest.
+        const fresh = db().find(id);
+        if (fresh?.state !== "active" || revokedHere) return;
+        const revoked = overAllocated(fresh, reply.result.value, cfg);
+        if (revoked !== null) {
+          revokedHere = true;
+          void teardown(revoked, cfg);
+          deps.changed();
+        }
+      })
+      .finally(() => inspecting.set(id, (inspecting.get(id) ?? 1) - 1));
 
     // Only well-formed answers count; a malformed UID is no answer.
     const answered = replies.filter(
-      (reply): reply is { hostId: string; seq: number; result: InspectResult } =>
+      (reply): reply is { hostId: string; seq: number; done: number; result: InspectResult } =>
         "result" in reply && (reply.result.ok ? UID.safeParse(reply.result.value.uid).success : reply.result.code === "not_found"),
     );
     const sees = answered.filter((reply) => reply.result.ok && reply.result.value.uid === uid);
-    // A report of "gone" counts only if its call started after the last call that saw the namespace.
+    // A report of "gone" counts only if its call started after the last sighting came back,
+    // and only when no other inspect of this lease is still out: its answer could still see it.
     const seenAt = lastSeen.get(id) ?? 0;
     const gone = answered.filter((reply) => (!reply.result.ok || reply.result.value.uid !== uid) && reply.seq > seenAt);
-    if (sees.length === 0 && gone.length > 0) {
+    if (sees.length === 0 && gone.length > 0 && (inspecting.get(id) ?? 0) === 0) {
       db().end(id, gone.some((reply) => reply.result.ok) ? "namespace_recreated" : "namespace_gone");
       lastSeen.delete(id);
       deps.changed();
@@ -227,10 +234,7 @@ export function createEnforcer(deps: EnforcerDeps) {
     db().noteSeen(id, sees[0]!.hostId, first !== null && Number.isFinite(first) ? first : null);
     db().sweepExpired(cfg.graceMs);
     const fresh = db().find(id)!;
-    if (fresh.state !== "active") {
-      db().flagIfStuck(id, deps.stuckMs);
-      return;
-    }
+    if (fresh.state !== "active") return;
     // Every host that sees the namespace must agree with the lease's expiry.
     const synced = !expiries.some((at) => at !== fresh.expires_at) || (await extend(fresh, cfg));
     if (synced && !revokedHere) db().clearFailures(id);
@@ -267,7 +271,11 @@ export function createEnforcer(deps: EnforcerDeps) {
       db().sweepExpired(cfg.graceMs);
       const lease = db().find(id);
       if (lease === undefined || !LIVE.includes(lease.state)) return Promise.resolve();
-      if (lease.state !== "active") parts.push(teardown(lease, cfg));
+      if (lease.state !== "active") {
+        // Time-based, so it holds whether or not inspect gets an answer.
+        db().flagIfStuck(id, deps.stuckMs);
+        parts.push(teardown(lease, cfg));
+      }
       parts.push(observed(observe(lease, cfg), `lease ${id}: observe`));
       if (lease.state === "active") parts.push(checkThread(lease, cfg));
     } catch (error) {

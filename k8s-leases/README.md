@@ -81,4 +81,6 @@ npx tsc -p .
 bb plugin build .
 ```
 
+The plugin's SQLite schema is version 1, in `lib/store.ts`. From the first install on, migrations are append-only: never edit or reorder a shipped statement; add a new one after it.
+
 The tests use a fake `k8s-guard` and a fake bb thread lookup (`test-support.ts`). The host entry tests run a fake `k8s-guard` and a fake `bb` on a PATH that holds nothing else.

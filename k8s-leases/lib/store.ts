@@ -12,6 +12,11 @@ import type { Config } from "./settings.ts";
 
 type Db = Database.Database;
 
+/**
+ * The schema. Version 1 is the first one installed, as one statement.
+ * From the first install on, migrations are append-only: never edit or
+ * reorder a shipped statement; add a new one after it.
+ */
 export const MIGRATIONS = [
   `CREATE TABLE leases (
     id TEXT PRIMARY KEY,
@@ -41,21 +46,21 @@ export const MIGRATIONS = [
     last_error TEXT,
     down_first_at INTEGER,
     stuck_flagged INTEGER NOT NULL DEFAULT 0
-  )`,
-  `CREATE UNIQUE INDEX leases_live_namespace ON leases(context, namespace) WHERE state IN ('active','revoking','releasing')`,
-  `CREATE INDEX leases_state ON leases(state)`,
-  `CREATE TABLE extensions (
+  );
+CREATE UNIQUE INDEX leases_live_namespace ON leases(context, namespace) WHERE state IN ('active','revoking','releasing');
+CREATE INDEX leases_state ON leases(state);
+CREATE TABLE extensions (
     lease_id TEXT NOT NULL,
     at INTEGER NOT NULL,
     minutes REAL NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('panel','renew')),
     expires_before INTEGER NOT NULL,
     expires_after INTEGER NOT NULL
-  )`,
-  `CREATE TABLE profiles (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL)`,
-  `CREATE TABLE approvals_used (approval TEXT PRIMARY KEY, lease_id TEXT NOT NULL, at INTEGER NOT NULL)`,
-  `CREATE TABLE heartbeats (host_id TEXT PRIMARY KEY, last_ok_at INTEGER, last_try_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT NOT NULL)`,
-  `CREATE TABLE flags (
+  );
+CREATE TABLE profiles (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL);
+CREATE TABLE approvals_used (approval TEXT PRIMARY KEY, lease_id TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE heartbeats (host_id TEXT PRIMARY KEY, last_ok_at INTEGER, last_try_at INTEGER NOT NULL, ok INTEGER NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE flags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     lease_id TEXT,
     at INTEGER NOT NULL,
