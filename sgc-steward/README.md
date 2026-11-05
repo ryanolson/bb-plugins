@@ -98,6 +98,18 @@ Done posts one comment from you on the issue: `Done (from the SGC page)`, and yo
 
 Two Done clicks at once act once: the plugin reads the issue again under its lock and refuses a todo that is no longer on the list. A Done is kept before it writes, with the steward's message and the steward thread it goes to, and its comment goes under its own id. When Linear does not take the change, the todo stays on the list, and pressing Done again finishes that same Done, with its own comment, note, and steward thread; a new note is not used. When the change landed but the reply was lost, or the plugin restarted, the plugin, or the next poll, reads the issue and finishes the Done. The steward hears once, after Linear holds the change. Its messages go out in the order you acted, but one that failed to send waits for your retry on the page, so it can arrive after a later one. A Done from the page can be undone from the same page, for an hour, until the plugin reloads, and only while it is the latest Done of its issue: a newer Done of the issue, from the page or the CLI, replaces it. Undo posts `Reopened (from the SGC page)`, puts the label or the state back, and sends the steward `[sgc-steward] Todo reopened <issue>: <title>`. Undo refuses an issue that is no longer in the team, or that changed after the Done, with another state or other labels, so a later change, such as a cancellation, stays. This holds when you press Undo again after a failed Undo, too: an Undo whose change Linear already holds finishes without writing again, and any other is given up, which leaves its `Reopened` comment on the issue.
 
+## Hosts
+
+The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, connected or disconnected, the threads running a turn, the threads open but idle, the turns waiting on bb's concurrency limit with the oldest wait, and the limit, with `override` or `automatic`. Both show the same view model, and `--json` prints it. The plugin only reads: it never changes a limit. Set one with `bb concurrency-limit host`.
+
+- Running threads are `starting` or `active`, as bb counts them against the limit. Idle threads have the status `idle`.
+- A waiting turn is a thread with a queued row that the `concurrency-limit` plugin holds. Its wait counts from when its oldest held row was queued. A row that first waited behind its own thread's turn counts from then, so the wait can read longer than the hold.
+- When another plugin's wait comes first on a row, bb names only that plugin, and the row does not count.
+- A thread on no host that bb lists, such as a new thread before its workspace, shows on a `(no host)` row.
+- The limits come from `bb concurrency-limit status --json`, which the plugin runs on the bb server with `$BB_CLI`, or `bb` on the PATH. bb gives limits out nowhere else. When that fails, the counts still show without limits, and `bb sgc hosts` exits 1.
+- The tab reads bb when the page opens, and every 30 seconds while the tab is open. Its count is the waiting turns, and its dot means the limits could not be read.
+- `bb sgc hosts --digest` prints only the flags for the steward: the global limit when it is reached, the hosts at their limit, and the hosts with waiting turns and the oldest wait.
+
 ## How it works
 
 A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
@@ -120,6 +132,7 @@ bb sgc answer-of <id> [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 bb sgc todos [--json] [--cached]
 bb sgc todo done <issue> [--note <text>] [--json]
+bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -131,6 +144,7 @@ bb sgc key --api-key-stdin
 - `answer` posts one comment: a header line that names each `--block`, then the file's text, quoted line by line. Number the answers to match: `Q1. A`. Name each block the text answers, as `questions` prints it; it answers each one whole. It refuses when a named block changed or closed, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
+- `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -173,8 +187,10 @@ bb plugin logs sgc-steward
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
+- `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
+- `lib/hosts-read.ts`: the reads of bb behind the Hosts view, and the bb runner that refuses any command but the limit status.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page with its Questions and Todos tabs, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.
