@@ -82,6 +82,8 @@ When you answer, the plugin sends the answer to the asking thread as a queued me
 
 When you answer a Linear block, the plugin also sends the answer to the bb thread named in the block's signature.
 
+`bb sgc answer-of <id>` reports how a bb question was answered from the plugin's own record, never from Linear, so a Linear comment that copies an answer changes nothing. Its `channel` says where the answer came from: `bb` is the plugin's answer RPC, which the page calls. A known limit: bb hands every RPC, from the page, the `bb` CLI, or an agent, to the plugin as the same caller, so an agent can answer a bb question with `bb plugin rpc call sgc-steward asks.answer`, and its answer also shows `channel` `bb`. An agent can also write the plugin's database, which belongs to the user every agent runs as. So `answer-of` proves which path stored the answer, not that you gave it. An answer stored before `channel` was kept shows `null`.
+
 A question can go stale: its issue closes, a later question replaces it, or events decide it. The steward thread, named in the `stewardThread` setting, withdraws a stale question with the `sgc_withdraw_question` agent tool, giving the question id and the reason. The plugin then sends the asking thread a queued message that starts with `[sgc-steward] Withdrawn <id>` and gives the reason, so the thread stops waiting. It skips the message when bb reports the asking thread archived, deleted, or missing. When the thread cannot be looked up, it keeps the message, to be sent or retried. When the question names an issue, the plugin also posts a record of the withdrawal there. That record also starts with `Answer to bb question`, so it closes no Linear question block. The page no longer shows a withdrawn question.
 
 A send or a record that fails is kept and listed on the page, with a retry. A send that looked failed may still have arrived, so a retry can deliver an answer twice. A send that a restart cut short is listed the same way. Each one also has an X that dismisses it: it leaves the page and is never sent or posted. Use it when a retry cannot succeed, for example when the thread is archived.
@@ -114,6 +116,7 @@ bb plugins cannot send a mobile push. The push-notifications plugin sends pushes
 bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--label <name>]... [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
+bb sgc answer-of <id> [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 bb sgc todos [--json] [--cached]
 bb sgc todo done <issue> [--note <text>] [--json]
@@ -124,6 +127,7 @@ bb sgc key --api-key-stdin
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. `--label` lists only the questions that have that label, in any case. Give it again for more: a question then needs any one of them, or, with `--match all`, every one; any is the default, as Linear's label filter starts. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`, so one filter covers both kinds. `--json` shows the labels of each issue and each bb question. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
+- `answer-of` prints a bb question as the plugin stored it: the asking thread, its issue, the question and options as asked, its status (`open`, `answered`, or `withdrawn`), and, once answered, the time in RFC 3339, the `channel`, the picked `option` as its letter and text or `null` for a typed answer, and the typed `text` or note. It reads nothing from Linear. It exits 0 for a known id and 1 for an unknown one.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text, quoted line by line. Number the answers to match: `Q1. A`. Name each block the text answers, as `questions` prints it; it answers each one whole. It refuses when a named block changed or closed, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
@@ -164,6 +168,7 @@ bb plugin logs sgc-steward
 - `lib/panel.ts`: the page's tabs, answer drafts, card order, badges, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/views.ts`: the stored rows mapped to the shapes the page and `bb sgc questions --json` show.
+- `lib/answer-of.ts`: `bb sgc answer-of`, how a bb question was answered, from the stored row only.
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.

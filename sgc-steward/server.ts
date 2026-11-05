@@ -50,6 +50,7 @@ import {
 } from "./lib/asks.ts";
 import { STORE_MIGRATIONS, createAskId, createAskStore, type Delivery, type RecordRow } from "./lib/ask-store.ts";
 import { askView, deliveryView, recordView } from "./lib/views.ts";
+import { answerOfCommand } from "./lib/answer-of.ts";
 import { filterPanel } from "./lib/panel.ts";
 import {
   rpcContract,
@@ -675,7 +676,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         } catch (error) {
           throw new experimental_PluginRpcRefusal({ code: "invalid", message: message(error) });
         }
-        const saved = asks.answer(id, answer, { message: delivery, label: id }, record);
+        // Every RPC caller, the page or an agent's `bb plugin rpc call`, reaches here as the same client, so "bb" names this path, not the person.
+        const saved = asks.answer(id, answer, "bb", { message: delivery, label: id }, record);
         if (saved !== "answered") {
           throw new experimental_PluginRpcRefusal({ code: saved === "not_found" ? "not_found" : "conflict", message: `${id} is no longer open.` });
         }
@@ -737,7 +739,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     bb.cli.register(
       defineCli({
         name: "sgc",
-        summary: "Ask the owner questions without waiting, list them, answer Linear questions, store the Linear key",
+        summary: "Ask the owner questions without waiting, list them, show how one was answered, answer Linear questions, store the Linear key",
         commands: {
           ...todos.commands,
           questions: cliCommand({
@@ -878,6 +880,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               return { exitCode: 0, stdout: input.options.json ? JSON.stringify({ id, withdrawn: true }) : done.report };
             },
           }),
+          "answer-of": answerOfCommand(asks),
           answer: cliCommand({
             summary: "Post a file as the unsigned answer to an issue's open questions",
             description:

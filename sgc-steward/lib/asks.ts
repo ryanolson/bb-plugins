@@ -46,6 +46,13 @@ export interface Ask {
   askedAt: number;
 }
 
+/**
+ * Where the owner's answer reached the store: "bb" is the plugin's answer
+ * RPC, which the page calls; "linear" is reserved for an answer taken from a
+ * Linear comment, which no path takes today.
+ */
+export type AnswerChannel = "bb" | "linear";
+
 export interface AskAnswer {
   /** The picked option's letter, or null for a typed answer. */
   option: string | null;
