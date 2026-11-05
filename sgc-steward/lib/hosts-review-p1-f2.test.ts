@@ -6,7 +6,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import type { HostsView } from "./hosts.ts";
 import { setup } from "../test-support.ts";
-import { HOSTS, IDLE, LIMITS_JSON, NOW, QUEUE, RUNNING, THREADS } from "../test-support-hosts.ts";
+import { HOSTS, IDLE, LIMITS_RPC, NOW, QUEUE, RUNNING, THREADS } from "../test-support-hosts.ts";
 
 type MountedHosts = { view: HostsView | null; error: string | null; load: () => void };
 type Effect = () => void | (() => void);
@@ -48,14 +48,11 @@ function mountHosts(call: (method: string, args: unknown) => Promise<HostsView>)
 test("hosts review F2: an earlier read cannot replace a newer completed refresh", async (t) => {
   let now = NOW;
   let waiting = false;
-  const pendingLimits: Array<(json: string) => void> = [];
-  const { harness } = await setup({
-    key: null,
-    now: () => now,
-    runBb: () => new Promise<string>((resolve) => { pendingLimits.push(resolve); }),
-  });
+  const pendingLimits: Array<(limits: unknown) => void> = [];
+  const { harness } = await setup({ key: null, now: () => now });
   t.after(() => harness.lifecycle.dispose());
   const sdk = harness.inspection.sdk;
+  sdk.stub("plugins.callRpc", () => new Promise<unknown>((resolve) => { pendingLimits.push(resolve); }));
   sdk.stub("hosts.list", async () => HOSTS.map((host) => ({ ...host })));
   sdk.stub("threads.listRunning", async () => RUNNING.map((thread) => ({ ...thread })));
   sdk.stub("threads.count", async () => structuredClone(IDLE));
@@ -72,7 +69,7 @@ test("hosts review F2: an earlier read cannot replace a newer completed refresh"
   t.after(hook.dispose);
   await nextTurn();
   assert.ok(pendingLimits.length > 0);
-  for (const resolve of pendingLimits.splice(0)) resolve(LIMITS_JSON);
+  for (const resolve of pendingLimits.splice(0)) resolve(structuredClone(LIMITS_RPC));
   await nextTurn();
   assert.equal(hook.view()?.checkedAt, NOW, "the control: a completed read updates the mounted hook");
   assert.equal(hook.view()?.hosts.find((host) => host.id === "host_wait")?.waiting, 0);
@@ -84,14 +81,14 @@ test("hosts review F2: an earlier read cannot replace a newer completed refresh"
   hook.mounted.load();
   await nextTurn();
   assert.equal(pendingLimits.length, 2);
-  pendingLimits[1]!(LIMITS_JSON);
+  pendingLimits[1]!(structuredClone(LIMITS_RPC));
   await nextTurn();
   const newer = hook.view();
   assert.equal(newer?.hosts.find((host) => host.id === "host_wait")?.waiting, 2);
   assert.equal(newer?.checkedAt, NOW + 1_000);
 
   now = NOW + 2_000;
-  pendingLimits[0]!(LIMITS_JSON);
+  pendingLimits[0]!(structuredClone(LIMITS_RPC));
   await nextTurn();
   assert.equal(hook.view(), newer, "a slower limit-status read must not restore the earlier counts with zero waiting turns");
 });

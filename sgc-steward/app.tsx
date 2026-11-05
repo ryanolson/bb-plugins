@@ -8,7 +8,7 @@
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
 // permission) and a bb toast otherwise. The badge is the lasting signal.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import {
@@ -722,13 +722,19 @@ function useHosts(active: boolean) {
   const rpc = useRpc<typeof rpcContract>();
   const [view, setView] = useState<HostsView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Loads overlap when the tab opens or Refresh is pressed; only the newest may land, so an older read never replaces newer counts.
+  const latest = useRef(0);
   const load = useCallback(() => {
+    const request = ++latest.current;
     rpc.call("hosts.list", null).then(
       (next) => {
+        if (request !== latest.current) return;
         setView(next);
         setError(null);
       },
-      (cause: unknown) => setError(errorText(cause)),
+      (cause: unknown) => {
+        if (request === latest.current) setError(errorText(cause));
+      },
     );
   }, [rpc]);
   useEffect(load, [load]);
