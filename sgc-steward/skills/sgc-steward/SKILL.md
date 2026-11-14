@@ -19,7 +19,7 @@ bb sgc ask --question "<question>" --option "<your recommendation>" --option "<a
 - The answer arrives in your thread as a message that starts with `[sgc-steward] Answer to <id>`. It quotes your question and the owner's answer word for word. Treat it as the owner's answer.
 - Put your recommendation first: option A is marked recommended. Pass `--recommend B` to mark another, or `--recommend none`.
 - Use `--question-file <file>` for a long question.
-- The question and its options may use Markdown: lists, tables, inline code, code blocks, bold, and links all render on the page. Raw HTML never runs. A table needs a delimiter row, such as `| --- | --- |`, right under its header row. Without it, the table shows as plain text.
+- The question and its options may use Markdown: lists, tables, inline code, code blocks, bold, and links all render on the page. Raw HTML never runs. A table needs a delimiter row, such as `| --- | --- |`, right under its header row. Without it, the table shows as plain text, and `bb sgc ask` prints a line that starts with `Warning:` (with `--json`, a `warnings` list). The question is still stored: withdraw it with `bb sgc withdraw <id>` and ask again with the fixed table.
 - Give the question a label with `--label <name>`, once per label, so the owner can sort and filter questions by it, for example by project. Asking the same open question again keeps its first labels.
 - Name an issue with `--issue` when the answer is a ruling that belongs in Linear. The plugin then posts a comment there that records the question and the answer.
 - Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`, from the thread that asked it.

@@ -5,6 +5,12 @@
 // posted to Linear, of an answer or of a withdrawal, starts with the record
 // header, so it closes no block.
 
+import type { Nodes } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { mathFromMarkdown } from "mdast-util-math";
+import { gfm } from "micromark-extension-gfm";
+import { math } from "micromark-extension-math";
 import { RECORD_HEADER } from "./questions.ts";
 
 export const ASK_LIMITS = {
@@ -84,6 +90,125 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
     throw new Error(`there is no option ${recommend} to recommend`);
   }
   return options;
+}
+
+// The question's Markdown is parsed as bb's page parses it: GFM (remark-gfm
+// uses these same packages) and math blocks (bb's remark-math, with single
+// dollars left as text). A table the page draws becomes a `table` node, so
+// only pipe rows the parser left as paragraph text can be a broken table.
+// An earlier line scanner drifted from GFM on escapes, fences, code spans
+// and HTML; the parser is the one source of truth.
+const PARSE_OPTIONS = {
+  extensions: [gfm(), math({ singleDollarTextMath: false })],
+  mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
+};
+
+/** A line written as a table row: it starts and ends with `|`. */
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+
+/** Offsets of each line's start, so a line can be matched to node positions. */
+function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (const match of text.matchAll(/\r\n?|\n/g)) starts.push(match.index + match[0].length);
+  return starts;
+}
+
+/**
+ * The 1-based lines that start a table bb's Markdown will not draw: two or
+ * more lines in a row, inside one paragraph, that start and end with `|`.
+ * The page shows them as plain text, usually because no delimiter row
+ * (`| --- | --- |`, one cell per column) sits right under the header row.
+ * A line counts only when its first and last pipes sit in visible text: not
+ * in inline code or math, not in a link's title, and not between an inline
+ * `<pre>` or `<code>` tag and its end, where bb's HTML renderer keeps the
+ * rows literal. Code blocks, HTML blocks, math blocks and drawn tables are
+ * never paragraphs. Only the explicit `| a | b |` shape counts, so text that
+ * merely holds pipes raises nothing.
+ */
+export function brokenTables(text: string): number[] {
+  const tree = fromMarkdown(text, PARSE_OPTIONS);
+  const lines = text.split(/\r\n?|\n/);
+  const starts = lineStarts(text);
+  const broken: number[] = [];
+
+  type Range = [number, number];
+  const within = (ranges: Range[], offset: number) => ranges.some(([from, to]) => offset >= from && offset < to);
+
+  /** Offset ranges of the visible text under a paragraph, and its inline HTML in order. */
+  function collect(node: Nodes, texts: Range[], html: Array<{ value: string; from: number; to: number }>): void {
+    if (node.position) {
+      const from = node.position.start.offset ?? 0;
+      const to = node.position.end.offset ?? 0;
+      if (node.type === "text") texts.push([from, to]);
+      if (node.type === "html") html.push({ value: node.value, from, to });
+    }
+    if ("children" in node) for (const child of node.children) collect(child, texts, html);
+  }
+
+  /** Spans from an inline `<pre>` or `<code>` to its end tag, or to the paragraph's end. */
+  function literalSpans(html: Array<{ value: string; from: number; to: number }>, end: number): Range[] {
+    const spans: Range[] = [];
+    let open: { tag: string; from: number } | null = null;
+    for (const node of html) {
+      if (open === null) {
+        const tag = /^<(pre|code)\b/i.exec(node.value)?.[1]?.toLowerCase();
+        if (tag !== undefined) open = { tag, from: node.from };
+      } else if (new RegExp(`^</${open.tag}\\s*>`, "i").test(node.value)) {
+        spans.push([open.from, node.to]);
+        open = null;
+      }
+    }
+    if (open !== null) spans.push([open.from, end]);
+    return spans;
+  }
+
+  function isTextRow(line: number, texts: Range[], literal: Range[]): boolean {
+    const source = lines[line - 1] ?? "";
+    if (!TABLE_ROW.test(source)) return false;
+    const pipes = [starts[line - 1]! + source.indexOf("|"), starts[line - 1]! + source.lastIndexOf("|")];
+    return pipes.every((offset) => within(texts, offset) && !within(literal, offset));
+  }
+
+  function walk(node: Nodes): void {
+    if (node.type === "paragraph" && node.position) {
+      const texts: Range[] = [];
+      const html: Array<{ value: string; from: number; to: number }> = [];
+      collect(node, texts, html);
+      const literal = literalSpans(html, node.position.end.offset ?? text.length);
+      let run = 0;
+      for (let line = node.position.start.line; line <= node.position.end.line + 1; line += 1) {
+        if (line <= node.position.end.line && isTextRow(line, texts, literal)) {
+          run += 1;
+          continue;
+        }
+        if (run >= 2) broken.push(line - run);
+        run = 0;
+      }
+      return;
+    }
+    if ("children" in node) for (const child of node.children) walk(child);
+  }
+
+  walk(tree);
+  return broken;
+}
+
+/**
+ * One line for `bb sgc ask` that names the question and each option holding a
+ * table the page will show as plain text, or null when there is none. The
+ * question is stored as written either way: the check only warns.
+ */
+export function tableWarning(question: string, options: readonly string[]): string | null {
+  const where = (name: string, lines: number[]) => `${name} (line${lines.length === 1 ? "" : "s"} ${lines.join(", ")})`;
+  const places: string[] = [];
+  const inQuestion = brokenTables(question);
+  if (inQuestion.length > 0) places.push(where("the question", inQuestion));
+  options.forEach((text, index) => {
+    const lines = brokenTables(text);
+    if (lines.length > 0) places.push(where(`option ${String.fromCharCode(65 + index)}`, lines));
+  });
+  if (places.length === 0) return null;
+  return `Warning: a table in ${places.join(" and ")} has no delimiter row, such as | --- | --- |, right under its header row, with one cell per column, so the page will show it as plain text. The question is stored as written; to fix it, withdraw it and ask again.`;
 }
 
 /**
