@@ -45,6 +45,7 @@ import {
   checkQuestion,
   checkReason,
   isThreadId,
+  tableWarning,
   withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
@@ -833,13 +834,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               } catch {
                 throw new PluginCliError(`No bb thread ${threadId}.`, { code: "unknown_thread", hint: "The asking thread gets the answer, so it must exist." });
               }
+              // A table the page cannot draw gets a warning, not a refusal: the
+              // question still reads, and the asker can withdraw and ask again.
+              const warning = tableWarning(question, options.map((option) => option.text));
               const reply = (id: string, existing: boolean) => {
                 const where = threadId === ctx.threadId ? "this thread" : `thread ${threadId}`;
+                const asked = `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`;
                 return {
                   exitCode: 0,
                   stdout: input.options.json
-                    ? JSON.stringify({ id, existing })
-                    : `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`,
+                    ? JSON.stringify(warning === null ? { id, existing } : { id, existing, warnings: [warning] })
+                    : warning === null
+                      ? asked
+                      : `${asked}\n${warning}`,
                 };
               };
               // Read everything first: no other ask may run between the checks and the insert.

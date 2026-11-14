@@ -52,6 +52,28 @@ test("an agent asks without waiting: the command stores the question and returns
   assert.deepEqual((await list(harness)).asks[2]!.options.map((option) => option.recommended), [false]);
 });
 
+test("ask warns about a table with no delimiter row, and stores the question as written", async () => {
+  const { harness } = await setup();
+  const question = "Cost:\n| Load | Default |\n| Flood | 441k |";
+  const plain = await ask(harness, ["--question", question, "--option", "Fine."]);
+  assert.equal(plain.exitCode, 0, plain.stderr);
+  const lines = plain.stdout.split("\n");
+  assert.equal(lines.length, 2, plain.stdout);
+  assert.match(lines[0]!, /^Asked bbq_/);
+  assert.match(lines[1]!, /^Warning: .*the question \(line 2\).*\| --- \|/);
+  assert.equal((await list(harness)).asks[0]!.question, question);
+
+  const json = await ask(harness, ["--question", "Next?", "--option", "| a | b |\n| 1 | 2 |", "--json"]);
+  const parsed = JSON.parse(json.stdout) as { id: string; existing: boolean; warnings?: string[] };
+  assert.equal(parsed.existing, false);
+  assert.equal(parsed.warnings?.length, 1);
+  assert.match(parsed.warnings![0]!, /option A \(line 1\)/);
+
+  // A clean question keeps the output it always had: no warning line, no warnings field.
+  const clean = await ask(harness, ["--question", "Clean?\n\n| a | b |\n| --- | --- |\n| 1 | 2 |", "--json"]);
+  assert.deepEqual(Object.keys(JSON.parse(clean.stdout) as object).sort(), ["existing", "id"]);
+});
+
 test("asking the same open question again returns its id, and a thread can have only so many open", async () => {
   const { harness } = await setup();
   const first = await askId(harness, ["--question", "Same?", "--option", "Yes."]);

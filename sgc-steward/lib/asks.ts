@@ -86,6 +86,79 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
   return options;
 }
 
+// A table row as agents write it: up to three spaces of indent (four make an
+// indented code line), then a line that starts and ends with `|`.
+const TABLE_ROW = /^ {0,3}\|.*\|\s*$/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const DELIMITER_CELL = /^\s*:?-+:?\s*$/;
+
+/** The cells of a table row, split on pipes that are not escaped, as GFM splits them. */
+function tableCells(row: string): string[] {
+  const inner = row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+  return inner.split(/(?<!\\)\|/);
+}
+
+/**
+ * The 1-based lines that start a table bb's Markdown will not draw: two or
+ * more table rows in a row, outside a code fence, with no delimiter row
+ * (`| --- | --- |`, as many cells as the header) right under the first. The
+ * page then shows the rows as plain text. Only the explicit `| a | b |`
+ * shape counts, so text that merely holds pipes raises nothing.
+ */
+export function brokenTables(text: string): number[] {
+  const lines = text.split(/\r\n?|\n/);
+  const broken: number[] = [];
+  let fence: { char: string; length: number } | null = null;
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
+    const marker = FENCE.exec(line)?.[1];
+    if (fence !== null) {
+      // A fence closes on a bare run of its own character, at least as long.
+      if (marker !== undefined && marker[0] === fence.char && marker.length >= fence.length && line.trim() === marker) fence = null;
+      index += 1;
+      continue;
+    }
+    if (marker !== undefined) {
+      fence = { char: marker[0]!, length: marker.length };
+      index += 1;
+      continue;
+    }
+    if (!TABLE_ROW.test(line)) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length && TABLE_ROW.test(lines[end]!)) end += 1;
+    if (end - index >= 2) {
+      const header = tableCells(line);
+      const delimiter = tableCells(lines[index + 1]!);
+      const valid = delimiter.length === header.length && delimiter.every((cell) => DELIMITER_CELL.test(cell));
+      if (!valid) broken.push(index + 1);
+    }
+    index = end;
+  }
+  return broken;
+}
+
+/**
+ * One line for `bb sgc ask` that names the question and each option holding a
+ * table the page will show as plain text, or null when there is none. The
+ * question is stored as written either way: the check only warns.
+ */
+export function tableWarning(question: string, options: readonly string[]): string | null {
+  const where = (name: string, lines: number[]) => `${name} (line${lines.length === 1 ? "" : "s"} ${lines.join(", ")})`;
+  const places: string[] = [];
+  const inQuestion = brokenTables(question);
+  if (inQuestion.length > 0) places.push(where("the question", inQuestion));
+  options.forEach((text, index) => {
+    const lines = brokenTables(text);
+    if (lines.length > 0) places.push(where(`option ${String.fromCharCode(65 + index)}`, lines));
+  });
+  if (places.length === 0) return null;
+  return `Warning: a table in ${places.join(" and ")} has no delimiter row, such as | --- | --- |, right under its header row, with one cell per column, so the page will show it as plain text. The question is stored as written; to fix it, withdraw it and ask again.`;
+}
+
 /**
  * The labels for a question: each trimmed, and kept once, in its first
  * spelling, since labels match in any case. A label prints on its own in the
