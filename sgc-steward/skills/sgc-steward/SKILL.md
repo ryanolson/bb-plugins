@@ -19,6 +19,7 @@ bb sgc ask --question "<question>" --option "<your recommendation>" --option "<a
 - The answer arrives in your thread as a message that starts with `[sgc-steward] Answer to <id>`. It quotes your question and the owner's answer word for word. Treat it as the owner's answer.
 - Put your recommendation first: option A is marked recommended. Pass `--recommend B` to mark another, or `--recommend none`.
 - Use `--question-file <file>` for a long question.
+- The question and its options may use Markdown: lists, tables, inline code, code blocks, bold, and links all render on the page. Raw HTML never runs. A table needs a delimiter row, such as `| --- | --- |`, right under its header row. Without it, the table shows as plain text.
 - Give the question a label with `--label <name>`, once per label, so the owner can sort and filter questions by it, for example by project. Asking the same open question again keeps its first labels.
 - Name an issue with `--issue` when the answer is a ruling that belongs in Linear. The plugin then posts a comment there that records the question and the answer.
 - Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`, from the thread that asked it.
@@ -67,6 +68,7 @@ Q2. <question with no options; the owner types the answer>
 - List options under their question as `- A:`, `- B:`, and so on, in order.
 - Mark at most one option per question `(recommended)`.
 - Put every option on one line. Indent a line that continues an option.
+- Markdown renders here too, but the format drops blank lines and indentation inside a question. A table (with its `| --- |` delimiter row), a flat list, and a code block still render. Put nested lists or indented code in a `bb sgc ask` question instead.
 - Put context before `Q1.`, not after the options.
 - Ask one question per block. The owner answers each question on its own card, and a block with several stays open until each has an answer.
 - Put your bb thread id in the signature. The answer is then also sent to your thread, as a message that starts with `[sgc-steward] Answer to your questions on <issue>`. A block with several questions gets one such message per answer, each with only the questions it answers.
