@@ -31,6 +31,7 @@
     "server.hosts.test.ts",
     "test-support-hosts.ts",
     "test-support.ts",
+    "test-support-tsx.ts",
     "app.tsx",
     "components",
     "lib"

@@ -44,6 +44,16 @@ Q3. Anything else before the next run?
 
 The page shows a comment that breaks these rules as written, with the reason, and takes a typed answer for it.
 
+## Markdown in questions
+
+The page shows a question's text, its context, and each option as Markdown, with bb's own renderer, the one chat messages use. Headings, bold, links, lists, tables, inline code, and code blocks all render. This holds for bb questions and for Linear blocks.
+
+Agents write these questions, so the page never runs HTML from them. bb's renderer passes raw HTML through a sanitizer that drops scripts, event handlers, `javascript:` links, frames, and styles. A few harmless tags still show, such as `<details>` and an image from an `https` address. The plugin has no HTML path of its own.
+
+- A table needs a header row, then a delimiter row such as `| --- | --- |`, then its rows. Without the delimiter row, the lines show as plain text, `|` characters and all. A blank line before the table reads better, but a table also renders right under a line of text.
+- A bb question keeps every line as written. Use `--question-file` for a long one, so the shell cannot change its lines or its backticks.
+- A Linear block drops blank lines and indentation inside a question. A table, a flat list, and a code block still render, but nested lists and code lose their indentation, and a code block loses its blank lines. Put text with that kind of structure in a bb question.
+
 ## When a question is open
 
 - A signed comment starts with `[agent:`. Any other comment from a user is your answer. Comments from integrations are neither.
@@ -171,7 +181,7 @@ bb plugin build .
 bb plugin logs sgc-steward
 ```
 
-`npm test` runs the TypeScript files directly with `node --test`. Tests use a fake Linear and bb's fake plugin host, so they need no key and no server.
+`npm test` runs the TypeScript files directly with `node --test`. Tests use a fake Linear and bb's fake plugin host, so they need no key and no server. Node cannot read JSX, so a test that renders a page component first imports `test-support-tsx.ts`, which transpiles `.tsx` files with TypeScript and stands in for bb's `Markdown`.
 
 ## Layout
 
@@ -193,4 +203,6 @@ bb plugin logs sgc-steward
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
+- `components/answer-fields.tsx`: a question card's options, rendered as Markdown, and its answer box.
+- `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

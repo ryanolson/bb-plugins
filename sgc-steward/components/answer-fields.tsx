@@ -1,6 +1,11 @@
 // The answer controls a question card shows: its options as radio choices,
 // then a box for a typed answer or a note. Linear and bb question cards share
 // them.
+//
+// Agents write the options, so each goes through bb's Markdown renderer, like
+// the question text: tables, lists and code render, and bb's sanitizer drops
+// any raw HTML that could run. Never render option text as HTML here.
+import { Markdown } from "@get-bb/plugin-sdk/app";
 import type { AskDraft } from "@/lib/panel";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +40,7 @@ export function AnswerFields({
             >
               <input type="radio" name={name} className="mt-0.5" checked={draft.option === option.letter} onChange={() => onChange({ ...draft, option: option.letter })} />
               <span className="font-mono">{option.letter}</span>
-              <span className="min-w-0 flex-1 whitespace-pre-wrap">{option.text}</span>
+              <Markdown content={option.text} className="min-w-0 flex-1" />
               {option.recommended ? <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span> : null}
             </label>
           ))}
