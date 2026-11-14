@@ -118,10 +118,12 @@ function lineStarts(text: string): number[] {
  * more lines in a row, inside one paragraph, that start and end with `|`.
  * The page shows them as plain text, usually because no delimiter row
  * (`| --- | --- |`, one cell per column) sits right under the header row.
- * A pipe that falls inside inline code or inline HTML does not count, and
- * code blocks, HTML blocks, math blocks and drawn tables are never
- * paragraphs. Only the explicit `| a | b |` shape counts, so text that merely
- * holds pipes raises nothing.
+ * A line counts only when its first and last pipes sit in visible text: not
+ * in inline code or math, not in a link's title, and not between an inline
+ * `<pre>` or `<code>` tag and its end, where bb's HTML renderer keeps the
+ * rows literal. Code blocks, HTML blocks, math blocks and drawn tables are
+ * never paragraphs. Only the explicit `| a | b |` shape counts, so text that
+ * merely holds pipes raises nothing.
  */
 export function brokenTables(text: string): number[] {
   const tree = fromMarkdown(text, PARSE_OPTIONS);
@@ -129,31 +131,53 @@ export function brokenTables(text: string): number[] {
   const starts = lineStarts(text);
   const broken: number[] = [];
 
-  /** Offset ranges of inline code and inline HTML under a paragraph. */
-  function literalRanges(node: Nodes, into: Array<[number, number]>): void {
-    if ((node.type === "inlineCode" || node.type === "html" || node.type === "inlineMath") && node.position) {
-      into.push([node.position.start.offset ?? 0, node.position.end.offset ?? 0]);
-      return;
+  type Range = [number, number];
+  const within = (ranges: Range[], offset: number) => ranges.some(([from, to]) => offset >= from && offset < to);
+
+  /** Offset ranges of the visible text under a paragraph, and its inline HTML in order. */
+  function collect(node: Nodes, texts: Range[], html: Array<{ value: string; from: number; to: number }>): void {
+    if (node.position) {
+      const from = node.position.start.offset ?? 0;
+      const to = node.position.end.offset ?? 0;
+      if (node.type === "text") texts.push([from, to]);
+      if (node.type === "html") html.push({ value: node.value, from, to });
     }
-    if ("children" in node) for (const child of node.children) literalRanges(child, into);
+    if ("children" in node) for (const child of node.children) collect(child, texts, html);
   }
 
-  function isTextRow(line: number, literals: Array<[number, number]>): boolean {
+  /** Spans from an inline `<pre>` or `<code>` to its end tag, or to the paragraph's end. */
+  function literalSpans(html: Array<{ value: string; from: number; to: number }>, end: number): Range[] {
+    const spans: Range[] = [];
+    let open: { tag: string; from: number } | null = null;
+    for (const node of html) {
+      if (open === null) {
+        const tag = /^<(pre|code)\b/i.exec(node.value)?.[1]?.toLowerCase();
+        if (tag !== undefined) open = { tag, from: node.from };
+      } else if (new RegExp(`^</${open.tag}\\s*>`, "i").test(node.value)) {
+        spans.push([open.from, node.to]);
+        open = null;
+      }
+    }
+    if (open !== null) spans.push([open.from, end]);
+    return spans;
+  }
+
+  function isTextRow(line: number, texts: Range[], literal: Range[]): boolean {
     const source = lines[line - 1] ?? "";
     if (!TABLE_ROW.test(source)) return false;
-    const first = starts[line - 1]! + source.indexOf("|");
-    const last = starts[line - 1]! + source.lastIndexOf("|");
-    const literal = (offset: number) => literals.some(([from, to]) => offset >= from && offset < to);
-    return !literal(first) && !literal(last);
+    const pipes = [starts[line - 1]! + source.indexOf("|"), starts[line - 1]! + source.lastIndexOf("|")];
+    return pipes.every((offset) => within(texts, offset) && !within(literal, offset));
   }
 
   function walk(node: Nodes): void {
     if (node.type === "paragraph" && node.position) {
-      const literals: Array<[number, number]> = [];
-      literalRanges(node, literals);
+      const texts: Range[] = [];
+      const html: Array<{ value: string; from: number; to: number }> = [];
+      collect(node, texts, html);
+      const literal = literalSpans(html, node.position.end.offset ?? text.length);
       let run = 0;
       for (let line = node.position.start.line; line <= node.position.end.line + 1; line += 1) {
-        if (line <= node.position.end.line && isTextRow(line, literals)) {
+        if (line <= node.position.end.line && isTextRow(line, texts, literal)) {
           run += 1;
           continue;
         }
