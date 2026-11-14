@@ -5,6 +5,12 @@
 // posted to Linear, of an answer or of a withdrawal, starts with the record
 // header, so it closes no block.
 
+import type { Nodes } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { mathFromMarkdown } from "mdast-util-math";
+import { gfm } from "micromark-extension-gfm";
+import { math } from "micromark-extension-math";
 import { RECORD_HEADER } from "./questions.ts";
 
 export const ASK_LIMITS = {
@@ -86,58 +92,80 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
   return options;
 }
 
-// A table row as agents write it: up to three spaces of indent (four make an
-// indented code line), then a line that starts and ends with `|`.
-const TABLE_ROW = /^ {0,3}\|.*\|\s*$/;
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
-const DELIMITER_CELL = /^\s*:?-+:?\s*$/;
+// The question's Markdown is parsed as bb's page parses it: GFM (remark-gfm
+// uses these same packages) and math blocks (bb's remark-math, with single
+// dollars left as text). A table the page draws becomes a `table` node, so
+// only pipe rows the parser left as paragraph text can be a broken table.
+// An earlier line scanner drifted from GFM on escapes, fences, code spans
+// and HTML; the parser is the one source of truth.
+const PARSE_OPTIONS = {
+  extensions: [gfm(), math({ singleDollarTextMath: false })],
+  mdastExtensions: [gfmFromMarkdown(), mathFromMarkdown()],
+};
 
-/** The cells of a table row, split on pipes that are not escaped, as GFM splits them. */
-function tableCells(row: string): string[] {
-  const inner = row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
-  return inner.split(/(?<!\\)\|/);
+/** A line written as a table row: it starts and ends with `|`. */
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+
+/** Offsets of each line's start, so a line can be matched to node positions. */
+function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (const match of text.matchAll(/\r\n?|\n/g)) starts.push(match.index + match[0].length);
+  return starts;
 }
 
 /**
  * The 1-based lines that start a table bb's Markdown will not draw: two or
- * more table rows in a row, outside a code fence, with no delimiter row
- * (`| --- | --- |`, as many cells as the header) right under the first. The
- * page then shows the rows as plain text. Only the explicit `| a | b |`
- * shape counts, so text that merely holds pipes raises nothing.
+ * more lines in a row, inside one paragraph, that start and end with `|`.
+ * The page shows them as plain text, usually because no delimiter row
+ * (`| --- | --- |`, one cell per column) sits right under the header row.
+ * A pipe that falls inside inline code or inline HTML does not count, and
+ * code blocks, HTML blocks, math blocks and drawn tables are never
+ * paragraphs. Only the explicit `| a | b |` shape counts, so text that merely
+ * holds pipes raises nothing.
  */
 export function brokenTables(text: string): number[] {
+  const tree = fromMarkdown(text, PARSE_OPTIONS);
   const lines = text.split(/\r\n?|\n/);
+  const starts = lineStarts(text);
   const broken: number[] = [];
-  let fence: { char: string; length: number } | null = null;
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index]!;
-    const marker = FENCE.exec(line)?.[1];
-    if (fence !== null) {
-      // A fence closes on a bare run of its own character, at least as long.
-      if (marker !== undefined && marker[0] === fence.char && marker.length >= fence.length && line.trim() === marker) fence = null;
-      index += 1;
-      continue;
+
+  /** Offset ranges of inline code and inline HTML under a paragraph. */
+  function literalRanges(node: Nodes, into: Array<[number, number]>): void {
+    if ((node.type === "inlineCode" || node.type === "html" || node.type === "inlineMath") && node.position) {
+      into.push([node.position.start.offset ?? 0, node.position.end.offset ?? 0]);
+      return;
     }
-    if (marker !== undefined) {
-      fence = { char: marker[0]!, length: marker.length };
-      index += 1;
-      continue;
-    }
-    if (!TABLE_ROW.test(line)) {
-      index += 1;
-      continue;
-    }
-    let end = index + 1;
-    while (end < lines.length && TABLE_ROW.test(lines[end]!)) end += 1;
-    if (end - index >= 2) {
-      const header = tableCells(line);
-      const delimiter = tableCells(lines[index + 1]!);
-      const valid = delimiter.length === header.length && delimiter.every((cell) => DELIMITER_CELL.test(cell));
-      if (!valid) broken.push(index + 1);
-    }
-    index = end;
+    if ("children" in node) for (const child of node.children) literalRanges(child, into);
   }
+
+  function isTextRow(line: number, literals: Array<[number, number]>): boolean {
+    const source = lines[line - 1] ?? "";
+    if (!TABLE_ROW.test(source)) return false;
+    const first = starts[line - 1]! + source.indexOf("|");
+    const last = starts[line - 1]! + source.lastIndexOf("|");
+    const literal = (offset: number) => literals.some(([from, to]) => offset >= from && offset < to);
+    return !literal(first) && !literal(last);
+  }
+
+  function walk(node: Nodes): void {
+    if (node.type === "paragraph" && node.position) {
+      const literals: Array<[number, number]> = [];
+      literalRanges(node, literals);
+      let run = 0;
+      for (let line = node.position.start.line; line <= node.position.end.line + 1; line += 1) {
+        if (line <= node.position.end.line && isTextRow(line, literals)) {
+          run += 1;
+          continue;
+        }
+        if (run >= 2) broken.push(line - run);
+        run = 0;
+      }
+      return;
+    }
+    if ("children" in node) for (const child of node.children) walk(child);
+  }
+
+  walk(tree);
   return broken;
 }
 

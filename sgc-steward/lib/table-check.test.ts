@@ -66,3 +66,13 @@ test("the warning names the question and each option with a broken table, in one
   assert.match(warning, /\| --- \|/);
   assert.match(warning, /stored as written/);
 });
+
+test("pipes inside a math block are not a table, as bb's renderer reads them", () => {
+  assert.deepEqual(brokenTables("$$\n| a | b |\n| 1 | 2 |\n$$"), []);
+  // Single dollars stay text in bb, so rows after one still count.
+  assert.deepEqual(brokenTables("Costs $5\n\n| a | b |\n| 1 | 2 |"), [3]);
+});
+
+test("a broken table inside a paragraph is found below its lead-in text", () => {
+  assert.deepEqual(brokenTables("Lead-in text\nmore text\n| a | b |\n| 1 | 2 |\ntrailing text"), [3]);
+});
