@@ -67,9 +67,21 @@ const expiredViewSchema = z.object({
   askedAt: z.number(),
   expiredAt: z.number(),
 });
+/** An open issue with the paused label. */
+const pausedViewSchema = z.object({
+  /** The issue's UUID. */
+  id: z.string(),
+  identifier: z.string(),
+  title: z.string(),
+  url: z.string(),
+  /** The issue's state name, such as Backlog. */
+  state: z.string().nullable(),
+  /** ISO time of its last change. */
+  updatedAt: z.string(),
+});
 const deliveryViewSchema = z.object({
   id: z.string(),
-  source: z.enum(["ask", "linear", "withdrawal", "expiry", "todo"]),
+  source: z.enum(["ask", "linear", "withdrawal", "expiry", "resume", "todo"]),
   ref: z.string(),
   threadId: z.string(),
   label: z.string(),
@@ -106,6 +118,10 @@ const panelSchema = snapshotSchema.extend({
   todos: z.array(todoViewSchema),
   /** Why the last read of the todos failed; the todos are then from the read before. */
   todoError: z.string().nullable(),
+  /** Open issues with the paused label, newest change first. */
+  paused: z.array(pausedViewSchema),
+  /** Why the last read of the paused issues failed; the list is then from the read before. */
+  pausedError: z.string().nullable(),
 });
 export type Panel = z.infer<typeof panelSchema>;
 export type AskView = z.infer<typeof askViewSchema>;
@@ -113,6 +129,7 @@ export type ExpiredView = z.infer<typeof expiredViewSchema>;
 export type DeliveryView = z.infer<typeof deliveryViewSchema>;
 export type RecordView = z.infer<typeof recordViewSchema>;
 export type TodoView = z.infer<typeof todoViewSchema>;
+export type PausedView = z.infer<typeof pausedViewSchema>;
 
 const answerInputSchema = z.object({
   issueId: z.string().min(1),
@@ -232,6 +249,17 @@ export const rpcContract = defineRpcContract({
   "todos.reopen": {
     input: z.object({ undo: z.string().min(1) }),
     output: z.object({ identifier: z.string(), steward: z.enum(["sent", "failed", "skipped"]) }),
+  },
+  /** Resume a paused issue: comment as the owner, remove the paused label, move it to Todo, and tell the steward. */
+  "paused.resume": {
+    input: z.object({ issue: z.string().min(1), note: z.string().max(TODO_NOTE_CHARS) }),
+    output: z.object({
+      identifier: z.string(),
+      commentId: z.string(),
+      steward: z.enum(["sent", "failed", "skipped"]),
+      /** This finished an earlier Resume of the issue that had not finished, with that Resume's own comment and note. */
+      resumed: z.boolean(),
+    }),
   },
   /** Per host: running and idle threads, turns waiting on the limit, and the limit. Reads bb only; never changes a limit. */
   "hosts.list": { input: z.null(), output: hostsViewSchema },

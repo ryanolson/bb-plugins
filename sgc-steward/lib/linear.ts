@@ -13,6 +13,8 @@ export const DECISION_LABEL = "needs-decision";
 export const TODO_LABEL = "waiting:ryan-action";
 /** An issue for a person, not an agent; the owner's own when assigned to the owner. */
 export const HUMAN_LABEL = "human";
+/** The label a paused issue carries: work stopped for want of an answer, or paused by the owner. */
+export const PAUSED_LABEL = "paused";
 
 export interface LinearIssue {
   /** UUID. */
@@ -27,6 +29,19 @@ export interface LinearIssue {
   state: { type: string } | null;
   /** Each label's own name, and the name of the label group it is in, or null. */
   labels: Array<{ id: string; name: string; group: string | null }>;
+}
+
+/** An open issue with the paused label, as the Paused tab shows it and Resume changes it. */
+export interface PausedIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  /** ISO time of the last change. */
+  updatedAt: string;
+  teamKey: string;
+  state: { id: string; name: string; type: string } | null;
+  labels: Array<{ id: string; name: string }>;
 }
 
 /** An issue that may be on the owner's todo list, with what the list shows and Done needs. */
@@ -169,6 +184,33 @@ export const TODO_QUERY = `query SgcTodoIssue($id: String!) {
   issue(id: $id) { ${TODO_FIELDS} }
 }`;
 
+const PAUSED_FIELDS = `id identifier title url updatedAt team { key } state { id name type } labels(first: 50) { nodes { id name } }`;
+
+export const PAUSED_QUERY = `query SgcPausedIssues($teamKey: String!, $label: String!, $after: String) {
+  issues(
+    first: 50
+    after: $after
+    filter: {
+      team: { key: { eq: $teamKey } }
+      labels: { some: { name: { eq: $label } } }
+      state: { type: { nin: ["completed", "canceled"] } }
+    }
+  ) {
+    nodes { ${PAUSED_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+export const PAUSED_ISSUE_QUERY = `query SgcPausedIssue($id: String!) {
+  issue(id: $id) { ${PAUSED_FIELDS} }
+}`;
+
+export const TODO_STATES_QUERY = `query SgcTodoStates($teamKey: String!) {
+  workflowStates(first: 50, filter: { team: { key: { eq: $teamKey } }, type: { eq: "unstarted" } }) {
+    nodes { id name position }
+  }
+}`;
+
 export const DONE_STATES_QUERY = `query SgcDoneStates($teamKey: String!) {
   workflowStates(first: 50, filter: { team: { key: { eq: $teamKey } }, type: { eq: "completed" } }) {
     nodes { id name position }
@@ -197,6 +239,17 @@ interface IssueNode {
   team: { key: string } | null;
   state: { type: string } | null;
   labels: { nodes: Array<{ id: string; name: string; parent?: { name: string } | null }> };
+}
+
+interface PausedNode {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  updatedAt: string;
+  team: { key: string } | null;
+  state: { id: string; name: string; type: string } | null;
+  labels: { nodes: Array<{ id: string; name: string }> };
 }
 
 interface TodoNode {
@@ -251,6 +304,12 @@ export interface LinearClient {
   listTodoIssues(teamKey: string, signal?: AbortSignal): Promise<TodoIssue[]>;
   /** One issue as a todo, by UUID or identifier; null when Linear has no such issue. */
   getTodoIssue(id: string, signal?: AbortSignal): Promise<TodoIssue | null>;
+  /** Open issues of one team with the paused label, newest change first. */
+  listPausedIssues(teamKey: string, signal?: AbortSignal): Promise<PausedIssue[]>;
+  /** One issue as a paused issue, by UUID or identifier; null when Linear has no such issue. */
+  getPausedIssue(id: string, signal?: AbortSignal): Promise<PausedIssue | null>;
+  /** The team's Todo state: its unstarted state named Todo, else its first unstarted state. Null when it has none. */
+  todoStateId(teamKey: string, signal?: AbortSignal): Promise<string | null>;
   /** The team's Done state: its completed state named Done, else its first completed state. Null when it has none. */
   doneStateId(teamKey: string, signal?: AbortSignal): Promise<string | null>;
   setState(args: { issueId: string; stateId: string }, signal?: AbortSignal): Promise<void>;
@@ -265,6 +324,19 @@ export interface LinearClientOptions {
   maxCommentPages?: number;
   /** How long one request may take, reading the reply included. */
   requestTimeoutMs?: number;
+}
+
+function toPaused(node: PausedNode): PausedIssue {
+  return {
+    id: node.id,
+    identifier: node.identifier,
+    title: node.title,
+    url: node.url,
+    updatedAt: node.updatedAt,
+    teamKey: node.team?.key ?? "",
+    state: node.state === null ? null : { id: node.state.id, name: node.state.name, type: node.state.type },
+    labels: node.labels.nodes.map((label) => ({ id: label.id, name: label.name })),
+  };
 }
 
 function toIssue(node: IssueNode): LinearIssue {
@@ -486,6 +558,31 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
       if (errors.some((error) => /not found/i.test(error.message ?? ""))) return null;
       if (errors.length > 0) throw new LinearError("graphql", clean(`Linear refused the request: ${firstMessage(errors)}`));
       return data?.issue ? toTodo(data.issue) : null;
+    },
+
+    async listPausedIssues(teamKey, signal) {
+      const issues: PausedIssue[] = [];
+      let after: string | null = null;
+      for (;;) {
+        const data: { issues: { nodes: PausedNode[]; pageInfo: PageInfo } } = await query(PAUSED_QUERY, { teamKey, label: PAUSED_LABEL, after }, signal);
+        issues.push(...data.issues.nodes.map(toPaused));
+        if (!data.issues.pageInfo.hasNextPage || data.issues.pageInfo.endCursor === null) break;
+        after = data.issues.pageInfo.endCursor;
+      }
+      return issues.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    },
+
+    async getPausedIssue(id, signal) {
+      const { data, errors } = await request<{ issue: PausedNode | null }>(PAUSED_ISSUE_QUERY, { id }, signal);
+      if (errors.some((error) => /not found/i.test(error.message ?? ""))) return null;
+      if (errors.length > 0) throw new LinearError("graphql", clean(`Linear refused the request: ${firstMessage(errors)}`));
+      return data?.issue ? toPaused(data.issue) : null;
+    },
+
+    async todoStateId(teamKey, signal) {
+      const data: { workflowStates: { nodes: Array<{ id: string; name: string; position: number }> } } = await query(TODO_STATES_QUERY, { teamKey }, signal);
+      const states = [...data.workflowStates.nodes].sort((a, b) => a.position - b.position);
+      return (states.find((state) => state.name.toLowerCase() === "todo") ?? states[0])?.id ?? null;
     },
 
     async doneStateId(teamKey, signal) {

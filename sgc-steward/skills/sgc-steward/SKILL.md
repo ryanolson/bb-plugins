@@ -38,6 +38,16 @@ The steward thread, named in the plugin's `stewardThread` setting, withdraws any
 - When the question names an issue, the plugin posts a record of the withdrawal there. The record closes no Linear block.
 - The tool reaches the steward when its agent session next starts after the setting is made.
 
+## Paused work
+
+The SGC page has a Paused tab, and `bb sgc paused [--json] [--cached]` prints the same lists: open issues on the team with the `paused` label, newest change first, and the bb questions that expired with no answer in the last 14 days. An agent puts an issue there when it pauses work for want of an answer (see "Expired" above), and the owner can pause work too. When the owner resumes an issue, on the page or with `bb sgc resume <issue> [--note <text>]`, the plugin:
+
+- posts the owner's comment `Resumed (from the SGC page)` on the issue, with the owner's note if there is one;
+- removes the `paused` label and moves the issue to the team's Todo state;
+- sends the steward thread a queued message that starts with `[sgc-steward] Resumed <issue>: <title>`, with the note on the next line.
+
+Work restarts from the branch and commit named in the `paused: no answer by <date>` comment, so a resumed issue goes back through Todo and the normal claim. Linear links on the page open the Linear app (`linear://`); CLI output keeps `https://` links.
+
 ## The owner's todos
 
 The plugin lists the owner's todos on the SGC page and with `bb sgc todos`: open issues on the team with the `waiting:ryan-action` label, and the owner's own issues with the `human` label. Use `waiting:ryan-action` only for an action only the owner can take, such as logging in on a machine, giving a token, or approving a budget. A decision belongs in `bb sgc ask` or a question block.
@@ -110,6 +120,8 @@ bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
 bb sgc todos [--json] [--cached]
+bb sgc paused [--json] [--cached]
+bb sgc resume <issue> [--note <text>] [--json]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 bb sgc hosts [--digest] [--json]

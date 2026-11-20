@@ -96,6 +96,26 @@ export const STORE_MIGRATIONS: readonly string[] = [
   // before has no expires_at until its first poll gives it a clock.
   `ALTER TABLE asks ADD COLUMN expires_at INTEGER`,
   `ALTER TABLE asks ADD COLUMN expired_at INTEGER`,
+  // What a Resume of a paused issue means to write to Linear, and the message
+  // it sends once it finishes, kept before it writes so a retry finishes it.
+  `CREATE TABLE IF NOT EXISTS resume_actions (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    note TEXT,
+    label_id TEXT NOT NULL,
+    state_id TEXT NOT NULL,
+    recipient TEXT,
+    message TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    finished_at INTEGER
+  )`,
+  // At most one unfinished Resume per issue.
+  `CREATE UNIQUE INDEX IF NOT EXISTS resume_actions_pending ON resume_actions (issue_id) WHERE state = 'pending'`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn" | "expired";
@@ -116,7 +136,7 @@ export interface AskRow extends Ask {
   expiredAt: number | null;
 }
 
-export type DeliverySource = "ask" | "linear" | "withdrawal" | "expiry" | "todo";
+export type DeliverySource = "ask" | "linear" | "withdrawal" | "expiry" | "resume" | "todo";
 
 /**
  * One message to send to a thread: the answer to its bb question or to its

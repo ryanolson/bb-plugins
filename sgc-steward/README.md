@@ -116,6 +116,14 @@ Done posts one comment from you on the issue: `Done (from the SGC page)`, and yo
 
 Two Done clicks at once act once: the plugin reads the issue again under its lock and refuses a todo that is no longer on the list. A Done is kept before it writes, with the steward's message and the steward thread it goes to, and its comment goes under its own id. When Linear does not take the change, the todo stays on the list, and pressing Done again finishes that same Done, with its own comment, note, and steward thread; a new note is not used. When the change landed but the reply was lost, or the plugin restarted, the plugin, or the next poll, reads the issue and finishes the Done. The steward hears once, after Linear holds the change. Its messages go out in the order you acted, but one that failed to send waits for your retry on the page, so it can arrive after a later one. A Done from the page can be undone from the same page, for an hour, until the plugin reloads, and only while it is the latest Done of its issue: a newer Done of the issue, from the page or the CLI, replaces it. Undo posts `Reopened (from the SGC page)`, puts the label or the state back, and sends the steward `[sgc-steward] Todo reopened <issue>: <title>`. Undo refuses an issue that is no longer in the team, or that changed after the Done, with another state or other labels, so a later change, such as a cancellation, stays. This holds when you press Undo again after a failed Undo, too: an Undo whose change Linear already holds finishes without writing again, and any other is given up, which leaves its `Reopened` comment on the issue.
 
+## Paused
+
+The Paused tab lists work that stopped. It holds two kinds of row, with a count on the tab: the team's open issues with the `paused` label, newest change first, and the bb questions that expired in the last 14 days (see "Expiry"). Each poll reads the paused issues, with one more request, and a failed read keeps the list from the read before and shows its error on the tab without stopping the questions.
+
+Resume, on a paused issue, posts one comment from you, `Resumed (from the SGC page)` and your note, removes the `paused` label, moves the issue to the team's Todo state (its unstarted state named Todo, else its first unstarted state), and sends the steward thread a queued message that starts with `[sgc-steward] Resumed <issue>: <title>`. It works as Done does: the Resume is kept before it writes, its comment goes under its own id, and the message is kept in the transaction that finishes it. A repeat after a failed state change, or after a lost reply, finishes that same Resume, with its own comment, note, and steward thread, and posts no second comment. A repeat of a Resume that already finished is refused, because the issue is no longer paused. An expired question that names an issue gets the same Resume box; one with no issue gets only Dismiss, which hides the row in this browser (it keeps nothing on Linear or in the plugin).
+
+Every Linear link the page draws, on Questions, Todos, and Paused, is a `linear://` link, so it opens the Linear app. The CLI keeps `https://` links. The helper is `appLink` in `lib/paused.ts`.
+
 ## Hosts
 
 The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, connected or disconnected, the threads running a turn, the threads open but idle, the turns waiting on bb's concurrency limit with the oldest wait, and the limit, with `override` or `automatic`. Both show the same view model, and `--json` prints it. The plugin only reads: it never changes a limit. Set one with `bb concurrency-limit host`.
@@ -149,6 +157,8 @@ bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 bb sgc todos [--json] [--cached]
+bb sgc paused [--json] [--cached]
+bb sgc resume <issue> [--note <text>] [--json]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
@@ -162,6 +172,8 @@ bb sgc key --api-key-stdin
 - `answer-of` prints a bb question as the plugin stored it: the asking thread, its issue, the question and options as asked, its status (`open`, `answered`, or `withdrawn`), and, once answered, the time in RFC 3339, the `channel`, the picked `option` as its letter and text or `null` for a typed answer, and the typed `text` or note. It reads nothing from Linear. It exits 0 for a known id, and 1 for an unknown one, or for a stored answer that names an option its question does not have, which only an edit outside the plugin makes.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text, quoted line by line. Number the answers to match: `Q1. A`. Name each block the text answers, as `questions` prints it; it answers each one whole. It refuses when a named block changed or closed, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
+- `paused` lists the paused issues and the questions that expired in the last 14 days, as the Paused tab does. `--json` prints `paused`, `pausedError`, and `expired`. It exits 1 when Linear is not set up or the paused issues could not be read.
+- `resume` resumes a paused issue, as the Resume button does. `--note` adds a note to the comment and to the steward's message.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
 - `key` reads the API key from stdin and stores it.
@@ -210,10 +222,13 @@ bb plugin logs sgc-steward
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.
+- `lib/paused.ts`: the Resume comment and message, the `linear://` link helper, and the text of `bb sgc paused`.
+- `lib/resume-store.ts`: where an unfinished Resume is kept.
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
+- `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.

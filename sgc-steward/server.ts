@@ -69,6 +69,7 @@ import { readHostFile } from "./lib/host-file.ts";
 import { formatDigest, formatHosts, hostsDigest } from "./lib/hosts.ts";
 import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
+import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
@@ -148,6 +149,22 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       publish: () => publish(0),
       refresh: async () => void (await pollForCaller(false)),
       configured: () => snapshot.configured,
+      log: (text) => bb.log.warn(text),
+    });
+
+    const pausedWork = createPaused({
+      db,
+      postWindowMs,
+      write: writeLinear,
+      steward: stewardFor,
+      keep: (row) => asks.keep({ source: "resume", ...row }),
+      send: async (row) => ((await deliver(row.id))?.state === "delivered" ? "sent" : "failed"),
+      forget: (issueId) => commentCache.delete(issueId),
+      publish: () => publish(0),
+      refresh: async () => void (await pollForCaller(false)),
+      configured: () => snapshot.configured,
+      expired: () => asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
+      now,
       log: (text) => bb.log.warn(text),
     });
 
@@ -279,6 +296,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (signal.aborted) return null;
         const todoNews = await todos.poll(linear, teamKey, notify, signal);
         if (todoNews === null) return null;
+        const pausedNews = await pausedWork.poll(linear, teamKey, signal);
+        if (pausedNews === null) return null;
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
         if (fullRefresh) lastFullRefreshAt = checkedAt;
         const oldest = (issue: IssueView) => Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt)));
@@ -286,7 +305,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         snapshot = { configured: true, teamKey, polledAt: checkedAt, checkedAt, error: null, issueErrors, issues };
         const fresh = reconcileSeen(issues, unread, notify) + todoNews.fresh;
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
-        if (fresh > 0 || todoNews.changed || after !== before) publish(fresh);
+        if (fresh > 0 || todoNews.changed || pausedNews.changed || after !== before) publish(fresh);
       } catch (error) {
         if (signal.aborted) return null;
         const reason = redact(message(error), [linearApiKey]);
@@ -336,6 +355,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (expired.issue !== null) await postRecord(expired.id);
       }
       await todos.sent();
+      await pausedWork.sent();
       return polled;
     };
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
@@ -357,6 +377,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         undelivered: asks.undelivered().map(deliveryView),
         unposted: asks.unposted().map(recordView),
         ...todos.list(),
+        ...pausedWork.list(),
       };
     }
 
@@ -764,6 +785,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
       "hosts.list": () => readHosts(bb.sdk, now),
       ...todos.rpc,
+      ...pausedWork.rpc,
     });
 
     // The steward's power to withdraw any question lives only here: bb hands
@@ -799,6 +821,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         summary: "Ask the owner questions without waiting, list them, show how one was answered, answer Linear questions, store the Linear key",
         commands: {
           ...todos.commands,
+          ...pausedWork.commands,
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",

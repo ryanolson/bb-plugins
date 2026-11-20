@@ -112,7 +112,7 @@ test("a new Done of an issue replaces the page's Undo for its earlier Done", () 
 });
 
 test("each tab has its own route, and a route the page does not know shows Questions", () => {
-  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos", "hosts"]);
+  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos", "paused", "hosts"]);
   assert.equal(tabOf(""), "questions");
   assert.equal(tabOf("todos"), "todos");
   assert.equal(tabOf("hosts"), "hosts");
@@ -135,16 +135,17 @@ test("the steward's todo messages are listed on Todos, every other send on Quest
 });
 
 test("each tab's badge counts what is open on it, and flags a failure there", () => {
-  const base = { issues: [], asks: [], issueErrors: [], undelivered: [], unposted: [], todos: [], todoError: null };
+  const base = { issues: [], asks: [], issueErrors: [], undelivered: [], unposted: [], todos: [], todoError: null, paused: [], expired: [], pausedError: null };
   const quiet = { count: 0, alert: false };
-  assert.deepEqual(tabBadges(base), { questions: quiet, todos: quiet });
+  assert.deepEqual(tabBadges(base), { questions: quiet, todos: quiet, paused: quiet });
   assert.deepEqual(tabBadges({ ...base, issues: [{ blocks: [parsed, raw] }], asks: [{}], todos: [{}, {}] }), {
     questions: { count: 4, alert: false },
     todos: { count: 2, alert: false },
+    paused: quiet,
   });
-  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "todo" }] }), { questions: quiet, todos: { count: 0, alert: true } });
+  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "todo" }] }), { questions: quiet, todos: { count: 0, alert: true }, paused: quiet });
   assert.deepEqual(tabBadges({ ...base, todoError: "label filter" }).todos, { count: 0, alert: true });
-  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "linear" }] }), { questions: { count: 0, alert: true }, todos: quiet });
+  assert.deepEqual(tabBadges({ ...base, undelivered: [{ source: "linear" }] }), { questions: { count: 0, alert: true }, todos: quiet, paused: quiet });
   assert.deepEqual(tabBadges({ ...base, unposted: [{}] }).questions, { count: 0, alert: true });
   assert.deepEqual(tabBadges({ ...base, issueErrors: [{}] }).questions, { count: 0, alert: true });
 });

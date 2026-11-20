@@ -2,7 +2,7 @@
 // that tells you, once per question or todo, that new ones came. The page has
 // a tab per list, each at its own route: Questions holds the two kinds of
 // question, Linear blocks and bb questions agents asked with `bb sgc ask`, and
-// Todos holds your todos from Linear. Hosts shows each host's threads against
+// Todos holds your todos from Linear. Paused lists work that stopped, with a Resume button. Hosts shows each host's threads against
 // bb's concurrency limit, read only.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
@@ -20,7 +20,8 @@ import {
   useRpc,
   type ExperimentalBadge,
 } from "@get-bb/plugin-sdk/app";
-import type { AskView, DeliveryView, IssueView, Panel, QuestionNotification, RecordView, TodoView, rpcContract } from "./lib/contract.ts";
+import type { AskView, DeliveryView, ExpiredView, IssueView, Panel, PausedView, QuestionNotification, RecordView, TodoView, rpcContract } from "./lib/contract.ts";
+import { appLink } from "./lib/paused.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
 import { limitText, UNPLACED_NAME, waitText, type HostsView } from "./lib/hosts.ts";
 import {
@@ -170,7 +171,7 @@ function LinearCard({ card, onAnswered }: { card: Extract<Card<IssueView, AskVie
   return (
     <section className="space-y-3 rounded-lg border border-border bg-card p-4">
       <header className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <UrlLink href={issue.url} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
+        <UrlLink href={appLink(issue.url)} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
           {issue.identifier}
         </UrlLink>
         <h2 className="min-w-0 flex-1 text-sm font-medium">{issue.title}</h2>
@@ -434,7 +435,7 @@ function TodoCard({ todo, onDone }: { todo: TodoView; onDone: (entry: DoneHere) 
   return (
     <li className="space-y-2 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-        <UrlLink href={todo.url} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
+        <UrlLink href={appLink(todo.url)} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
           {todo.identifier}
         </UrlLink>
         <span className="min-w-0 flex-1 font-medium">{todo.title}</span>
@@ -521,6 +522,170 @@ function Todos({ todos, todoError, known }: { todos: TodoView[]; todoError: stri
                 {busy === entry.undo ? "Reopening…" : "Undo"}
               </Button>
             </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// --- paused ------------------------------------------------------------------
+
+/** Question ids the owner dismissed from the Paused tab. Kept in this browser only: dismissing changes nothing on Linear or in the plugin. */
+const DISMISSED_KEY = "sgc-steward.dismissed-expired";
+
+function readDismissed(): string[] {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(DISMISSED_KEY) ?? "[]") as unknown;
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The expired questions the owner has not dismissed, and the way to dismiss one. */
+function useDismissed(): [string[], (id: string) => void] {
+  const [dismissed, setDismissed] = useState<string[]>(readDismissed);
+  const dismiss = useCallback((id: string) => {
+    setDismissed((current) => {
+      const next = current.includes(id) ? current : [...current, id].slice(-200);
+      try {
+        window.localStorage.setItem(DISMISSED_KEY, JSON.stringify(next));
+      } catch {
+        // A browser that keeps nothing still hides the row until the page reloads.
+      }
+      return next;
+    });
+  }, []);
+  return [dismissed, dismiss];
+}
+
+/** Resume one issue, from a paused row or from an expired question that names it. */
+function ResumeBox({ issue, onResumed }: { issue: string; onResumed: () => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function resume() {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await rpc.call("paused.resume", { issue, note });
+      stewardToast("Resumed", result.identifier, result.steward);
+      onResumed();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <textarea
+        className={textareaClass()}
+        value={note}
+        aria-label={`Note for ${issue}`}
+        placeholder="Add a note (optional)"
+        onChange={(event) => setNote(event.target.value)}
+      />
+      {error === null ? null : (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      <footer className="flex flex-wrap items-center gap-3">
+        <Button size="sm" disabled={busy} onClick={() => void resume()}>
+          {busy ? "Resuming…" : "Resume"}
+        </Button>
+        <span className="text-xs text-muted-foreground">Comments as you, removes the paused label, and moves the issue to Todo. The work restarts from the branch in the pause comment.</span>
+      </footer>
+    </>
+  );
+}
+
+function PausedCard({ issue, onResumed }: { issue: PausedView; onResumed: () => void }) {
+  return (
+    <li className="space-y-2 rounded-md border border-border p-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+        <UrlLink href={appLink(issue.url)} className="font-mono text-sm font-medium underline-offset-2 hover:underline">
+          {issue.identifier}
+        </UrlLink>
+        <span className="min-w-0 flex-1 font-medium">{issue.title}</span>
+        {issue.state === null ? null : <span className="rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">{issue.state}</span>}
+      </div>
+      <ResumeBox issue={issue.identifier} onResumed={onResumed} />
+    </li>
+  );
+}
+
+function ExpiredCard({ ask, issueUrl, onDismiss, onResumed }: { ask: ExpiredView; issueUrl: string | null; onDismiss: () => void; onResumed: () => void }) {
+  return (
+    <li className="space-y-2 rounded-md border border-dashed border-border p-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm text-muted-foreground">
+        <span className="font-mono text-xs">{ask.id}</span>
+        <span className="min-w-0 flex-1">
+          Expired with no answer · {ask.threadTitle || ask.threadId}
+          {ask.issue === null ? null : (
+            <>
+              {" · "}
+              {issueUrl === null ? (
+                ask.issue
+              ) : (
+                <UrlLink href={appLink(issueUrl)} className="font-mono underline-offset-2 hover:underline">
+                  {ask.issue}
+                </UrlLink>
+              )}
+            </>
+          )}
+        </span>
+      </div>
+      <Markdown content={ask.question} className="text-sm" />
+      {ask.issue === null ? null : <ResumeBox issue={ask.issue} onResumed={onResumed} />}
+      <footer className="flex items-center gap-3">
+        <Button size="sm" variant="outline" onClick={onDismiss}>
+          Dismiss
+        </Button>
+        <span className="text-xs text-muted-foreground">Hides this row in this browser only.</span>
+      </footer>
+    </li>
+  );
+}
+
+/** Work that stopped: open issues with the paused label, and questions that expired with no answer in the last 14 days. */
+function Paused({
+  paused,
+  expired,
+  pausedError,
+  known,
+  onChanged,
+  onDismiss,
+}: {
+  paused: PausedView[];
+  expired: ExpiredView[];
+  pausedError: string | null;
+  known: boolean;
+  onChanged: () => void;
+  onDismiss: (id: string) => void;
+}) {
+  const urls = new Map(paused.map((issue) => [issue.identifier, issue.url]));
+  return (
+    <section className="space-y-3">
+      {pausedError === null ? null : <Notice tone="error">Could not read the paused issues: {pausedError}</Notice>}
+      {paused.length === 0 && expired.length === 0 ? known && pausedError === null ? <Notice>Nothing is paused.</Notice> : null : null}
+      {paused.length === 0 ? null : (
+        <ul className="space-y-2">
+          {paused.map((issue) => (
+            <PausedCard key={issue.id} issue={issue} onResumed={onChanged} />
+          ))}
+        </ul>
+      )}
+      {expired.length === 0 ? null : <h3 className="pt-2 text-sm font-medium text-muted-foreground">Questions that expired with no answer</h3>}
+      {expired.length === 0 ? null : (
+        <ul className="space-y-2">
+          {expired.map((ask) => (
+            <ExpiredCard key={ask.id} ask={ask} issueUrl={ask.issue === null ? null : (urls.get(ask.issue) ?? null)} onDismiss={() => onDismiss(ask.id)} onResumed={onChanged} />
           ))}
         </ul>
       )}
@@ -773,6 +938,8 @@ function SgcPage({ subPath }: { subPath: string }) {
   const [chosen, setChosen] = useState<string[]>([]);
   const [match, setMatch] = useState<LabelMatch>("any");
   const [order, setOrder] = useState<CardOrder>("age");
+  const [dismissed, dismiss] = useDismissed();
+  const expiredShown = snapshot === null ? [] : snapshot.expired.filter((ask) => !dismissed.includes(ask.id));
   const cards = snapshot === null ? [] : sortCards(filterCards(orderCards(snapshot.issues, snapshot.asks), chosen, match), order);
 
   async function refresh() {
@@ -817,7 +984,7 @@ function SgcPage({ subPath }: { subPath: string }) {
         ) : null}
         <TabBar
           active={tab}
-          badges={{ ...(snapshot === null ? {} : tabBadges(snapshot)), hosts: hostsBadge(hosts.view) }}
+          badges={{ ...(snapshot === null ? {} : tabBadges({ ...snapshot, expired: expiredShown })), hosts: hostsBadge(hosts.view) }}
           onSelect={(next) => navigate.toPluginPanel(PANEL_PATH, { subPath: tabPath(next) })}
         />
         <TabPanel tab="questions" active={tab}>
@@ -865,6 +1032,21 @@ function SgcPage({ subPath }: { subPath: string }) {
           {snapshot === null ? null : <Todos todos={snapshot.todos} todoError={snapshot.todoError} known={snapshot.configured && snapshot.error === null} />}
           {snapshot === null ? null : (
             <Undelivered title="Messages to the steward that did not go out" undelivered={sendsFor("todos", snapshot.undelivered)} unposted={[]} />
+          )}
+        </TabPanel>
+        <TabPanel tab="paused" active={tab}>
+          {snapshot === null ? null : (
+            <Paused
+              paused={snapshot.paused}
+              expired={expiredShown}
+              pausedError={snapshot.pausedError}
+              known={snapshot.configured && snapshot.error === null}
+              onChanged={load}
+              onDismiss={dismiss}
+            />
+          )}
+          {snapshot === null ? null : (
+            <Undelivered title="Messages to the steward that did not go out" undelivered={sendsFor("paused", snapshot.undelivered)} unposted={[]} />
           )}
         </TabPanel>
         <TabPanel tab="hosts" active={tab}>

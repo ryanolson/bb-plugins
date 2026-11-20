@@ -133,6 +133,7 @@ export function withDone<T extends { issueId: string }>(list: readonly T[], entr
 export const PANEL_TABS = [
   { id: "questions", label: "Questions", subPath: "" },
   { id: "todos", label: "Todos", subPath: "todos" },
+  { id: "paused", label: "Paused", subPath: "paused" },
   { id: "hosts", label: "Hosts", subPath: "hosts" },
 ] as const;
 
@@ -155,7 +156,7 @@ export function noticeTab(notes: ReadonlyArray<Pick<Notice, "source">>): PanelTa
 }
 
 /** The tab that lists each kind of send that did not go out. A new kind of send must pick one. */
-const SEND_TAB: Record<DeliveryView["source"], PanelTab> = { ask: "questions", linear: "questions", withdrawal: "questions", expiry: "questions", todo: "todos" };
+const SEND_TAB: Record<DeliveryView["source"], PanelTab> = { ask: "questions", linear: "questions", withdrawal: "questions", expiry: "questions", resume: "paused", todo: "todos" };
 
 /** The sends that did not go out which a tab lists: the steward's todo messages on Todos, answers and notices on Questions. */
 export function sendsFor<R extends Pick<DeliveryView, "source">>(tab: PanelTab, rows: readonly R[]): R[] {
@@ -167,6 +168,10 @@ interface TabInput extends Pick<BadgeInput, "issues" | "asks" | "unposted"> {
   undelivered: ReadonlyArray<Pick<DeliveryView, "source">>;
   todos: readonly unknown[];
   todoError: string | null;
+  paused: readonly unknown[];
+  /** Questions that expired and are still shown: the page leaves out those the owner dismissed. */
+  expired: readonly unknown[];
+  pausedError: string | null;
 }
 
 /** A tab's badge: what is open on it, and whether something on it failed, so a failure behind another tab still shows. */
@@ -180,6 +185,7 @@ export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts">, Ta
   return {
     questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
     todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },
+    paused: { count: view.paused.length + view.expired.length, alert: sendsFor("paused", view.undelivered).length > 0 || view.pausedError !== null },
   };
 }
 
