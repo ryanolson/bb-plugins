@@ -1,5 +1,6 @@
-// The Paused tab's pure parts: the comment and message of a Resume, the link
-// helper that makes Linear links open the app, and the CLI's list.
+// The Paused tab's pure parts: the comment and message of a Resume, and the
+// CLI's list. Server side only: the page must not import this file (see
+// links.ts and the README's Coding gotchas).
 
 import { DELIVERY_PREFIX, formatUtc } from "./asks.ts";
 import { RESUMED_HEADER } from "./questions.ts";
@@ -15,17 +16,6 @@ export function resumeComment(note: string | null): string {
 export function resumeMessage(identifier: string, title: string, note: string | null): string {
   const head = `${DELIVERY_PREFIX} Resumed ${identifier}: ${title}`;
   return note === null ? head : `${head}\n${note}`;
-}
-
-const LINEAR_WEB = "https://linear.app/";
-
-/**
- * A Linear web link as the Linear app opens it: https://linear.app/<ws>/<rest>
- * becomes linear://<ws>/<rest>. Any other text, a lookalike host included,
- * comes back as it was. Only the page uses this; the CLI keeps https.
- */
-export function appLink(url: string): string {
-  return url.startsWith(LINEAR_WEB) && url.length > LINEAR_WEB.length ? `linear://${url.slice(LINEAR_WEB.length)}` : url;
 }
 
 /** What `bb sgc paused` prints: the paused issues, then the questions that expired. */

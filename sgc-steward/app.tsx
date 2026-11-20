@@ -21,7 +21,7 @@ import {
   type ExperimentalBadge,
 } from "@get-bb/plugin-sdk/app";
 import type { AskView, DeliveryView, ExpiredView, IssueView, Panel, PausedView, QuestionNotification, RecordView, TodoView, rpcContract } from "./lib/contract.ts";
-import { appLink } from "./lib/paused.ts";
+import { appLink } from "./lib/links.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
 import { limitText, UNPLACED_NAME, waitText, type HostsView } from "./lib/hosts.ts";
 import {
