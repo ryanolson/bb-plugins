@@ -163,6 +163,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       publish: () => publish(0),
       refresh: async () => void (await pollForCaller(false)),
       configured: () => snapshot.configured,
+      linearError: () => snapshot.error,
       expired: () => asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
       now,
       log: (text) => bb.log.warn(text),

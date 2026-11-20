@@ -45,6 +45,8 @@ export interface PausedDeps {
   refresh(): Promise<void>;
   /** Whether the Linear API key is set. */
   configured(): boolean;
+  /** Why the last poll failed to read Linear, or null. */
+  linearError(): string | null;
   /** The questions that expired in the last 14 days, for the CLI's list. */
   expired(): ExpiredView[];
   now(): number;
@@ -170,7 +172,15 @@ export function createPaused(deps: PausedDeps) {
     try {
       const listed = await linear.listPausedIssues(teamKey, signal);
       if (signal.aborted) return null;
-      paused = listed.map(toView);
+      // A Resume that did not finish keeps its issue listed, so its button stays, even though its label may be off already.
+      const extra: PausedView[] = [];
+      for (const action of store.unfinished()) {
+        if (listed.some((issue) => issue.id === action.issueId)) continue;
+        const issue = await linear.getPausedIssue(action.issueId, signal);
+        if (issue !== null && issue.state?.type !== "completed" && issue.state?.type !== "canceled") extra.push(toView(issue));
+      }
+      if (signal.aborted) return null;
+      paused = [...listed.map(toView), ...extra].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       pausedError = null;
     } catch (error) {
       if (signal.aborted) return null;
@@ -247,6 +257,8 @@ export function createPaused(deps: PausedDeps) {
         if (!input.options.cached) await deps.refresh();
         const failures = [
           ...(deps.configured() ? [] : ["The Linear API key is not set, so the paused issues are not read."]),
+          // A failed poll leaves the lists from the read before, so it is a failure, not stale success.
+          ...(deps.linearError() === null ? [] : [`Could not read Linear: ${deps.linearError()}`]),
           ...(pausedError === null ? [] : [`Could not read the paused issues: ${pausedError}`]),
         ];
         const expired = deps.expired();

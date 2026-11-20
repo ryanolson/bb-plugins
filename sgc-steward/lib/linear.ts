@@ -131,7 +131,7 @@ export const ISSUE_QUERY = `query SgcIssue($id: String!) {
 }`;
 
 export const PROJECTS_QUERY = `query SgcProjects($teamKey: String!, $after: String) {
-  projects(first: 50, after: $after, filter: { accessibleTeams: { key: { eq: $teamKey } } }) {
+  projects(first: 50, after: $after, filter: { accessibleTeams: { some: { key: { eq: $teamKey } } } }) {
     nodes { name status { type } }
     pageInfo { hasNextPage endCursor }
   }

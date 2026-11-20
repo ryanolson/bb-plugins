@@ -395,7 +395,7 @@ export function expiryNotice(ask: Ask, deadline: number): string {
 }
 
 /** The comment that records an expiry on the question's issue. It starts with the record header, so it closes no block. */
-export function expiryRecord(ask: Ask, deadline: number): string {
+export function expiryRecord(ask: Ask, deadline: number, told = true): string {
   const options = ask.options.length === 0 ? [] : ["", "Options:", ...optionLines(ask)];
   return [
     `${RECORD_HEADER} ${ask.id} from thread ${ask.threadId} (asked ${formatUtc(ask.askedAt)}): expired`,
@@ -404,7 +404,7 @@ export function expiryRecord(ask: Ask, deadline: number): string {
     ask.question,
     ...options,
     "",
-    `No answer came by ${formatUtc(deadline)}. The asking thread was told to save its work and pause.`,
+    `No answer came by ${formatUtc(deadline)}. ${told ? "The asking thread was told to save its work and pause." : "The asking thread could not be told: it is archived or gone."}`,
   ].join("\n");
 }
 
@@ -412,6 +412,6 @@ export function expiryRecord(ask: Ask, deadline: number): string {
 export function expiryFollowUps(ask: Ask, deadline: number, tell: boolean) {
   return {
     notice: tell ? expiryNotice(ask, deadline) : null,
-    record: ask.issue === null ? null : { issue: ask.issue, body: expiryRecord(ask, deadline) },
+    record: ask.issue === null ? null : { issue: ask.issue, body: expiryRecord(ask, deadline, tell) },
   };
 }
