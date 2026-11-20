@@ -1030,3 +1030,16 @@ test("an ask expires without a Linear key too", async () => {
   await harness.behavior.callRpc("questions.refresh", null);
   assert.equal(expiryMessages(sends).length, 1);
 });
+
+test("the project list belongs to the team it was read for: after a team change, no list is known until the new one is read", async () => {
+  const { harness, linear, refresh } = await setup();
+  linear.projects = ["Old team project"];
+  await refresh();
+  assert.equal((await ask(harness, ["--question", "Old?", "--label", "old team project"])).exitCode, 0);
+  await harness.behavior.setSettings({ teamKey: "NEW" });
+  linear.projects = null;
+  await refresh();
+  const after = await ask(harness, ["--question", "New?", "--label", "Old team project", "--json"]);
+  assert.equal(after.exitCode, 0, "old-team names are not checked against: no list is known, so it only warns");
+  assert.match((JSON.parse(after.stdout) as { warnings: string[] }).warnings[0]!, /not checked/);
+});

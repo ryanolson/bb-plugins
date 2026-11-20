@@ -2,10 +2,10 @@
 // helper that makes Linear links open the app, and the CLI's list.
 
 import { DELIVERY_PREFIX, formatUtc } from "./asks.ts";
+import { RESUMED_HEADER } from "./questions.ts";
 import type { ExpiredView, PausedView } from "./contract.ts";
 
-/** The comment a Resume posts as the owner. Its first line names no question block. */
-export const RESUMED_HEADER = "Resumed (from the SGC page)";
+/** The comment a Resume posts as the owner. Its first line names no question block, and `answeredBlocks` knows it. */
 
 export function resumeComment(note: string | null): string {
   return note === null ? RESUMED_HEADER : `${RESUMED_HEADER}\n\n${note}`;

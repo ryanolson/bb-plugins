@@ -227,7 +227,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     }
 
     /** Names of the team's open Linear projects from the last poll that read them; null before the first. */
-    let projectNames: string[] | null = null;
+    let projectNames: { teamKey: string; names: string[] } | null = null;
 
     /** The poll in progress, so an answer can stop it instead of waiting. */
     let runningPoll: AbortController | null = null;
@@ -265,7 +265,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (signal.aborted) return null;
         // The names an ask's label is checked against. A failed read keeps the last good list.
         try {
-          projectNames = await linear.listProjectNames(teamKey, signal);
+          projectNames = { teamKey, names: await linear.listProjectNames(teamKey, signal) };
         } catch (error) {
           if (signal.aborted || (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit"))) throw error;
           bb.log.warn(`could not read Linear projects: ${redact(message(error), [linearApiKey])}`);
@@ -891,9 +891,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               let options: ReturnType<typeof askOptions>;
               let issue: string | null;
               let labels: string[];
+              // Names read for another team are not this team's: with none read yet for it, any label is taken.
+              const { teamKey } = await settings.get();
+              const projects = projectNames?.teamKey === teamKey ? projectNames.names : null;
               try {
                 question = checkQuestion(raw);
-                labels = checkLabels(input.options.label ?? [], projectNames);
+                labels = checkLabels(input.options.label ?? [], projects);
                 const texts = input.options.option ?? [];
                 const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
                 options = askOptions(texts, recommend);
@@ -910,7 +913,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               }
               // A table the page cannot draw gets a warning, not a refusal: the
               // question still reads, and the asker can withdraw and ask again.
-              const warnings = [tableWarning(question, options.map((option) => option.text)), labelWarning(projectNames)].filter((line): line is string => line !== null);
+              const warnings = [tableWarning(question, options.map((option) => option.text)), labelWarning(projects)].filter((line): line is string => line !== null);
               const reply = (id: string, existing: boolean) => {
                 const where = threadId === ctx.threadId ? "this thread" : `thread ${threadId}`;
                 const asked = `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`;

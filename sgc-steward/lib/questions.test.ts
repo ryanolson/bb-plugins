@@ -346,7 +346,7 @@ test("an edit reopens the questions answered before it, and a raw block has no n
 });
 
 test("a todo marked done or reopened answers no Linear block, but only as the first line", () => {
-  for (const body of ["Done (from the SGC page)", "Done (from the SGC page)\n\nLogged in.", "Reopened (from the SGC page)"]) {
+  for (const body of ["Done (from the SGC page)", "Done (from the SGC page)\n\nLogged in.", "Reopened (from the SGC page)", "Resumed (from the SGC page)", "Resumed (from the SGC page)\n\nGo on."]) {
     assert.deepEqual(answeredBlocks(body), [], body);
     assert.deepEqual(openBlocks("checkin", [comment("q1", QUESTIONS), comment("d1", body)]).map((open) => open.commentId), ["q1"]);
   }

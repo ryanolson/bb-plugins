@@ -152,3 +152,14 @@ test("a paused read that fails is reported on its own, and the questions still p
   assert.equal(panel.error, null);
   assert.match(panel.pausedError ?? "", /label filter/);
 });
+
+test("Resume refuses a completed or canceled issue that kept the paused label, and writes nothing", async () => {
+  const { harness, linear } = await setup();
+  const { finished } = seed(linear);
+  const refused = await rejection(harness.behavior.callRpc("paused.resume", { issue: "TEAM-3", note: "" }));
+  assert.equal(refused.code, "conflict");
+  assert.match(refused.message, /completed|canceled/);
+  assert.equal(finished.comments.length, 0);
+  assert.deepEqual(finished.state, { id: "state-done", type: "completed" });
+  assert.ok(finished.labels.some((label) => label.name === "paused"));
+});

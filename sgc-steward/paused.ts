@@ -197,6 +197,10 @@ export function createPaused(deps: PausedDeps) {
       const issue = await linear.getPausedIssue(issueRef);
       if (issue === null) throw new Refusal("not_found", `Linear has no issue ${issueRef}.`);
       if (issue.teamKey !== teamKey) throw new Refusal("invalid", `${issue.identifier} is not in team ${teamKey}.`);
+      // A finished issue can keep its paused label; resuming it would reopen work that is done.
+      if (issue.state?.type === "completed" || issue.state?.type === "canceled") {
+        throw new Refusal("conflict", `${issue.identifier} is ${issue.state.type}, so it is not resumed. Reopen it in Linear first.`);
+      }
       let action = store.pending(issue.id);
       const resumed = action !== null;
       if (action !== null) {

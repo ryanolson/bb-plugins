@@ -5,7 +5,7 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import { ASK_LIMITS, type AnswerChannel, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
+import { ASK_LIMITS, PAUSE_OPTION, type AnswerChannel, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
 
 /**
  * Every migration after seen_blocks, in order: the plugin's one migration
@@ -223,6 +223,11 @@ export interface Withdrawal {
 /** What happened to an asked question: stored, already open, or refused at a cap. */
 export type Admission = { kind: "asked" | "existing"; id: string } | { kind: "full"; scope: "thread" | "total"; open: number };
 
+/** The options the asker offered: all but a last Pause option. */
+function withoutPause(options: readonly AskOption[]): AskOption[] {
+  return options.at(-1)?.text === PAUSE_OPTION ? options.slice(0, -1) : [...options];
+}
+
 function token(bytes: number): string {
   return [...randomBytes(bytes)].map((byte) => (byte % 36).toString(36)).join("");
 }
@@ -357,9 +362,13 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
      */
     admit(ask: Ask, notified: boolean, expiresAt: number | null = null): Admission {
       return db.transaction((): Admission => {
-        const same = db
-          .prepare("SELECT id FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND options = ? AND issue IS ?")
-          .get(ask.threadId, ask.question, JSON.stringify(ask.options), ask.issue) as { id: string } | undefined;
+        // Options are compared without the Pause option, so an ask stored before it existed still matches its repeat.
+        const asked = JSON.stringify(withoutPause(ask.options));
+        const same = (
+          db
+            .prepare("SELECT id, options FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND issue IS ? ORDER BY asked_at, id")
+            .all(ask.threadId, ask.question, ask.issue) as Array<{ id: string; options: string }>
+        ).find((row) => JSON.stringify(withoutPause(JSON.parse(row.options) as AskOption[])) === asked);
         if (same !== undefined) return { kind: "existing", id: same.id };
         const open = db
           .prepare("SELECT COUNT(*) AS total, COALESCE(SUM(thread_id = ?), 0) AS thread FROM asks WHERE state = 'open'")
