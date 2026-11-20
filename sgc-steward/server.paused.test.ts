@@ -163,3 +163,17 @@ test("Resume refuses a completed or canceled issue that kept the paused label, a
   assert.deepEqual(finished.state, { id: "state-done", type: "completed" });
   assert.ok(finished.labels.some((label) => label.name === "paused"));
 });
+
+test("the Paused list keeps the Resume button available after a failed Todo move", async () => {
+  const { harness, linear } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["paused"], "TEAM", { state: BACKLOG });
+  await refresh(harness);
+  linear.setStateFaults = ["dropped"];
+
+  const failed = await rejection(harness.behavior.callRpc("paused.resume", { issue: issue.identifier, note: "" }));
+  assert.match(failed.message, /Press Resume again/);
+  assert.deepEqual(issue.state, BACKLOG);
+
+  const panel = await refresh(harness);
+  assert.deepEqual(panel.paused.map((row) => row.identifier), [issue.identifier]);
+});
