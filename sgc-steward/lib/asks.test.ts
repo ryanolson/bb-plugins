@@ -16,7 +16,7 @@ import {
   withdrawalRecord,
   type Ask,
 } from "./asks.ts";
-import { PAUSE_OPTION } from "./choices.ts";
+import { NOTE_OPTION, PAUSE_OPTION, cardChoices } from "./choices.ts";
 import { answeredBlocks, commentRole } from "./questions.ts";
 
 const ASK: Ask = {
@@ -80,6 +80,14 @@ test("picking the note choice answers with the note, which it requires", () => {
   assert.equal(answerText(noOptions, { option: "A", text: "  Ship Friday.  " }), "Ship Friday.");
   assert.throws(() => answerText(noOptions, { option: "A", text: "  " }), /"Answer in the note below" takes an answer in the note/);
   assert.equal(answerText(noOptions, { option: "B", text: "" }), `B: ${PAUSE_OPTION}`);
+});
+
+test("a stored ask created without options offers the note and keeps its Pause letter", () => {
+  const stored: Ask = { ...ASK, options: [{ letter: "A", text: PAUSE_OPTION, recommended: false }] };
+  assert.equal(answerText(stored, { option: "A", text: "" }), `A: ${PAUSE_OPTION}`);
+  const note = cardChoices(stored.options).find((choice) => choice.text === NOTE_OPTION);
+  assert.ok(note, "the stored Pause choice is the only option on this card");
+  assert.equal(answerText(stored, { option: note.letter, text: "Ship Friday." }), "Ship Friday.");
 });
 
 test("the delivered message quotes the id, the question, and the answer", () => {
