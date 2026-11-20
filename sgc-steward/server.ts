@@ -72,7 +72,7 @@ import { Refusal } from "./lib/refusal.ts";
 import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
 import { parseCacheLifeOverrides, parseLifecycleActions } from "./lib/lifecycle.ts";
-import { THREADS_MIGRATIONS, THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
+import { THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -140,7 +140,6 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         notified_at INTEGER
       )`,
       ...STORE_MIGRATIONS,
-      ...THREADS_MIGRATIONS,
     ]);
     const asks = createAskStore(db, now);
     const todos = createTodos({

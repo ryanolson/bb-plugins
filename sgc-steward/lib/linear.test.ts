@@ -413,3 +413,33 @@ test("question issues read each label's group, which Linear gives as the label's
   ]);
   assert.match(calls[0]?.query ?? "", /labels\(first: 50\) \{ nodes \{ id name parent \{ name \} \} \}/);
 });
+
+test("lifecycle issues: state, labels, and the oldest and newest comments, once each, with a variable for the date", async () => {
+  const node = (id: string, extra: Record<string, unknown> = {}) => ({
+    id: `uuid-${id}`,
+    identifier: `TEAM-${id}`,
+    title: `Title ${id}`,
+    url: `https://linear.app/ws/issue/TEAM-${id}`,
+    updatedAt: "2026-11-20T10:00:00.000Z",
+    team: { key: "TEAM" },
+    state: { name: "In Progress", type: "started" },
+    labels: { nodes: [{ name: "gdl", parent: { name: "area" } }, { name: "paused", parent: null }] },
+    comments: { nodes: [{ body: "[agent:claude-code thr_a] claim: one", createdAt: "2026-11-01T00:00:00.000Z" }, { body: "middle", createdAt: "2026-11-02T00:00:00.000Z" }] },
+    latest: { nodes: [{ body: "middle", createdAt: "2026-11-02T00:00:00.000Z" }, { body: "[agent:claude-code thr_b] claim: late", createdAt: "2026-11-19T00:00:00.000Z" }] },
+    ...extra,
+  });
+  const { calls, client } = fakeLinear([
+    { json: { data: { issues: { nodes: [node("1")], pageInfo: { hasNextPage: true, endCursor: "c1" } } } } },
+    { json: { data: { issues: { nodes: [node("2", { state: null, latest: undefined })], pageInfo: { hasNextPage: false, endCursor: null } } } } },
+  ]);
+  const issues = await client.listLifecycleIssues("TEAM", "2026-10-21T00:00:00.000Z");
+  assert.deepEqual(issues[0]!.labels, ["area/gdl", "paused"]);
+  assert.deepEqual(issues[0]!.state, { name: "In Progress", type: "started" });
+  assert.deepEqual(issues[0]!.comments.map((comment) => comment.body), ["[agent:claude-code thr_a] claim: one", "middle", "[agent:claude-code thr_b] claim: late"]);
+  assert.equal(issues[1]!.state, null);
+  assert.equal(issues[1]!.comments.length, 2);
+  assert.deepEqual(calls[0]?.variables, { teamKey: "TEAM", since: "2026-10-21T00:00:00.000Z", after: null });
+  assert.equal(calls[1]?.variables.after, "c1");
+  assert.match(calls[0]?.query ?? "", /comments\(first: 15, orderBy: createdAt\)/);
+  assert.match(calls[0]?.query ?? "", /latest: comments\(last: 15, orderBy: createdAt\)/);
+});

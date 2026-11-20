@@ -635,3 +635,60 @@ test("cacheLifeOverrides changes a provider's cache life", async () => {
   const thread = byId(await t.list(), "thr_a");
   assert.deepEqual([thread.expiresAt, thread.expiresSource, thread.decision], [START + 5 * MINUTE, "override", "archive"]);
 });
+
+// --- archiving a parent archives its children -------------------------------
+
+const DIRTY = { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: "dirty_uncommitted", hasUncommittedChanges: true } } };
+
+test("act mode does not archive a done parent whose idle child has a dirty checkout, and flags it", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_parent", title: "1: parent" },
+      { id: "thr_kid", title: "kid", parentThreadId: "thr_parent" },
+    ],
+    { settings: ACT },
+  );
+  t.issue("TEAM-1", "state-done");
+  t.state.env.set("env_thr_kid", DIRTY);
+  const view = await t.list();
+  assert.equal(byId(view, "thr_parent").decision, "flag");
+  assert.match(byId(view, "thr_parent").reason, /child thr_kid.*uncommitted/);
+  assert.deepEqual(t.acted.filter((entry) => entry.startsWith("archive thr_parent")), []);
+});
+
+test("Archive now refuses a parent whose child is pinned, dirty, or on a checkout bb cannot read", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_parent", title: "p" },
+    { id: "thr_pinned", title: "k", parentThreadId: "thr_parent", pinnedAt: 1 },
+  ]);
+  assert.match((await rejection(t.act("thr_parent", "archive"))).message, /child thr_pinned is protected: pinned in bb/);
+  const u = await lifecycleSetup([
+    { id: "thr_parent", title: "p" },
+    { id: "thr_kid", title: "k", parentThreadId: "thr_parent" },
+  ]);
+  u.state.env.set("env_thr_kid", DIRTY);
+  assert.match((await rejection(u.act("thr_parent", "archive"))).message, /child thr_kid.*uncommitted/);
+  u.state.env.set("env_thr_kid", { outcome: "unavailable", failure: { code: "path_not_found", message: "gone", workspacePath: "/x" } });
+  assert.match((await rejection(u.act("thr_parent", "archive"))).message, /child thr_kid.*could not be read: gone/);
+  assert.deepEqual([...t.acted, ...u.acted], []);
+  // A compact leaves the children alone.
+  await u.act("thr_parent", "compact");
+  assert.deepEqual(u.acted, ["compact thr_parent"]);
+});
+
+test("a clean idle child does not stop an archive of its parent, and a deeper descendant counts too", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_parent", title: "p" },
+    { id: "thr_kid", title: "k", parentThreadId: "thr_parent" },
+    { id: "thr_grandkid", title: "g", parentThreadId: "thr_kid" },
+  ]);
+  await t.act("thr_parent", "archive");
+  assert.deepEqual(t.acted, ["archive thr_parent"]);
+  const u = await lifecycleSetup([
+    { id: "thr_parent", title: "p" },
+    { id: "thr_kid", title: "k", parentThreadId: "thr_parent" },
+    { id: "thr_grandkid", title: "g", parentThreadId: "thr_kid" },
+  ]);
+  u.state.env.set("env_thr_grandkid", DIRTY);
+  assert.match((await rejection(u.act("thr_parent", "archive"))).message, /child thr_grandkid.*uncommitted/);
+});

@@ -171,8 +171,9 @@ export const COMMENTS_QUERY = `query SgcIssueComments($id: String!, $after: Stri
 
 // Smaller pages than the question reads: each issue carries its comments too.
 const LIFECYCLE_PAGE = 25;
-const LIFECYCLE_COMMENTS = 30;
-const LIFECYCLE_FIELDS = `id identifier title url updatedAt team { key } state { name type } labels(first: 20) { nodes { name parent { name } } } comments(first: ${LIFECYCLE_COMMENTS}, orderBy: createdAt) { nodes { body createdAt } }`;
+// A claim is near the start of an issue's comments or near the end, so both ends are read: the oldest and the newest.
+const LIFECYCLE_COMMENTS = 15;
+const LIFECYCLE_FIELDS = `id identifier title url updatedAt team { key } state { name type } labels(first: 20) { nodes { name parent { name } } } comments(first: ${LIFECYCLE_COMMENTS}, orderBy: createdAt) { nodes { body createdAt } } latest: comments(last: ${LIFECYCLE_COMMENTS}, orderBy: createdAt) { nodes { body createdAt } }`;
 
 export const LIFECYCLE_ISSUES_QUERY = `query SgcLifecycleIssues($teamKey: String!, $since: DateTimeOrDuration!, $after: String) {
   issues(first: ${LIFECYCLE_PAGE}, after: $after, filter: { team: { key: { eq: $teamKey } }, updatedAt: { gte: $since } }) {
@@ -281,6 +282,7 @@ interface LifecycleNode {
   state: { name: string; type: string } | null;
   labels: { nodes: Array<{ name: string; parent?: { name: string } | null }> };
   comments: { nodes: Array<{ body: string; createdAt: string }> };
+  latest?: { nodes: Array<{ body: string; createdAt: string }> };
 }
 
 interface PausedNode {
@@ -395,7 +397,10 @@ function toLifecycle(node: LifecycleNode): LifecycleIssue {
     teamKey: node.team?.key ?? "",
     state: node.state === null ? null : { name: node.state.name, type: node.state.type },
     labels: node.labels.nodes.map((label) => labelName({ name: label.name, group: label.parent?.name ?? null })),
-    comments: node.comments.nodes.map((comment) => ({ body: comment.body, createdAt: comment.createdAt })),
+    // The oldest and the newest comments; an issue with few comments returns the same ones twice.
+    comments: [...node.comments.nodes, ...(node.latest?.nodes ?? [])]
+      .filter((comment, index, all) => all.findIndex((other) => other.createdAt === comment.createdAt && other.body === comment.body) === index)
+      .map((comment) => ({ body: comment.body, createdAt: comment.createdAt })),
   };
 }
 

@@ -26,6 +26,7 @@ import {
 import {
   HOUR,
   MINUTE,
+  protectionOf,
   safetyBlockers,
   cacheExpiry,
   classify,
@@ -55,40 +56,6 @@ const THREADS_PAGE = 200;
 const MAX_PAGES = 50;
 const READ_CONCURRENCY = 6;
 const MAX_LOG_LIMIT = 500;
-
-/** Appended to the plugin's migration list; never reorder or edit. */
-export const THREADS_MIGRATIONS: readonly string[] = [
-  `CREATE TABLE IF NOT EXISTS thread_snapshot (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    taken_at INTEGER NOT NULL,
-    body TEXT NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS thread_decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    at INTEGER NOT NULL,
-    thread_id TEXT NOT NULL,
-    thread_title TEXT NOT NULL,
-    cycle INTEGER NOT NULL,
-    decision TEXT NOT NULL,
-    state TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    inputs TEXT NOT NULL,
-    result TEXT NOT NULL
-  )`,
-  `CREATE INDEX IF NOT EXISTS thread_decisions_by_thread ON thread_decisions (thread_id, cycle, id)`,
-  `CREATE TABLE IF NOT EXISTS thread_keeps (
-    thread_id TEXT PRIMARY KEY,
-    until INTEGER NOT NULL,
-    at INTEGER NOT NULL
-  )`,
-  // The reason a failed action failed.
-  `ALTER TABLE thread_decisions ADD COLUMN error TEXT`,
-  // When the steward was last told that a thread needs attention: once a day per thread.
-  `CREATE TABLE IF NOT EXISTS thread_flags (
-    thread_id TEXT PRIMARY KEY,
-    sent_at INTEGER NOT NULL
-  )`,
-];
 
 /** A flagged thread is reported to the steward at most this often. */
 export const FLAG_EVERY_MS = 24 * HOUR;
@@ -332,6 +299,18 @@ export function createThreads(deps: ThreadsDeps) {
     classification: Classification;
   }
 
+  /** Read the checkout of a thread and of each thread below it, the state an archive of the thread depends on. */
+  async function readArchiveEnvs(facts: ThreadFacts): Promise<void> {
+    const reads = new Map<string, Promise<EnvFacts>>();
+    const envOf = (environmentId: string | null | undefined): Promise<EnvFacts | null> => {
+      if (environmentId === null || environmentId === undefined) return Promise.resolve(null);
+      if (!reads.has(environmentId)) reads.set(environmentId, readEnv(sdk, environmentId));
+      return reads.get(environmentId)!;
+    };
+    facts.env = await envOf(facts.environmentId);
+    for (const child of facts.descendants ?? []) child.env = await envOf(child.environmentId);
+  }
+
   /** Host names, by id; empty when bb cannot list them. */
   async function readHostNames(): Promise<Map<string, string>> {
     try {
@@ -355,6 +334,15 @@ export function createThreads(deps: ThreadsDeps) {
       if (row.parentThreadId !== null) childrenOf.set(row.parentThreadId, [...(childrenOf.get(row.parentThreadId) ?? []), row.id]);
     }
     const byId = new Map(listed.map((row) => [row.id, row]));
+    const below = (id: string, seen: Set<string> = new Set()): string[] => {
+      const out: string[] = [];
+      for (const child of childrenOf.get(id) ?? []) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        out.push(child, ...below(child, seen));
+      }
+      return out;
+    };
     const working = new Map<string, boolean>();
     const descendantWorking = (id: string, seen: Set<string> = new Set()): boolean => {
       const known = working.get(id);
@@ -412,6 +400,15 @@ export function createThreads(deps: ThreadsDeps) {
         childWorking: descendantWorking(thread.id) || thread.activity.activeBackgroundAgentCount + thread.activity.activeBackgroundCommandCount + thread.activity.activeWorkflowCount > 0,
         environmentId: thread.environmentId,
         hostId: thread.environmentHostId ?? null,
+        // An archive takes these with it, so each one's protection and checkout count.
+        descendants: below(thread.id).map((childId) => {
+          const child = byId.get(childId)!;
+          return {
+            id: childId,
+            protectedBy: protectionOf({ id: childId, pinned: child.pinnedAt !== null }, { now: at, stewardThread: settings.stewardThread, keptUntil: kept.get(childId) ?? null }),
+            environmentId: child.environmentId,
+          };
+        }),
       };
       const ctx: LifecycleContext = { now: at, issue, stewardThread: settings.stewardThread, keptUntil: kept.get(thread.id) ?? null };
       const classification = classify(facts, ctx);
@@ -419,7 +416,7 @@ export function createThreads(deps: ThreadsDeps) {
       let verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
       // An archive needs the checkout's state: read it only for a thread that could be archived now.
       if ((classification.state === "done" || classification.state === "parked") && verdict.inWindow) {
-        facts.env = thread.environmentId === null ? null : await readEnv(sdk, thread.environmentId);
+        await readArchiveEnvs(facts);
         verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
       }
       const row: ThreadRowView = {
@@ -471,9 +468,7 @@ export function createThreads(deps: ThreadsDeps) {
       record(entry, "refused", { reason: `changed since the decision: now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})` });
       return false;
     }
-    if (action === "archive" && fresh.facts.env === undefined) {
-      fresh.facts.env = fresh.facts.environmentId === null ? null : await readEnv(sdk, fresh.facts.environmentId);
-    }
+    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
     const blockers = actionBlockers(fresh, action);
     if (blockers.length > 0) {
       record(entry, "refused", { reason: `changed since the decision: ${blockers.join("; ")}` });
@@ -554,8 +549,8 @@ export function createThreads(deps: ThreadsDeps) {
     if (facts.status === "error") blockers.push("the thread is in error");
     else if (ACTIVE.has(facts.status)) blockers.push("a turn is running");
     if (facts.queuedCount > 0) blockers.push("it has a queued message");
-    // A compact leaves the checkout alone, so only an archive reads it.
-    blockers.push(...safetyBlockers(action === "archive" ? facts : { ...facts, env: null }, ctx));
+    // A compact leaves the checkout and the children alone.
+    blockers.push(...safetyBlockers(action === "archive" ? facts : { ...facts, env: null, descendants: [] }, ctx));
     return blockers;
   }
 
@@ -571,7 +566,7 @@ export function createThreads(deps: ThreadsDeps) {
         recordAction(entry, "keep", "kept for 24 hours by the owner (Keep on the page)", "done");
         return { message: `${threadId} is protected for 24 hours.` };
       }
-      if (action === "archive") entry.facts.env = entry.facts.environmentId === null ? null : await readEnv(sdk, entry.facts.environmentId);
+      if (action === "archive") await readArchiveEnvs(entry.facts);
       const blockers = actionBlockers(entry, action);
       if (blockers.length > 0) throw new Refusal("conflict", `Cannot ${action} ${threadId}: ${blockers.join("; ")}.`);
       const reason = `${action === "archive" ? "Archive" : "Compact"} now: asked from the page`;

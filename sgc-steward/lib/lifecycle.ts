@@ -73,6 +73,16 @@ export interface EnvFacts {
   detail: string | null;
 }
 
+/** A thread below another, which an archive of the parent archives with it. */
+export interface DescendantFacts {
+  id: string;
+  /** Why it is protected, or null. */
+  protectedBy: string | null;
+  environmentId?: string | null;
+  /** Its checkout, as for the thread: null for none, absent when not read. */
+  env?: EnvFacts | null;
+}
+
 export interface ThreadFacts {
   id: string;
   title: string;
@@ -95,6 +105,8 @@ export interface ThreadFacts {
   oldestQueuedAt: number | null;
   /** Some descendant thread is running a turn. */
   childWorking: boolean;
+  /** Every unarchived thread below this one: archiving the parent archives them too. */
+  descendants?: DescendantFacts[];
   environmentId: string | null;
   hostId: string | null;
   /** Null for a thread with no environment; absent when it was not read. */
@@ -147,13 +159,16 @@ export function windowMs(lifeMs: number): number {
 
 const ACTIVE_STATUSES = new Set(["active", "starting", "stopping", "pending", "provisioning"]);
 
-function isProtected(facts: ThreadFacts, ctx: LifecycleContext): string | null {
-  if (facts.id === MISSION_CONTROL_THREAD) return "Mission Control";
-  if (ctx.stewardThread !== undefined && facts.id === ctx.stewardThread) return "the steward thread";
-  if (facts.pinned) return "pinned in bb";
+/** Why a thread is protected, or null. */
+export function protectionOf(thread: { id: string; pinned: boolean }, ctx: Pick<LifecycleContext, "now" | "stewardThread" | "keptUntil">): string | null {
+  if (thread.id === MISSION_CONTROL_THREAD) return "Mission Control";
+  if (ctx.stewardThread !== undefined && thread.id === ctx.stewardThread) return "the steward thread";
+  if (thread.pinned) return "pinned in bb";
   if (ctx.keptUntil !== undefined && ctx.keptUntil !== null && ctx.keptUntil > ctx.now) return "kept by the owner";
   return null;
 }
+
+const isProtected = (facts: ThreadFacts, ctx: LifecycleContext) => protectionOf(facts, ctx);
 
 function hasLabel(issue: IssueFacts, test: (name: string) => boolean): boolean {
   return issue.labels.some((label) => test(label.split("/").pop() ?? label));
@@ -189,20 +204,26 @@ export function classify(facts: ThreadFacts, ctx: LifecycleContext): Classificat
   return { state: "idle-active", reason: `${issue.identifier} is ${issue.stateName}` };
 }
 
-/** What stops an archive: empty when it is safe. */
+function envBlockers(env: EnvFacts | null | undefined, who: string): string[] {
+  if (env === undefined) return [`${who} environment was not checked`];
+  if (env === null) return [];
+  if (!env.known) return [`${who} environment could not be read${env.detail === null ? "" : `: ${env.detail}`}`];
+  return [...(env.clean ? [] : [`${who} environment has uncommitted changes`]), ...(env.ahead ? [`${who} branch has commits not on its base`] : [])];
+}
+
+/**
+ * What stops an archive: empty when it is safe. An archive takes the thread's
+ * descendants with it, so each of them must be unprotected and safe as well.
+ */
 export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
   const blockers: string[] = [];
   const guarded = isProtected(facts, ctx);
   if (guarded !== null) blockers.push(`the thread is protected: ${guarded}`);
   if (facts.childWorking) blockers.push("a child thread is working");
-  const env = facts.env;
-  if (env === undefined) blockers.push("the environment was not checked");
-  else if (env !== null) {
-    if (!env.known) blockers.push(`the environment could not be read${env.detail === null ? "" : `: ${env.detail}`}`);
-    else {
-      if (!env.clean) blockers.push("the environment has uncommitted changes");
-      if (env.ahead) blockers.push("the branch has commits not on its base");
-    }
+  blockers.push(...envBlockers(facts.env, "the"));
+  for (const child of facts.descendants ?? []) {
+    if (child.protectedBy !== null) blockers.push(`child ${child.id} is protected: ${child.protectedBy}`);
+    blockers.push(...envBlockers(child.env, `child ${child.id}'s`));
   }
   return blockers;
 }

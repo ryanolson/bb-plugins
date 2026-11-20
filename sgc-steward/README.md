@@ -143,7 +143,7 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 
 **State.** `working` (a turn is running), `waiting` (idle with a queued message, or while a child thread, background agent, or workflow runs), `idle-active` (idle, and its issue is In Progress or Todo, or it has no issue yet, or Linear could not be read), `parked` (its issue is Backlog with `paused`, or has a `waiting:*` label, or has been In Review with no change for 48 hours), `done` (its issue is Done or Canceled), `orphan` (no issue and idle for 24 hours), `stuck` (error status, or a queued turn older than 30 minutes). Mission Control (`thr_zrybxd2ijw`), the `stewardThread`, and any thread pinned in bb are `protected`, and never anything else.
 
-**Issue.** A thread's issue is the one named by its latest signed `claim:` comment (`[agent:<tool> <thread id>] claim: ...`), else by a `<TEAM>-NNNN` or `NNNN:` prefix in its title, where `<TEAM>` is the team key setting. Each pass reads the team's issues changed in the last 30 days, with their first 30 comments, and asks for a titled issue that is older by name.
+**Issue.** A thread's issue is the one named by its latest signed `claim:` comment (`[agent:<tool> <thread id>] claim: ...`), else by a `<TEAM>-NNNN` or `NNNN:` prefix in its title, where `<TEAM>` is the team key setting. Each pass reads the team's issues changed in the last 30 days, with their oldest 15 and newest 15 comments, and asks for a titled issue that is older by name.
 
 **Cache expiry.** bb's `compactionOfferAt`, else the thread's last activity plus its provider's cache life: 1 hour for `claude-code` and `codex`, 6 hours for `pi` and `acp-opencode`, and 1 hour for a provider not in the table (`DEFAULT_CACHE_LIFE_MS` in `lib/lifecycle.ts`).
 
@@ -158,7 +158,7 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 | `stuck`, `orphan` | `flag`, whenever seen: a thread can stay stuck long after its cache is cold |
 | `working`, `waiting`, `protected` | none |
 
-Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
+Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An archive also archives the thread's children, so every thread below it must be unprotected, with a clean checkout and no commits ahead of its base. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
 
 ### Act mode
 

@@ -116,6 +116,35 @@ export const STORE_MIGRATIONS: readonly string[] = [
   )`,
   // At most one unfinished Resume per issue.
   `CREATE UNIQUE INDEX IF NOT EXISTS resume_actions_pending ON resume_actions (issue_id) WHERE state = 'pending'`,
+  // The thread lifecycle (threads.ts): the last snapshot, the decision log, the owner's keeps, and the steward flags.
+  `CREATE TABLE IF NOT EXISTS thread_snapshot (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    taken_at INTEGER NOT NULL,
+    body TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS thread_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    thread_title TEXT NOT NULL,
+    cycle INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    inputs TEXT NOT NULL,
+    result TEXT NOT NULL,
+    error TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS thread_decisions_by_thread ON thread_decisions (thread_id, cycle, id)`,
+  `CREATE TABLE IF NOT EXISTS thread_keeps (
+    thread_id TEXT PRIMARY KEY,
+    until INTEGER NOT NULL,
+    at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS thread_flags (
+    thread_id TEXT PRIMARY KEY,
+    sent_at INTEGER NOT NULL
+  )`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn" | "expired";

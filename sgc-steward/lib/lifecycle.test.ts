@@ -147,6 +147,15 @@ test("the decision is made only in the last 15 minutes of the cache", () => {
   assert.match(verdict(-1).reason, /cold/);
 });
 
+test("a thread parked after 48 quiet hours in review has a cold cache, so the window gives it no decision", () => {
+  const ctx = context({ issue: issue("In Review", "started", { updatedAt: NOW - 49 * HOUR }) });
+  const facts = thread({ lastActivityAt: NOW - 49 * HOUR });
+  const classification = classify(facts, ctx);
+  assert.equal(classification.state, "parked");
+  const verdict = decide(facts, classification, ctx);
+  assert.deepEqual([verdict.decision, verdict.reason], ["none", "the cache is already cold"]);
+});
+
 test("a cache that lives under 15 minutes decides in its last 5 minutes", () => {
   const done = context({ issue: issue("Done", "completed") });
   const short = (left: number) => {
@@ -219,6 +228,22 @@ for (const [name, change, pattern] of UNSAFE) {
     assert.match(verdict.reason, pattern);
   });
 }
+
+// Archiving a parent archives its children, so a child's checkout and protection count.
+test("a child that is protected, dirty, ahead, or unreadable blocks an archive of its parent; a clean child does not", () => {
+  const ctx = context({ issue: issue("Done", "completed") });
+  const child = (extra: object) => ({ id: "thr_kid", protectedBy: null, env: CLEAN, ...extra });
+  const blockers = (descendants: object[]) => safetyBlockers(expiringIn(10 * MINUTE, { descendants } as Partial<ThreadFacts>), ctx).join(";");
+  assert.equal(blockers([child({})]), "");
+  assert.match(blockers([child({ protectedBy: "pinned in bb" })]), /child thr_kid is protected: pinned in bb/);
+  assert.match(blockers([child({ env: { ...CLEAN, clean: false } })]), /child thr_kid.*uncommitted/);
+  assert.match(blockers([child({ env: { ...CLEAN, ahead: true } })]), /child thr_kid.*commits not on its base/);
+  assert.match(blockers([child({ env: { ...CLEAN, known: false, detail: "gone" } })]), /child thr_kid.*could not be read: gone/);
+  assert.match(blockers([child({ env: undefined })]), /child thr_kid.*not checked/);
+  assert.equal(blockers([child({ env: null })]), "");
+  const facts = expiringIn(10 * MINUTE, { descendants: [child({ env: { ...CLEAN, clean: false } })] } as Partial<ThreadFacts>);
+  assert.equal(decide(facts, { state: "done", reason: "x" }, ctx).decision, "flag");
+});
 
 test("a thread with no environment is safe to archive", () => {
   const ctx = context({ issue: issue("Done", "completed") });
