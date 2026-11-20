@@ -866,3 +866,23 @@ test("archive refuses a parent if its child becomes dirty during the issue comme
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("archive refuses a thread that moves to a disabled archive category", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], {
+    settings: { ...ACT, lifecycleActions: "archive-done" },
+  });
+  t.issue("TEAM-1", "state-done");
+  const listIssues = t.linear.listLifecycleIssues.bind(t.linear);
+  let reads = 0;
+  t.linear.listLifecycleIssues = async (teamKey) => {
+    const issues = await listIssues(teamKey);
+    if (++reads === 1) return issues;
+    return issues.map((issue) => ({
+      ...issue,
+      state: { name: "In Progress", type: "started" },
+      labels: ["waiting:owner"],
+    }));
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});
