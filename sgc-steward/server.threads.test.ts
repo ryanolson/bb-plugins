@@ -886,3 +886,18 @@ test("archive refuses a thread that moves to a disabled archive category", async
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("compact is skipped when the cache expires during the final read", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_a", title: "1: in progress", tokens: 300_000, updatedAt: START - HOUR + 1_000 },
+  ], { settings: ACT });
+  t.issue("TEAM-1", "state-started");
+  const listIssues = t.linear.listLifecycleIssues.bind(t.linear);
+  let reads = 0;
+  t.linear.listLifecycleIssues = async (teamKey) => {
+    if (++reads === 2) t.clock.now += 2_000;
+    return listIssues(teamKey);
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});
