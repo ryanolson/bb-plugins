@@ -85,8 +85,6 @@ export interface ThreadsDeps {
   linear(): Promise<{ client: LinearClient; teamKey: string } | null>;
   /** Post a comment on a Linear issue under an id that `key` derives, so a repeat with the same key posts nothing new, whatever its text. Errors come back without the key. */
   comment(issueId: string, body: string, key: string): Promise<void>;
-  /** The issue as Linear has it now, or null when it has gone; undefined when Linear could not be read. */
-  issue(identifier: string): Promise<IssueFacts | null | undefined>;
   /** The steward thread to tell, or null when none is set or bb reports it gone. */
   steward(): Promise<string | null>;
   /** Send a message to a thread, queued if it is running. */
@@ -131,8 +129,6 @@ function withComments(issue: LifecycleIssue): IssueWithComments {
 
 const asFacts = ({ comments: _comments, ...facts }: IssueWithComments): IssueFacts => facts;
 
-/** A Linear issue as the lifecycle reads it. */
-export const lifecycleFacts = (issue: LifecycleIssue): IssueFacts => asFacts(withComments(issue));
 
 /** Whether a remote has a branch of this name. A failed or cut-off read says no. */
 async function onRemote(sdk: Sdk, environmentId: string, branch: string): Promise<boolean> {
@@ -346,9 +342,9 @@ export function createThreads(deps: ThreadsDeps) {
   /**
    * Every thread's facts, state, and verdict now. With `only`, just that
    * thread's, and without reading Linear: a manual action needs the thread as
-   * it is, not its issue. A caller that has the issue passes it as `known`.
+   * it is, not its issue. `lookup` reads Linear for that thread's issue too, as the pass did.
    */
-  async function collect(only?: string, known?: { issue: IssueFacts | null | undefined }): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
+  async function collect(only?: string, options: { lookup?: boolean } = {}): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
     const settings = await deps.settings();
     const at = now();
     const listed = await listThreads();
@@ -377,12 +373,12 @@ export function createThreads(deps: ThreadsDeps) {
       return result;
     };
 
-    const linear = only === undefined ? await readIssues() : { error: "not read" };
+    const linear = only === undefined || options.lookup ? await readIssues() : { error: "not read" };
     const hostNames = await readHostNames();
     const kept = new Map((activeKeeps.all(at) as Array<{ thread_id: string; until: number }>).map((row) => [row.thread_id, row.until]));
     const issueCache = new Map<string, IssueWithComments | null>();
     const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
-      if (only !== undefined) return known?.issue;
+      if (only !== undefined && !options.lookup) return undefined;
       if ("error" in linear) return undefined;
       const found = issueFor(thread, linear.issues, linear.teamKey);
       if (found !== null) return asFacts(found);
@@ -488,18 +484,14 @@ export function createThreads(deps: ThreadsDeps) {
    */
   async function carryOut(entry: Entry, settings: ThreadsSettings): Promise<boolean> {
     const action = entry.row.decision === "compact" ? "compact" : "archive";
-    // The issue may have changed too: a Done that reopened is no reason to archive.
-    let issue = entry.issue;
-    if (issue !== null && issue !== undefined) {
-      issue = await deps.issue(issue.identifier);
-      if (issue === undefined) {
-        record(entry, "refused", { reason: "changed since the decision: the issue could not be read again" });
-        return false;
-      }
-    }
-    const fresh = (await collect(entry.row.id, { issue })).entries[0];
+    // The thread's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened.
+    const fresh = (await collect(entry.row.id, { lookup: true })).entries[0];
     if (fresh === undefined) {
       record(entry, "refused", { reason: "changed since the decision: the thread is gone" });
+      return false;
+    }
+    if (entry.issue?.identifier !== fresh.issue?.identifier) {
+      record(entry, "refused", { reason: `changed since the decision: its issue is now ${fresh.issue?.identifier ?? "none"}, not ${entry.issue?.identifier ?? "none"}` });
       return false;
     }
     if (fresh.row.decision !== entry.row.decision) {

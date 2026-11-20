@@ -769,15 +769,36 @@ test("a branch with commits ahead of its base is safe to archive when a remote h
 test("an issue that reopened between the decision and the action stops the archive", async () => {
   const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
   const issue = t.issue("TEAM-1", "state-done");
-  // The list the decision used says Done; the read just before the action says In Progress.
-  t.linear.getLifecycleIssue = async (id: string) => {
-    const found = t.linear.find(id)!;
-    return { ...t.linear.lifecycle(found), state: { name: "In Progress", type: "started" } };
+  // The read the decision used says Done; the read just before the action says In Progress.
+  const original = t.linear.listLifecycleIssues.bind(t.linear);
+  let reads = 0;
+  t.linear.listLifecycleIssues = async (teamKey: string) => {
+    reads += 1;
+    const issues = await original(teamKey);
+    return reads === 1 ? issues : issues.map((found) => ({ ...found, state: { name: "In Progress", type: "started" } }));
   };
   await t.pass();
   assert.deepEqual(t.acted, []);
   assert.equal(issue.comments.length, 0);
   assert.deepEqual((await t.log()).map((row) => row.result), ["refused"]);
+});
+
+test("a thread retitled to another issue between the decision and the action is not archived", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: finished" }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  let lists = 0;
+  const original = t.state.threads;
+  t.sdk.stub("threads.list", async () => {
+    lists += 1;
+    // The first list is the decision; later lists see the new title.
+    return original.map((thread) => t.row({ ...thread, title: lists === 1 ? "1: finished" : "2: now this" }));
+  });
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+  const entry = (await t.log())[0]!;
+  assert.equal(entry.result, "refused");
+  assert.match(entry.reason, /changed since the decision/);
 });
 
 test("a done parent whose idle child has a queued message is not archived", async () => {

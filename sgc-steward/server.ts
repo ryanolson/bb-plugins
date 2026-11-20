@@ -72,7 +72,7 @@ import { Refusal } from "./lib/refusal.ts";
 import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
 import { parseCacheLifeOverrides, parseLifecycleActions } from "./lib/lifecycle.ts";
-import { THREADS_POLL_MS, lifecycleFacts, createThreads, threadsCommand } from "./threads.ts";
+import { THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -191,16 +191,6 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       },
       // A Linear write: ahead of polls and under the plugin's one lock. The comment's id comes from its text, so a repeat posts nothing new.
       comment: async (issueId, body, key) => void (await writeLinear((linear) => postComment(linear, issueId, body, answerCommentId(issueId, key)))),
-      issue: async (identifier) => {
-        const { linearApiKey } = await settings.get();
-        if (!linearApiKey) return undefined;
-        try {
-          const found = await clientFor(linearApiKey).getLifecycleIssue(identifier);
-          return found === null ? null : lifecycleFacts(found);
-        } catch {
-          return undefined;
-        }
-      },
       steward: () => stewardFor(),
       send: async (threadId, text) => void (await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] })),
       // Reads only: it never takes the plugin's Linear lock, and errors say nothing of the key.
