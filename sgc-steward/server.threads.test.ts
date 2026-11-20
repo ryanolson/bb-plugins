@@ -564,7 +564,7 @@ test("an unsafe archive candidate is flagged to the steward with the reason", as
   assert.match(t.sends[0]!.input[0]!.text, /^\[sgc-steward\] Thread thr_dirty stuck: done but not safe to archive: the environment has uncommitted changes$/);
 });
 
-test("a failed steward message is tried again in the next pass, and not logged as sent", async () => {
+test("a failed steward message is not sent again the same day, and is logged as failed", async () => {
   const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: ACT });
   t.issue("TEAM-2", "state-started");
   let fail = true;
@@ -577,11 +577,11 @@ test("a failed steward message is tried again in the next pass, and not logged a
   assert.deepEqual(t.sends, []);
   assert.equal((await t.log())[0]!.result, "failed");
   fail = false;
-  // A send whose reply was lost may have landed, so the retry waits an hour instead of repeating at once.
-  t.clock.now += 5 * MINUTE;
+  // A send whose reply was lost may have landed, and a thread is flagged once a day at most: the next try is tomorrow.
+  t.clock.now += HOUR;
   await t.pass();
   assert.equal(t.sends.length, 0);
-  t.clock.now += HOUR;
+  t.clock.now += 24 * HOUR;
   await t.pass();
   assert.equal(t.sends.length, 1);
 });
@@ -936,4 +936,3 @@ test("a steward flag whose send landed with no reply is delivered once per day",
   await t.pass();
   assert.equal(t.sends.length, 1);
 });
-||||||| parent of adeaa89 (Test archive comment deduplication after unpinning)

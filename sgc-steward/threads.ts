@@ -57,9 +57,6 @@ const MAX_PAGES = 50;
 const READ_CONCURRENCY = 6;
 const MAX_LOG_LIMIT = 500;
 
-/** After a failed send, the steward is told again no sooner than this. */
-const FLAG_RETRY_MS = HOUR;
-
 /** A flagged thread is reported to the steward at most this often. */
 export const FLAG_EVERY_MS = 24 * HOUR;
 
@@ -349,8 +346,11 @@ export function createThreads(deps: ThreadsDeps) {
     const at = now();
     const listed = await listThreads();
     const childrenOf = new Map<string, string[]>();
+    // An archive follows the parent and the lifecycle owner alike, so both edges are walked.
     for (const row of listed) {
-      if (row.parentThreadId !== null) childrenOf.set(row.parentThreadId, [...(childrenOf.get(row.parentThreadId) ?? []), row.id]);
+      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId])) {
+        if (owner !== null) childrenOf.set(owner, [...(childrenOf.get(owner) ?? []), row.id]);
+      }
     }
     const byId = new Map(listed.map((row) => [row.id, row]));
     const below = (id: string, seen: Set<string> = new Set()): string[] => {
@@ -498,6 +498,11 @@ export function createThreads(deps: ThreadsDeps) {
       record(entry, "refused", { reason: `changed since the decision: now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})` });
       return false;
     }
+    const kind = actionFor(fresh);
+    if (kind !== actionFor(entry) || kind === null || !settings.actions.has(kind)) {
+      record(entry, "refused", { reason: `changed since the decision: its category is now ${fresh.row.state}, which is not the action that was decided or is turned off` });
+      return false;
+    }
     if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
     const blockers = actionBlockers(fresh, action);
     if (blockers.length > 0) {
@@ -513,11 +518,25 @@ export function createThreads(deps: ThreadsDeps) {
       const env = fresh.facts.env;
       const body = `[agent:sgc-steward] archived ${fresh.row.id}: ${fresh.row.reason}; branch ${env?.branch ?? "none"} at ${env?.head ?? "none"}`;
       try {
-        await deps.comment(fresh.issue.id, body, `archived:${fresh.row.id}:${fresh.facts.lastActivityAt}`);
+        await deps.comment(fresh.issue.id, body, `archived:${fresh.row.id}:${fresh.issue.id}`);
       } catch (error) {
         record(entry, "failed", { error: `could not post the issue comment: ${message(error)}` });
         return false;
       }
+    }
+    // The comment and the reads above take time: check the thread's checkouts and its cache once more, as late as possible.
+    if (action === "archive") {
+      fresh.facts.env = undefined;
+      for (const child of fresh.facts.descendants ?? []) child.env = undefined;
+      await readArchiveEnvs(fresh.facts);
+      const late = actionBlockers(fresh, "archive");
+      if (late.length > 0) {
+        record(entry, "refused", { reason: `changed since the decision: ${late.join("; ")}` });
+        return false;
+      }
+    } else if (now() > fresh.row.expiresAt) {
+      record(entry, "refused", { reason: "changed since the decision: the cache expired" });
+      return false;
     }
     try {
       if (action === "archive") await sdk.threads.archive({ threadId: fresh.row.id });
@@ -545,8 +564,7 @@ export function createThreads(deps: ThreadsDeps) {
     try {
       await deps.send(steward, `[sgc-steward] Thread ${id} stuck: ${entry.row.reason}`);
     } catch (error) {
-      // A reply that was lost may hide a message that landed, so the retry waits an hour rather than repeating at the next pass.
-      setFlag.run(id, now() - FLAG_EVERY_MS + FLAG_RETRY_MS);
+      // A reply that was lost may hide a message that landed, and the steward is told once a day at most, so the time stays: the next try is tomorrow.
       record(entry, "failed", { error: `could not tell the steward: ${message(error)}` });
       return;
     }
