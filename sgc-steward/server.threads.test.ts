@@ -129,7 +129,7 @@ test("bb's own cache expiry wins over the provider table", async () => {
 test("a signed claim finds the issue; the title prefix is the fallback; no match is an orphan after a day", async () => {
   const t = await lifecycleSetup([
     { id: "thr_claimed", title: "no number in this title", updatedAt: START - 50 * MINUTE },
-    { id: "thr_titled", title: "STRGT-9 wrongly keyed", updatedAt: START - 50 * MINUTE },
+    { id: "thr_titled", title: "OTHER-9 wrongly keyed", updatedAt: START - 50 * MINUTE },
     { id: "thr_lost", title: "wandering", updatedAt: START - 30 * HOUR },
   ]);
   const claimed = t.issue("TEAM-5", "state-started");
@@ -139,7 +139,7 @@ test("a signed claim finds the issue; the title prefix is the fallback; no match
   assert.equal(byId(view, "thr_claimed").issue?.identifier, "TEAM-5");
   assert.equal(byId(view, "thr_lost").state, "orphan");
   assert.equal(byId(view, "thr_lost").decision, "flag");
-  // STRGT is not this fake team's key, so the title names nothing here.
+  // OTHER is not this fake team's key, so the title names nothing here.
   assert.equal(byId(view, "thr_titled").issue, null);
 });
 

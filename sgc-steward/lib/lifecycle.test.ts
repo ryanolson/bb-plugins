@@ -48,7 +48,7 @@ function thread(extra: Partial<ThreadFacts> = {}): ThreadFacts {
 }
 
 function issue(stateName: string, stateType: string, extra: Partial<IssueFacts> = {}): IssueFacts {
-  return { identifier: "STRGT-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, ...extra };
+  return { identifier: "TEAM-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, ...extra };
 }
 
 function context(extra: Partial<LifecycleContext> = {}): LifecycleContext {
@@ -210,7 +210,7 @@ for (const [name, change, pattern] of UNSAFE) {
     const facts = expiringIn(10 * MINUTE, change);
     assert.match(safetyBlockers(facts, ctx).join(";"), pattern);
     // Classified as done, as the caller would for a child that started a moment ago.
-    const verdict = decide(facts, { state: "done", reason: "STRGT-1678 is Done" }, ctx);
+    const verdict = decide(facts, { state: "done", reason: "TEAM-1678 is Done" }, ctx);
     assert.equal(verdict.decision, "flag");
     assert.match(verdict.reason, pattern);
   });
@@ -239,11 +239,11 @@ test("the countdown reads in minutes and hours, and cold once past", () => {
   assert.equal(formatExpiresIn(HOUR + 5 * MINUTE), "1h 5m");
 });
 
-test("a title names its issue by STRGT-NNNN or NNNN:", () => {
-  assert.equal(titleIdentifier("STRGT-1678 thread work", "STRGT"), "STRGT-1678");
-  assert.equal(titleIdentifier("1678: thread work", "STRGT"), "STRGT-1678");
-  assert.equal(titleIdentifier("Coder: STRGT-1678", "STRGT"), null);
-  assert.equal(titleIdentifier("no number", "STRGT"), null);
+test("a title names its issue by TEAM-NNNN or NNNN:", () => {
+  assert.equal(titleIdentifier("TEAM-1678 thread work", "TEAM"), "TEAM-1678");
+  assert.equal(titleIdentifier("1678: thread work", "TEAM"), "TEAM-1678");
+  assert.equal(titleIdentifier("Coder: TEAM-1678", "TEAM"), null);
+  assert.equal(titleIdentifier("no number", "TEAM"), null);
 });
 
 test("a signed claim names a thread", () => {
@@ -259,11 +259,11 @@ test("a claim beats the title prefix; the latest claim wins; the prefix is the f
     comments,
   });
   const issues = [
-    make("STRGT-1", [{ body: "[agent:claude-code thr_a] claim: one", createdAt: 1 }]),
-    make("STRGT-2", [{ body: "[agent:claude-code thr_a] claim: two", createdAt: 2 }]),
-    make("STRGT-1678", []),
+    make("TEAM-1", [{ body: "[agent:claude-code thr_a] claim: one", createdAt: 1 }]),
+    make("TEAM-2", [{ body: "[agent:claude-code thr_a] claim: two", createdAt: 2 }]),
+    make("TEAM-1678", []),
   ];
-  assert.equal(issueFor({ id: "thr_a", title: "1678: x" }, issues, "STRGT")?.identifier, "STRGT-2");
-  assert.equal(issueFor({ id: "thr_b", title: "1678: x" }, issues, "STRGT")?.identifier, "STRGT-1678");
-  assert.equal(issueFor({ id: "thr_b", title: "nothing" }, issues, "STRGT"), null);
+  assert.equal(issueFor({ id: "thr_a", title: "1678: x" }, issues, "TEAM")?.identifier, "TEAM-2");
+  assert.equal(issueFor({ id: "thr_b", title: "1678: x" }, issues, "TEAM")?.identifier, "TEAM-1678");
+  assert.equal(issueFor({ id: "thr_b", title: "nothing" }, issues, "TEAM"), null);
 });

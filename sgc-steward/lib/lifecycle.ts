@@ -245,7 +245,7 @@ export function formatExpiresIn(ms: number): string {
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }
 
-/** Linear identifiers a title names: `STRGT-1678` or `1678:` at the start. */
+/** Linear identifiers a title names: `TEAM-123` or `123:` at the start. */
 export function titleIdentifier(title: string, teamKey: string): string | null {
   const text = title.trim();
   const named = new RegExp(`^${teamKey.replace(/[^A-Za-z0-9]/g, "")}-(\\d+)\\b`, "i").exec(text);
