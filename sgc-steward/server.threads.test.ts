@@ -901,3 +901,24 @@ test("compact is skipped when the cache expires during the final read", async ()
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("an archive retry does not post a second comment after a pin and unpin", async () => {
+  const thread: FakeThread = { id: "thr_done", title: "1: finished" };
+  const t = await lifecycleSetup([thread], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  t.actFails.add("archive");
+  await t.pass();
+  assert.equal(issue.comments.length, 1);
+
+  thread.pinnedAt = (t.clock.now += MINUTE);
+  thread.updatedAt = t.clock.now;
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+
+  thread.pinnedAt = null;
+  thread.updatedAt = (t.clock.now += MINUTE);
+  t.actFails.delete("archive");
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_done"]);
+  assert.equal(issue.comments.length, 1);
+});
