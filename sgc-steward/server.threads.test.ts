@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ThreadsView } from "./threads.ts";
 import { HOUR, MINUTE } from "./lib/lifecycle.ts";
-import { setup, type FakeIssue } from "./test-support.ts";
+import type { DecisionRow } from "./lib/threads-view.ts";
+import { rejection, setup, type FakeIssue } from "./test-support.ts";
 
 const START = Date.parse("2026-11-20T12:00:00Z");
 
@@ -23,7 +24,7 @@ interface FakeThread {
   queuedAt?: number;
 }
 
-const EVERY_READ = new Set(["threads.list", "threads.context", "threads.defaultExecutionOptions", "threads.queuedMessages.list", "environments.status"]);
+const EVERY_READ = new Set(["hosts.list", "threads.list", "threads.context", "threads.defaultExecutionOptions", "threads.queuedMessages.list", "environments.status"]);
 const CLEAN_ENV = { outcome: "available", workspace: { checkout: { kind: "branch", branchName: "f", headSha: "abc" }, mergeBase: { aheadCount: 0 }, workingTree: { state: "clean", hasUncommittedChanges: false } } };
 
 /** The plugin on a fake bb with a clock the test moves, a few threads, and a Linear with issues. */
@@ -52,6 +53,17 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
     if (state.listFails) throw new Error("bb is down");
     return state.threads.map(row);
   });
+  sdk.stub("hosts.list", async () => [{ id: "host_a", name: "spark-d", status: "connected" }]);
+  const acted: string[] = [];
+  const actFails = new Set<string>();
+  for (const action of ["archive", "compact"]) {
+    sdk.stub(`threads.${action}`, async (args: unknown) => {
+      const { threadId } = args as { threadId: string };
+      if (actFails.has(action)) throw new Error(`${action} boom`);
+      acted.push(`${action} ${threadId}`);
+      return action === "archive" ? { archived: [threadId] } : { ok: true };
+    });
+  }
   const find = (args: unknown) => state.threads.find((thread) => thread.id === (args as { threadId: string }).threadId)!;
   sdk.stub("threads.context", async (args: unknown) => {
     const thread = find(args);
@@ -81,7 +93,10 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
     assert.equal(result.exitCode, 0, result.stderr);
     return JSON.parse(result.stdout) as Array<{ threadId: string; decision: string; reason: string; state: string; inputs: Record<string, unknown>; result: string; at: number }>;
   };
-  return { ...kit, clock, state, sdk, issue, list, log, row };
+  const page = async (refresh = false) =>
+    (await kit.harness.behavior.callRpc("threads.list", { refresh })) as { view: ThreadsView | null; log: DecisionRow[] };
+  const act = (threadId: string, action: "keep" | "compact" | "archive") => kit.harness.behavior.callRpc("threads.act", { threadId, action }) as Promise<{ message: string }>;
+  return { ...kit, clock, state, sdk, issue, list, log, row, acted, actFails, page, act };
 }
 
 const byId = (view: ThreadsView, id: string) => view.threads.find((thread) => thread.id === id)!;
@@ -284,4 +299,124 @@ test("the plain table names each column", async () => {
   for (const text of ["THREAD", "STATE", "ISSUE", "PROVIDER/MODEL", "TOKENS", "EXPIRES", "DECISION", "thr_done", "done", "TEAM-1", "claude-code/opus", "150k", "10m", "archive"]) {
     assert.ok(result.stdout.includes(text), `${text} in:\n${result.stdout}`);
   }
+});
+
+// --- the Threads tab's RPC --------------------------------------------------
+
+test("threads.list returns the snapshot, with host names, and the decision log", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }]);
+  t.issue("TEAM-1", "state-done");
+  const { view, log } = await t.page(true);
+  assert.equal(view?.threads[0]?.hostName, "spark-d");
+  assert.equal(view?.threads[0]?.decision, "archive");
+  assert.deepEqual(log.map((entry) => [entry.threadId, entry.decision, entry.result]), [["thr_done", "archive", "observed"]]);
+});
+
+test("threads.list reads bb itself when no snapshot exists yet, and shows the stored one otherwise, without reading", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
+  t.issue("TEAM-1", "state-started");
+  assert.equal((await t.page(false)).view?.threads.length, 1);
+  t.state.listFails = true;
+  assert.equal((await t.page(false)).view?.threads.length, 1, "the stored snapshot, bb not read");
+  await assert.rejects(t.page(true), /bb is down/);
+});
+
+test("Keep protects a thread for 24 hours, and the log records it", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }]);
+  t.issue("TEAM-1", "state-done");
+  assert.equal(byId(await t.list(), "thr_done").decision, "archive");
+  const kept = await t.act("thr_done", "keep");
+  assert.match(kept.message, /protected for 24 hours/);
+  const view = await t.list();
+  assert.deepEqual([byId(view, "thr_done").state, byId(view, "thr_done").decision], ["protected", "none"]);
+  const entry = (await t.log()).find((row) => row.decision === "keep")!;
+  assert.deepEqual([entry.threadId, entry.result], ["thr_done", "done"]);
+  assert.match(entry.reason, /24 hours/);
+  t.clock.now += 24 * HOUR + MINUTE;
+  assert.equal(byId(await t.list(), "thr_done").state, "done");
+  assert.deepEqual(t.acted, []);
+});
+
+test("Compact now compacts an idle thread and logs it", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 250_000 }]);
+  t.issue("TEAM-1", "state-started");
+  const done = await t.act("thr_a", "compact");
+  assert.match(done.message, /Compacting thr_a/);
+  assert.deepEqual(t.acted, ["compact thr_a"]);
+  const entry = (await t.log())[0]!;
+  assert.deepEqual([entry.threadId, entry.decision, entry.result], ["thr_a", "compact", "done"]);
+  assert.match(entry.reason, /asked from the page/);
+});
+
+test("Archive now archives a safe thread and logs it", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
+  t.issue("TEAM-1", "state-started");
+  const done = await t.act("thr_a", "archive");
+  assert.match(done.message, /Archived thr_a/);
+  assert.deepEqual(t.acted, ["archive thr_a"]);
+  assert.deepEqual((await t.log()).map((entry) => [entry.decision, entry.result]), [["archive", "done"]]);
+});
+
+const REFUSALS: Array<[string, FakeThread, (t: Awaited<ReturnType<typeof lifecycleSetup>>) => void, RegExp]> = [
+  ["a protected thread", { id: "thr_p", title: "p", pinnedAt: 1 }, () => {}, /protected/],
+  ["a running thread", { id: "thr_p", title: "p", status: "active" }, () => {}, /turn is running/],
+  ["a thread with a queued message", { id: "thr_p", title: "p", queuedMessageCount: 1 }, () => {}, /queued message/],
+  ["a thread in error", { id: "thr_p", title: "p", status: "error" }, () => {}, /in error/],
+];
+
+for (const action of ["compact", "archive"] as const) {
+  for (const [name, thread, prepare, pattern] of REFUSALS) {
+    test(`${action} now refuses ${name}, takes no action, and says why`, async () => {
+      const t = await lifecycleSetup([thread]);
+      prepare(t);
+      const refused = await rejection(t.act("thr_p", action));
+      assert.match(refused.message, pattern);
+      assert.match(refused.message, new RegExp(`Cannot ${action} thr_p`));
+      assert.deepEqual(t.acted, []);
+      assert.deepEqual(await t.log(), [], "a refusal is not an action, so nothing is logged");
+    });
+  }
+}
+
+test("compact now and archive now refuse a thread whose child is working", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_p", title: "p" },
+    { id: "thr_c", title: "c", parentThreadId: "thr_p", status: "active" },
+  ]);
+  for (const action of ["compact", "archive"] as const) assert.match((await rejection(t.act("thr_p", action))).message, /child thread is working/);
+  assert.deepEqual(t.acted, []);
+});
+
+test("archive now refuses a dirty checkout, a branch with commits not on its base, and a checkout it cannot read", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_dirty", title: "a" },
+    { id: "thr_ahead", title: "b" },
+    { id: "thr_unread", title: "c" },
+  ]);
+  const status = (tree: string, ahead: number) => ({ ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, mergeBase: { aheadCount: ahead }, workingTree: { state: tree, hasUncommittedChanges: tree !== "clean" } } });
+  t.state.env.set("env_thr_dirty", status("dirty_uncommitted", 0));
+  t.state.env.set("env_thr_ahead", status("clean", 2));
+  t.state.env.set("env_thr_unread", { outcome: "unavailable", failure: { code: "path_not_found", message: "gone", workspacePath: "/x" } });
+  assert.match((await rejection(t.act("thr_dirty", "archive"))).message, /uncommitted changes/);
+  assert.match((await rejection(t.act("thr_ahead", "archive"))).message, /commits not on its base/);
+  assert.match((await rejection(t.act("thr_unread", "archive"))).message, /could not be read: gone/);
+  assert.deepEqual(t.acted, []);
+  // A compact does not touch the checkout, so a dirty one does not stop it.
+  await t.act("thr_dirty", "compact");
+  assert.deepEqual(t.acted, ["compact thr_dirty"]);
+});
+
+test("an action that bb refuses is logged as failed, with the error", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
+  t.actFails.add("archive");
+  const refused = await rejection(t.act("thr_a", "archive"));
+  assert.match(refused.message, /archive boom/);
+  const entry = (await t.log())[0]!;
+  assert.deepEqual([entry.decision, entry.result, entry.error], ["archive", "failed", "archive boom"]);
+});
+
+test("an unknown thread is not found", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
+  const refused = await rejection(t.act("thr_nope", "keep"));
+  assert.equal(refused.code, "not_found");
 });

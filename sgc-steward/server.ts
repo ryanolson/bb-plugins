@@ -83,6 +83,8 @@ const EXPIRED_SHOWN_MS = 14 * 86_400_000;
 /** Re-read every issue's comments at least this often, cache or not. */
 const FULL_REFRESH_MS = 60 * 60 * 1000;
 const LABEL_ATTEMPTS = 3;
+/** How many decisions the Threads tab shows below the table. */
+const PAGE_LOG_ROWS = 100;
 const KEY_HINT = "Pipe the key in: <command that prints the key> | bb sgc key --api-key-stdin";
 /** bb clears a needs-configuration notice only when the plugin loads again; saving settings does not reload it. */
 const RELOAD_HINT = "Then run `bb plugin reload sgc-steward` to clear this notice.";
@@ -805,6 +807,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "records.dismiss": ({ askId }) => dismissed(asks.dismissRecord(askId)),
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
       "hosts.list": () => readHosts(bb.sdk, now),
+      "threads.list": async ({ refresh }) => {
+        const view = refresh ? await threads.refresh() : (threads.cached() ?? (await threads.refresh()));
+        return { view, log: threads.decisions(PAGE_LOG_ROWS) };
+      },
+      "threads.act": async ({ threadId, action }) => {
+        try {
+          const done = await threads.act(threadId, action);
+          publish(0);
+          return done;
+        } catch (error) {
+          return await refuse(error);
+        }
+      },
       ...todos.rpc,
       ...pausedWork.rpc,
     });

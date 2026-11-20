@@ -115,7 +115,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 
 ## Thread lifecycle
 
-The plugin watches every thread and decides, before each thread's prompt cache expires, whether to keep it, compact it, or archive it. It only observes for now. `bb sgc threads` lists each thread with its state, issue, provider and model, tokens, cache expiry, decision, and reason. `bb sgc threads log` shows what it decided. Mission Control, the steward, and pinned threads are `protected`. To keep a thread out of an archive, pin it in bb.
+The plugin watches every thread and decides, before each thread's prompt cache expires, whether to keep it, compact it, or archive it. It only observes for now. `bb sgc threads` lists each thread with its state, issue, provider and model, tokens, cache expiry, decision, and reason. `bb sgc threads log` shows what it decided. Mission Control, the steward, and pinned threads are `protected`. The Threads tab on the SGC page shows the same, with the decision log, and Keep, Compact now, and Archive now buttons for the owner. To keep a thread out of an archive, pin it in bb.
 
 To make a thread findable, claim its issue with a signed `claim:` comment, or start its title with `<TEAM>-NNNN` or `NNNN:`. A thread with no issue for 24 hours is an `orphan`, and the steward gets flagged.
 

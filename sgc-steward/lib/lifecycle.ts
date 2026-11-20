@@ -40,7 +40,8 @@ export const REVIEW_PARKED_MS = 48 * HOUR;
 export const STUCK_QUEUE_MS = 30 * MINUTE;
 
 export type ThreadState = "working" | "waiting" | "idle-active" | "parked" | "done" | "orphan" | "stuck" | "protected";
-export type Decision = "archive" | "compact" | "let-cool" | "flag" | "none";
+/** `keep` is only ever the owner's: the plugin itself decides the others. */
+export type Decision = "archive" | "compact" | "let-cool" | "flag" | "keep" | "none";
 
 /** The Linear issue a thread works on, as far as the lifecycle needs it. */
 export interface IssueFacts {

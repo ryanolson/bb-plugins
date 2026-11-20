@@ -160,6 +160,18 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 
 Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
 
+**The Threads tab** shows the same view as `bb sgc threads`. A summary line on top gives the counts by state, the threads going cold in the next 15 minutes, the tokens held in threads whose cache is already cold, and the mode. Below it, the threads are grouped by host (threads on no host last), each group with the soonest cache expiry first: title (a link to the thread), state, issue (a `linear://` link), provider and model, tokens used and window, a live countdown to cache expiry (`cold` once past), the decision and its reason, and the last logged action for the thread. The decision log follows, newest first: time, thread, decision, reason, and result (`observed`, `done`, or `failed` with the error). The tab's badge counts the threads that are `stuck` or flagged. The page reads the stored snapshot every 30 seconds while the tab is open, and Refresh reads bb now; the service itself refreshes every 5 minutes. A running thread is never counted as cold.
+
+Each row has three buttons. They act whatever the mode, because the owner pressed them:
+
+- **Keep** protects the thread for 24 hours: it is `protected` until then, so no decision touches it. The plugin keeps the time in its own SQLite table, not in bb's thread metadata. The keep is logged as `keep`.
+- **Compact now** compacts the thread. It refuses a thread that is protected, running a turn, in error, or holding a queued message or a child at work.
+- **Archive now** archives the thread. It refuses for the same reasons, and also when its checkout is dirty, has commits not on its base, or could not be read. It asks to confirm first.
+
+A refusal says why (`Cannot archive <id>: ...`) and changes nothing and logs nothing. A compact or archive that bb itself refuses is logged as `failed` with bb's error. A success is logged as `done`. The page disables a button for a protected, running, or waiting thread, with the reason on hover; the server checks again.
+
+The RPC is `threads.list` (`{ refresh }`: the snapshot, read now when `refresh` is true or none is stored yet, and the last 100 decisions) and `threads.act` (`{ threadId, action }`).
+
 The service keeps its last snapshot and the decision log in the plugin's SQLite database. A decision is logged once per cache life, and again only when the decision or its reason changes.
 
 ## How it works
@@ -260,13 +272,14 @@ bb plugin logs sgc-steward
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
+- `lib/threads-view.ts`: the Threads tab's view model: row text, grouping by host, the summary, the badge count, and button refusals. The page imports it.
 - `lib/lifecycle.ts`: thread states, cache expiry, and the decision, as pure functions with no bb or Node imports.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
 - `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, and `bb sgc threads`.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, and Threads tabs, its sidebar badge, and the notifier.
 - `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

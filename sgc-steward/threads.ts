@@ -14,14 +14,26 @@ import type Database from "better-sqlite3";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import type { LifecycleIssue, LinearClient } from "./lib/linear.ts";
+import { Refusal } from "./lib/refusal.ts";
 import {
+  type DecisionResult,
+  type DecisionRow,
+  type RowAction,
+  type ThreadRowView,
+  type ThreadsView,
+  tokenCount,
+} from "./lib/threads-view.ts";
+import {
+  HOUR,
   MINUTE,
+  safetyBlockers,
   cacheExpiry,
   classify,
   decide,
   formatExpiresIn,
   issueFor,
   titleIdentifier,
+  type Classification,
   type Decision,
   type EnvFacts,
   type IssueFacts,
@@ -62,50 +74,17 @@ export const THREADS_MIGRATIONS: readonly string[] = [
     result TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS thread_decisions_by_thread ON thread_decisions (thread_id, cycle, id)`,
+  `CREATE TABLE IF NOT EXISTS thread_keeps (
+    thread_id TEXT PRIMARY KEY,
+    until INTEGER NOT NULL,
+    at INTEGER NOT NULL
+  )`,
+  // The reason a failed action failed.
+  `ALTER TABLE thread_decisions ADD COLUMN error TEXT`,
 ];
 
-export type DecisionResult = "observed" | "done" | "failed";
-
-export interface ThreadRowView {
-  id: string;
-  title: string;
-  state: ThreadState;
-  stateReason: string;
-  issue: { identifier: string; url: string; stateName: string } | null;
-  provider: string;
-  model: string | null;
-  hostId: string | null;
-  environmentId: string | null;
-  usedTokens: number | null;
-  contextWindow: number | null;
-  lastActivityAt: number;
-  expiresAt: number;
-  expiresSource: "offer" | "provider-table" | "override";
-  /** Text for the countdown as of the snapshot; callers recompute from `expiresAt`. */
-  expiresIn: string;
-  inWindow: boolean;
-  decision: Decision;
-  reason: string;
-}
-
-export interface ThreadsView {
-  checkedAt: number;
-  mode: "observe" | "act";
-  linearError: string | null;
-  threads: ThreadRowView[];
-}
-
-export interface DecisionRow {
-  id: number;
-  at: number;
-  threadId: string;
-  threadTitle: string;
-  decision: Decision;
-  state: ThreadState;
-  reason: string;
-  result: DecisionResult;
-  inputs: Record<string, unknown>;
-}
+/** How long Keep protects a thread. */
+export const KEEP_MS = 24 * HOUR;
 
 export interface ThreadsSettings {
   stewardThread: string | undefined;
@@ -191,9 +170,11 @@ export function createThreads(deps: ThreadsDeps) {
   const saveSnapshot = db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET taken_at = excluded.taken_at, body = excluded.body");
   const lastDecision = db.prepare("SELECT decision, reason FROM thread_decisions WHERE thread_id = ? AND cycle = ? ORDER BY id DESC LIMIT 1");
   const insertDecision = db.prepare(
-    "INSERT INTO thread_decisions (at, thread_id, thread_title, cycle, decision, state, reason, inputs, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO thread_decisions (at, thread_id, thread_title, cycle, decision, state, reason, inputs, result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
-  const readDecisions = db.prepare("SELECT id, at, thread_id, thread_title, decision, state, reason, inputs, result FROM thread_decisions ORDER BY id DESC LIMIT ?");
+  const readDecisions = db.prepare("SELECT id, at, thread_id, thread_title, decision, state, reason, inputs, result, error FROM thread_decisions ORDER BY id DESC LIMIT ?");
+  const keepStmt = db.prepare("INSERT INTO thread_keeps (thread_id, until, at) VALUES (?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET until = excluded.until, at = excluded.at");
+  const activeKeeps = db.prepare("SELECT thread_id, until FROM thread_keeps WHERE until > ?");
 
   let tail: Promise<unknown> = Promise.resolve();
   function locked<T>(work: () => Promise<T>): Promise<T> {
@@ -311,10 +292,39 @@ export function createThreads(deps: ThreadsDeps) {
       row.reason,
       JSON.stringify(inputsOf(facts, issue, row.expiresAt, row.expiresSource)),
       result,
+      null,
     );
   }
 
-  async function gather(): Promise<ThreadsView> {
+  /** Record what the owner asked for from the page: always logged, never folded into an earlier row. */
+  function recordAction(entry: Entry, decision: Decision, reason: string, result: DecisionResult, error: string | null = null): void {
+    const { row, facts, issue } = entry;
+    insertDecision.run(now(), row.id, row.title, row.expiresAt, decision, row.state, reason, JSON.stringify(inputsOf(facts, issue, row.expiresAt, row.expiresSource)), result, error);
+  }
+
+  interface Entry {
+    row: ThreadRowView;
+    facts: ThreadFacts;
+    issue: IssueFacts | null | undefined;
+    ctx: LifecycleContext;
+    classification: Classification;
+  }
+
+  /** Host names, by id; empty when bb cannot list them. */
+  async function readHostNames(): Promise<Map<string, string>> {
+    try {
+      return new Map((await sdk.hosts.list()).map((host) => [host.id, host.name]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * Every thread's facts, state, and verdict now. With `only`, just that
+   * thread's, and without reading Linear: a manual action needs the thread as
+   * it is, not its issue.
+   */
+  async function collect(only?: string): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
     const settings = await deps.settings();
     const at = now();
     const listed = await listThreads();
@@ -334,7 +344,9 @@ export function createThreads(deps: ThreadsDeps) {
       return result;
     };
 
-    const linear = await readIssues();
+    const linear = only === undefined ? await readIssues() : { error: "not read" };
+    const hostNames = await readHostNames();
+    const kept = new Map((activeKeeps.all(at) as Array<{ thread_id: string; until: number }>).map((row) => [row.thread_id, row.until]));
     const issueCache = new Map<string, IssueWithComments | null>();
     const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
       if ("error" in linear) return undefined;
@@ -355,7 +367,8 @@ export function createThreads(deps: ThreadsDeps) {
       return older === undefined || older === null ? null : asFacts(older);
     };
 
-    const rows = await mapLimit(listed, READ_CONCURRENCY, async (thread): Promise<ThreadRowView> => {
+    const wanted = only === undefined ? listed : listed.filter((thread) => thread.id === only);
+    const entries = await mapLimit(wanted, READ_CONCURRENCY, async (thread): Promise<Entry> => {
       const [used, model, queue, issue] = await Promise.all([readUsage(thread), readModel(thread.id), readQueue(thread), issueOf({ id: thread.id, title: thread.title ?? thread.titleFallback ?? thread.id })]);
       const facts: ThreadFacts = {
         id: thread.id,
@@ -377,7 +390,7 @@ export function createThreads(deps: ThreadsDeps) {
         environmentId: thread.environmentId,
         hostId: thread.environmentHostId ?? null,
       };
-      const ctx: LifecycleContext = { now: at, issue, stewardThread: settings.stewardThread };
+      const ctx: LifecycleContext = { now: at, issue, stewardThread: settings.stewardThread, keptUntil: kept.get(thread.id) ?? null };
       const classification = classify(facts, ctx);
       const expiry = cacheExpiry(facts, settings.cacheLifeOverrides);
       let verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
@@ -395,6 +408,7 @@ export function createThreads(deps: ThreadsDeps) {
         provider: facts.providerId,
         model: facts.model,
         hostId: facts.hostId,
+        hostName: facts.hostId === null ? null : (hostNames.get(facts.hostId) ?? null),
         environmentId: facts.environmentId,
         usedTokens: facts.usedTokens,
         contextWindow: facts.contextWindow,
@@ -406,12 +420,57 @@ export function createThreads(deps: ThreadsDeps) {
         decision: verdict.decision,
         reason: verdict.reason,
       };
-      // Observe only: log the decision, take no action.
-      record(row, facts, issue, "observed");
-      return row;
+      return { row, facts, issue, ctx, classification };
     });
-    rows.sort((a, b) => a.expiresAt - b.expiresAt || a.id.localeCompare(b.id));
-    return { checkedAt: at, mode: "observe", linearError: "error" in linear ? linear.error : null, threads: rows };
+    return { at, linearError: "error" in linear && only === undefined ? linear.error : null, entries };
+  }
+
+  async function gather(): Promise<ThreadsView> {
+    const { at, linearError, entries } = await collect();
+    // Observe only: log each decision, take no action.
+    for (const entry of entries) record(entry.row, entry.facts, entry.issue, "observed");
+    const rows = entries.map((entry) => entry.row).sort((a, b) => a.expiresAt - b.expiresAt || a.id.localeCompare(b.id));
+    return { checkedAt: at, mode: "observe", linearError, threads: rows };
+  }
+
+  /** What stops an archive or a compact of this thread now: empty when it may go ahead. */
+  function actionBlockers(entry: Entry, action: "compact" | "archive"): string[] {
+    const { facts, ctx } = entry;
+    const blockers: string[] = [];
+    if (facts.status === "error") blockers.push("the thread is in error");
+    else if (ACTIVE.has(facts.status)) blockers.push("a turn is running");
+    if (facts.queuedCount > 0) blockers.push("it has a queued message");
+    // A compact leaves the checkout alone, so only an archive reads it.
+    blockers.push(...safetyBlockers(action === "archive" ? facts : { ...facts, env: null }, ctx));
+    return blockers;
+  }
+
+  /** Keep, Compact now, or Archive now, as the owner asked from the page; refused with the reason when the thread is not safe. */
+  function act(threadId: string, action: RowAction): Promise<{ message: string }> {
+    return locked(async () => {
+      const { entries } = await collect(threadId);
+      const entry = entries[0];
+      if (entry === undefined) throw new Refusal("not_found", `No thread ${threadId}.`);
+      if (action === "keep") {
+        const at = now();
+        keepStmt.run(threadId, at + KEEP_MS, at);
+        recordAction(entry, "keep", "kept for 24 hours by the owner (Keep on the page)", "done");
+        return { message: `${threadId} is protected for 24 hours.` };
+      }
+      if (action === "archive") entry.facts.env = entry.facts.environmentId === null ? null : await readEnv(sdk, entry.facts.environmentId);
+      const blockers = actionBlockers(entry, action);
+      if (blockers.length > 0) throw new Refusal("conflict", `Cannot ${action} ${threadId}: ${blockers.join("; ")}.`);
+      const reason = `${action === "archive" ? "Archive" : "Compact"} now: asked from the page`;
+      try {
+        if (action === "archive") await sdk.threads.archive({ threadId });
+        else await sdk.threads.compact({ threadId });
+      } catch (error) {
+        recordAction(entry, action, reason, "failed", message(error));
+        throw new Error(`Could not ${action} ${threadId}: ${message(error)}`);
+      }
+      recordAction(entry, action, reason, "done");
+      return { message: action === "archive" ? `Archived ${threadId}.` : `Compacting ${threadId}.` };
+    });
   }
 
   /** Read every thread now, log the decisions, and keep the snapshot. */
@@ -443,6 +502,7 @@ export function createThreads(deps: ThreadsDeps) {
       reason: string;
       inputs: string;
       result: DecisionResult;
+      error: string | null;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -453,19 +513,18 @@ export function createThreads(deps: ThreadsDeps) {
       state: row.state,
       reason: row.reason,
       result: row.result,
+      ...(row.error === null ? {} : { error: row.error }),
       inputs: JSON.parse(row.inputs) as Record<string, unknown>,
     }));
   }
 
-  return { refresh, cached, decisions };
+  return { refresh, cached, decisions, act };
 }
 
 export type ThreadsService = ReturnType<typeof createThreads>;
 
 function tokens(count: number | null): string {
-  if (count === null) return "-";
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  return count >= 1000 ? `${Math.round(count / 1000)}k` : String(count);
+  return count === null ? "-" : tokenCount(count);
 }
 
 function cell(text: string, width: number): string {
