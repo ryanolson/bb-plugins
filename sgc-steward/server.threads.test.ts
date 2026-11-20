@@ -901,3 +901,38 @@ test("compact is skipped when the cache expires during the final read", async ()
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("an archive retry does not post a second comment after a pin and unpin", async () => {
+  const thread: FakeThread = { id: "thr_done", title: "1: finished" };
+  const t = await lifecycleSetup([thread], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  t.actFails.add("archive");
+  await t.pass();
+  assert.equal(issue.comments.length, 1);
+
+  thread.pinnedAt = (t.clock.now += MINUTE);
+  thread.updatedAt = t.clock.now;
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+
+  thread.pinnedAt = null;
+  thread.updatedAt = (t.clock.now += MINUTE);
+  t.actFails.delete("archive");
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_done"]);
+  assert.equal(issue.comments.length, 1);
+});
+
+test("a steward flag whose send landed with no reply is delivered once per day", async () => {
+  const t = await lifecycleSetup([{ id: "thr_err", title: "Broken", status: "error" }], { settings: ACT });
+  t.sdk.stub("threads.send", async (args: unknown) => {
+    t.sends.push(args as (typeof t.sends)[number]);
+    if (t.sends.length === 1) throw new Error("reply lost after delivery");
+    return {};
+  });
+  await t.pass();
+  assert.equal(t.sends.length, 1);
+  t.clock.now += HOUR + MINUTE;
+  await t.pass();
+  assert.equal(t.sends.length, 1);
+});
