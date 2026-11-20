@@ -577,7 +577,11 @@ test("a failed steward message is tried again in the next pass, and not logged a
   assert.deepEqual(t.sends, []);
   assert.equal((await t.log())[0]!.result, "failed");
   fail = false;
+  // A send whose reply was lost may have landed, so the retry waits an hour instead of repeating at once.
   t.clock.now += 5 * MINUTE;
+  await t.pass();
+  assert.equal(t.sends.length, 0);
+  t.clock.now += HOUR;
   await t.pass();
   assert.equal(t.sends.length, 1);
 });
@@ -758,4 +762,57 @@ test("a branch with commits ahead of its base is safe to archive when a remote h
   );
   assert.match(byId(view, "thr_local").reason, /commits not on its base/);
   assert.match(byId(view, "thr_dirty").reason, /uncommitted/);
+});
+
+// --- review pass 1 ----------------------------------------------------------
+
+test("an issue that reopened between the decision and the action stops the archive", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  // The list the decision used says Done; the read just before the action says In Progress.
+  t.linear.getLifecycleIssue = async (id: string) => {
+    const found = t.linear.find(id)!;
+    return { ...t.linear.lifecycle(found), state: { name: "In Progress", type: "started" } };
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+  assert.equal(issue.comments.length, 0);
+  assert.deepEqual((await t.log()).map((row) => row.result), ["refused"]);
+});
+
+test("a done parent whose idle child has a queued message is not archived", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_parent", title: "1: parent" },
+      { id: "thr_kid", title: "kid", parentThreadId: "thr_parent", queuedMessageCount: 1 },
+    ],
+    { settings: ACT },
+  );
+  t.issue("TEAM-1", "state-done");
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+  assert.match((await rejection(t.act("thr_parent", "archive"))).message, /child thr_kid has a queued message/);
+});
+
+test("a compact is not repeated in the same cache cycle, even when bb's expiry is nearer than the provider's cache life", async () => {
+  const offer = new Date(START + 4 * MINUTE).toISOString();
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000, offerAt: offer, updatedAt: START - 5 * MINUTE }], { settings: { ...ACT, cacheLifeOverrides: "claude-code=1" } });
+  t.issue("TEAM-1", "state-started");
+  await t.pass();
+  t.clock.now += 2 * MINUTE;
+  await t.pass();
+  assert.deepEqual(t.acted, ["compact thr_a"]);
+});
+
+test("the archive comment is posted once even when the branch head moves before a retry", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  t.actFails.add("archive");
+  await t.pass();
+  t.actFails.delete("archive");
+  t.state.env.set("env_thr_done", { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, checkout: { kind: "branch", branchName: "f", headSha: "def" } } });
+  t.clock.now += 5 * MINUTE;
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_done"]);
+  assert.equal(issue.comments.length, 1);
 });

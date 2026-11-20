@@ -246,6 +246,7 @@ test("a child that is protected, dirty, ahead, or unreadable blocks an archive o
   assert.match(blockers([child({ env: { ...CLEAN, known: false, detail: "gone" } })]), /child thr_kid.*could not be read: gone/);
   assert.match(blockers([child({ env: undefined })]), /child thr_kid.*not checked/);
   assert.equal(blockers([child({ env: null })]), "");
+  assert.match(blockers([child({ busy: "has a queued message" })]), /child thr_kid has a queued message/);
   const facts = expiringIn(10 * MINUTE, { descendants: [child({ env: { ...CLEAN, clean: false } })] } as Partial<ThreadFacts>);
   assert.equal(decide(facts, { state: "done", reason: "x" }, ctx).decision, "flag");
 });

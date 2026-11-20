@@ -86,6 +86,8 @@ export interface DescendantFacts {
   /** Why it is protected, or null. */
   protectedBy: string | null;
   environmentId?: string | null;
+  /** What keeps it from being archived with its parent: queued work or work in the background; null when idle. */
+  busy?: string | null;
   /** Its checkout, as for the thread: null for none, absent when not read. */
   env?: EnvFacts | null;
 }
@@ -230,6 +232,7 @@ export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): strin
   blockers.push(...envBlockers(facts.env, "the"));
   for (const child of facts.descendants ?? []) {
     if (child.protectedBy !== null) blockers.push(`child ${child.id} is protected: ${child.protectedBy}`);
+    if (child.busy) blockers.push(`child ${child.id} ${child.busy}`);
     blockers.push(...envBlockers(child.env, `child ${child.id}'s`));
   }
   return blockers;

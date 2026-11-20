@@ -57,6 +57,9 @@ const MAX_PAGES = 50;
 const READ_CONCURRENCY = 6;
 const MAX_LOG_LIMIT = 500;
 
+/** After a failed send, the steward is told again no sooner than this. */
+const FLAG_RETRY_MS = HOUR;
+
 /** A flagged thread is reported to the steward at most this often. */
 export const FLAG_EVERY_MS = 24 * HOUR;
 
@@ -80,8 +83,10 @@ export interface ThreadsDeps {
   settings(): Promise<ThreadsSettings>;
   /** A Linear client and the team to read, or null when no key is set. Errors come back without the key. */
   linear(): Promise<{ client: LinearClient; teamKey: string } | null>;
-  /** Post a comment on a Linear issue under an id the text derives, so a repeat posts nothing new. Errors come back without the key. */
-  comment(issueId: string, body: string): Promise<void>;
+  /** Post a comment on a Linear issue under an id that `key` derives, so a repeat with the same key posts nothing new, whatever its text. Errors come back without the key. */
+  comment(issueId: string, body: string, key: string): Promise<void>;
+  /** The issue as Linear has it now, or null when it has gone; undefined when Linear could not be read. */
+  issue(identifier: string): Promise<IssueFacts | null | undefined>;
   /** The steward thread to tell, or null when none is set or bb reports it gone. */
   steward(): Promise<string | null>;
   /** Send a message to a thread, queued if it is running. */
@@ -125,6 +130,9 @@ function withComments(issue: LifecycleIssue): IssueWithComments {
 }
 
 const asFacts = ({ comments: _comments, ...facts }: IssueWithComments): IssueFacts => facts;
+
+/** A Linear issue as the lifecycle reads it. */
+export const lifecycleFacts = (issue: LifecycleIssue): IssueFacts => asFacts(withComments(issue));
 
 /** Whether a remote has a branch of this name. A failed or cut-off read says no. */
 async function onRemote(sdk: Sdk, environmentId: string, branch: string): Promise<boolean> {
@@ -176,7 +184,7 @@ export function createThreads(deps: ThreadsDeps) {
     "INSERT INTO thread_decisions (at, thread_id, thread_title, cycle, decision, state, reason, inputs, result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const readDecisions = db.prepare("SELECT id, at, thread_id, thread_title, decision, state, reason, inputs, result, error FROM thread_decisions ORDER BY id DESC LIMIT ?");
-  const compactedSince = db.prepare("SELECT 1 FROM thread_decisions WHERE thread_id = ? AND decision = 'compact' AND result = 'done' AND at > ? LIMIT 1");
+  const compactedSince = db.prepare("SELECT 1 FROM thread_decisions WHERE thread_id = ? AND decision = 'compact' AND result = 'done' AND (cycle = ? OR at > ?) LIMIT 1");
   const lastFlag = db.prepare("SELECT sent_at FROM thread_flags WHERE thread_id = ?");
   const setFlag = db.prepare("INSERT INTO thread_flags (thread_id, sent_at) VALUES (?, ?) ON CONFLICT (thread_id) DO UPDATE SET sent_at = excluded.sent_at");
   const clearFlag = db.prepare("DELETE FROM thread_flags WHERE thread_id = ?");
@@ -422,6 +430,12 @@ export function createThreads(deps: ThreadsDeps) {
             id: childId,
             protectedBy: protectionOf({ id: childId, pinned: child.pinnedAt !== null }, { now: at, stewardThread: settings.stewardThread, keptUntil: kept.get(childId) ?? null }),
             environmentId: child.environmentId,
+            busy:
+              child.queuedWork !== "none"
+                ? "has a queued message"
+                : child.activity.activeBackgroundAgentCount + child.activity.activeBackgroundCommandCount + child.activity.activeWorkflowCount > 0
+                  ? "has background work running"
+                  : null,
           };
         }),
       };
@@ -474,7 +488,16 @@ export function createThreads(deps: ThreadsDeps) {
    */
   async function carryOut(entry: Entry, settings: ThreadsSettings): Promise<boolean> {
     const action = entry.row.decision === "compact" ? "compact" : "archive";
-    const fresh = (await collect(entry.row.id, { issue: entry.issue })).entries[0];
+    // The issue may have changed too: a Done that reopened is no reason to archive.
+    let issue = entry.issue;
+    if (issue !== null && issue !== undefined) {
+      issue = await deps.issue(issue.identifier);
+      if (issue === undefined) {
+        record(entry, "refused", { reason: "changed since the decision: the issue could not be read again" });
+        return false;
+      }
+    }
+    const fresh = (await collect(entry.row.id, { issue })).entries[0];
     if (fresh === undefined) {
       record(entry, "refused", { reason: "changed since the decision: the thread is gone" });
       return false;
@@ -491,14 +514,14 @@ export function createThreads(deps: ThreadsDeps) {
     }
     if (action === "compact") {
       const life = cacheLifeMs(fresh.facts.providerId, settings.cacheLifeOverrides).ms;
-      // A compact starts a new cache life, so one inside the last life means this one was already compacted.
-      if (compactedSince.get(fresh.row.id, now() - life) !== undefined) return false;
+      // Once per cache cycle (the same expiry), and not within one cache life of the last: a compact starts a new life.
+      if (compactedSince.get(fresh.row.id, fresh.row.expiresAt, now() - life) !== undefined) return false;
     }
     if (action === "archive" && fresh.issue !== null && fresh.issue !== undefined) {
       const env = fresh.facts.env;
       const body = `[agent:sgc-steward] archived ${fresh.row.id}: ${fresh.row.reason}; branch ${env?.branch ?? "none"} at ${env?.head ?? "none"}`;
       try {
-        await deps.comment(fresh.issue.id, body);
+        await deps.comment(fresh.issue.id, body, `archived:${fresh.row.id}:${fresh.facts.lastActivityAt}`);
       } catch (error) {
         record(entry, "failed", { error: `could not post the issue comment: ${message(error)}` });
         return false;
@@ -530,8 +553,8 @@ export function createThreads(deps: ThreadsDeps) {
     try {
       await deps.send(steward, `[sgc-steward] Thread ${id} stuck: ${entry.row.reason}`);
     } catch (error) {
-      if (previous === undefined) clearFlag.run(id);
-      else setFlag.run(id, previous.sent_at);
+      // A reply that was lost may hide a message that landed, so the retry waits an hour rather than repeating at the next pass.
+      setFlag.run(id, now() - FLAG_EVERY_MS + FLAG_RETRY_MS);
       record(entry, "failed", { error: `could not tell the steward: ${message(error)}` });
       return;
     }
