@@ -837,3 +837,16 @@ test("the archive comment is posted once even when the branch head moves before 
   assert.deepEqual(t.acted, ["archive thr_done"]);
   assert.equal(issue.comments.length, 1);
 });
+
+test("archive refuses a root with a pinned lifecycle dependent", async () => {
+  const root = { id: "thr_root", title: "1: finished" };
+  const dependent = { id: "thr_owned", title: "Pinned helper", pinnedAt: START };
+  const t = await lifecycleSetup([root, dependent], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  t.sdk.stub("threads.list", async () => [
+    { ...t.row(root), lifecycleOwnerThreadId: null },
+    { ...t.row(dependent), lifecycleOwnerThreadId: root.id },
+  ]);
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});
