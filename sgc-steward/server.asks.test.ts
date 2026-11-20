@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Panel } from "./lib/contract.ts";
 import { PAUSE_OPTION, askDelivery, askRecord, blockDelivery, type Ask } from "./lib/asks.ts";
+import { cardChoices } from "./lib/choices.ts";
 import { LinearError } from "./lib/linear.ts";
+import { questionAnswerInput } from "./lib/panel.ts";
 import { answerCommentId } from "./lib/questions.ts";
 import { KEY, QUESTIONS, rejection, revisionOf, setup } from "./test-support.ts";
 
@@ -476,6 +478,23 @@ test("the page's letters answer a Linear question that has no options: A is the 
 
   await harness.behavior.callRpc("questions.answer", ask(pauseIssue.id, "q2", "C", ""));
   assert.ok(pauseIssue.comments.at(-1)!.body.includes(`Q1. C: ${PAUSE_OPTION}`), pauseIssue.comments.at(-1)!.body);
+});
+
+test("Pause can be posted on a Linear card whose source block uses every letter", async (t) => {
+  const { harness, linear, refresh } = await setup();
+  t.after(() => harness.lifecycle.dispose());
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  const options = Array.from("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (letter) => `- ${letter}: Route ${letter}.`);
+  linear.post(issue, "q1", ["[agent:codex thr_test1] Questions", "Q1. Which route?", ...options].join("\n"));
+  const shown = await refresh();
+  const block = shown.issues[0]!.blocks[0]!;
+  const question = block.format === "parsed" ? block.questions[0]! : null;
+  const pause = cardChoices(question?.options ?? []).find((choice) => choice.text === PAUSE_OPTION);
+  assert.ok(pause);
+  const input = questionAnswerInput(issue.id, block, question?.number ?? null, { option: pause.letter, text: "" });
+  assert.ok(input);
+  await harness.behavior.callRpc("questions.answer", input);
+  assert.ok(issue.comments.at(-1)!.body.includes(PAUSE_OPTION));
 });
 
 test("a block not in the question format takes the page's letters too: A the note, B Pause", async () => {
