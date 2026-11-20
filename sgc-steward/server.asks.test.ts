@@ -1043,3 +1043,16 @@ test("the project list belongs to the team it was read for: after a team change,
   assert.equal(after.exitCode, 0, "old-team names are not checked against: no list is known, so it only warns");
   assert.match((JSON.parse(after.stdout) as { warnings: string[] }).warnings[0]!, /not checked/);
 });
+
+test("expiry does not record that it told an archived thread to pause", async () => {
+  const { harness, linear, sends, refresh, clock } = await clocked();
+  const issue = linear.addIssue("TEAM-12", []);
+  await askId(harness, ["--question", "Ship?", "--issue", issue.identifier]);
+  harness.inspection.sdk.stub("threads.get", async () => ({ archivedAt: new Date(T0).toISOString() }));
+
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 0);
+  assert.equal(issue.comments.length, 1);
+  assert.doesNotMatch(issue.comments[0]!.body, /thread was told to save its work and pause/);
+});
