@@ -79,7 +79,7 @@ Q2. <question>
 
 - Leave a blank line after the first line, after the context, and after each question's options. Linear stores comments as rich text and can fold a line that sits right under an option into that option.
 - Start each question on its own line with `Q1.`, `Q2.`, and so on, in order.
-- Give every question 1 to 3 options, listed under it as `- A:`, `- B:`, and so on, in order. The page adds a last option, Pause, for you.
+- Give every question 1 to 3 options, listed under it as `- A:`, `- B:`, and so on, in order. The page adds a last option, Pause, for you; a question with all 26 letters in use gets none, rather than a letter past Z.
 - Mark at most one option per question `(recommended)`.
 - Put every option on one line. Indent a line that continues an option.
 - Markdown renders here too, but the format drops blank lines and indentation inside a question. A table (with its `| --- |` delimiter row), a flat list, and a code block still render. Put nested lists or indented code in a `bb sgc ask` question instead.

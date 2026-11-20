@@ -57,6 +57,26 @@ test("an asker's own option that reads like the note is just an option", () => {
   assert.equal(noteRequired([], "B"), false, "Pause needs no note");
 });
 
+test("an ask stored before the note existed keeps its Pause letter, and gets the note in front", () => {
+  const stored = [{ letter: "A", text: PAUSE_OPTION, recommended: false }];
+  assert.deepEqual(texts(cardChoices(stored)), [
+    ["B", NOTE_OPTION],
+    ["A", PAUSE_OPTION],
+  ], "the note is first, but Pause keeps A: an answer given before still means Pause");
+  assert.equal(noteRequired(stored, "B"), true);
+  assert.equal(noteRequired(stored, "A"), false, "Pause takes an optional note");
+});
+
+test("no added choice takes a letter past Z", () => {
+  const letters = (count: number) => Array.from({ length: count }, (_, index) => ({ letter: String.fromCharCode(65 + index), text: `Route ${index}.`, recommended: false }));
+  const twentyFive = cardChoices(letters(25));
+  assert.equal(twentyFive.length, 26);
+  assert.deepEqual(twentyFive.at(-1), { letter: "Z", text: PAUSE_OPTION, recommended: false }, "Z is the last free letter, so Pause takes it");
+  const twentySix = cardChoices(letters(26));
+  assert.deepEqual(twentySix.map((choice) => choice.letter), [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"], "all 26 are the asker's: no Pause, and no [");
+  assert.ok(!twentySix.some((choice) => choice.text === PAUSE_OPTION));
+});
+
 test("the asker's options are left as stored, so a letter keeps its text", () => {
   const stored = [
     { letter: "B", text: "No.", recommended: true },

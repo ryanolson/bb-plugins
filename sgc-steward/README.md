@@ -39,7 +39,8 @@ Q3. Anything else before the next run?
 - Each question starts a line with `Q1.`, `Q2.`, and so on, in order.
 - Options follow their question as `- A:`, `- B:`, and so on, in order. `*` and `+` bullets also work.
 - At most one option per question is marked `(recommended)`. The page shows it first.
-- A question with no options takes a typed answer. Its card offers "Answer in the note below" and then Pause, and the note is the answer: Send waits for it.
+- A question with no options takes a typed answer. Its card offers "Answer in the note below" and then Pause, and the note is the answer: Send waits for it. An ask stored before the note existed holds Pause alone, so its card puts the note first on the next free letter and leaves Pause its own, and an answer already given keeps its meaning.
+- The card adds Pause on the next free letter, so a question with 25 options gets Z for it; with all 26 letters in use, the card shows the asker's options and adds nothing, rather than letter a choice `[`.
 - Any other line continues the question above it. An indented line continues the option above it.
 
 The page shows a comment that breaks these rules as written, with the reason, and takes an answer for it: the note choice, or Pause, with or without a note.

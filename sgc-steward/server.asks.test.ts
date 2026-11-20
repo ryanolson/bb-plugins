@@ -480,7 +480,7 @@ test("the page's letters answer a Linear question that has no options: A is the 
   assert.ok(pauseIssue.comments.at(-1)!.body.includes(`Q1. C: ${PAUSE_OPTION}`), pauseIssue.comments.at(-1)!.body);
 });
 
-test("Pause can be posted on a Linear card whose source block uses every letter", async (t) => {
+test("a Linear card whose source block uses every letter adds no choice past Z", async (t) => {
   const { harness, linear, refresh } = await setup();
   t.after(() => harness.lifecycle.dispose());
   const issue = linear.addIssue("TEAM-1", ["checkin"]);
@@ -489,12 +489,15 @@ test("Pause can be posted on a Linear card whose source block uses every letter"
   const shown = await refresh();
   const block = shown.issues[0]!.blocks[0]!;
   const question = block.format === "parsed" ? block.questions[0]! : null;
-  const pause = cardChoices(question?.options ?? []).find((choice) => choice.text === PAUSE_OPTION);
-  assert.ok(pause);
-  const input = questionAnswerInput(issue.id, block, question?.number ?? null, { option: pause.letter, text: "" });
+  assert.deepEqual(
+    cardChoices(question?.options ?? []).map((choice) => choice.letter),
+    [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+    "all 26 letters are the asker's, so the card adds no Pause rather than letter it [",
+  );
+  const input = questionAnswerInput(issue.id, block, question?.number ?? null, { option: "Z", text: "" });
   assert.ok(input);
   await harness.behavior.callRpc("questions.answer", input);
-  assert.ok(issue.comments.at(-1)!.body.includes(PAUSE_OPTION));
+  assert.ok(issue.comments.at(-1)!.body.includes("Q1. Z: Route Z."), issue.comments.at(-1)!.body);
 });
 
 test("a block not in the question format takes the page's letters too: A the note, B Pause", async () => {
