@@ -13,7 +13,10 @@ const list = async (harness: Harness) => (await harness.behavior.callRpc("questi
 /** `threadId` null runs the command outside any thread. */
 function ask(harness: Harness, args: string[], threadId: string | null = "thr_asker") {
   const labelled = args.includes("--label") ? args : [...args, "--label", "Test project"];
-  return harness.behavior.runCli(["ask", ...labelled], threadId === null ? { cwd: "/work" } : { threadId, cwd: "/work" });
+  // A question offers 1 to 3 options; a test that names none gets one, unless
+  // it is this helper's caller testing that refusal (see `runCli` there).
+  const optioned = args.includes("--option") ? labelled : [...labelled, "--option", "Yes."];
+  return harness.behavior.runCli(["ask", ...optioned], threadId === null ? { cwd: "/work" } : { threadId, cwd: "/work" });
 }
 
 async function askId(harness: Harness, args: string[], threadId = "thr_asker"): Promise<string> {
@@ -449,6 +452,31 @@ async function answerInput(linear: Awaited<ReturnType<typeof setup>>["linear"], 
   const shown = await refresh();
   return { issue, input: { issueId: issue.id, blocks: [{ blockId: "q1", revision: revisionOf(shown, "q1"), answers: [{ number: 1, option: "A", text: "" }] }] } };
 }
+
+test("the page's letters answer a Linear question that has no options: A is the note, B pauses", async () => {
+  const { harness, linear, refresh } = await setup();
+  const body = (question: string, ...rest: string[]) => ["[agent:claude-code thr_test1] Questions 2026-01-05", `Q1. ${question}`, ...rest].join("\n");
+  const noteIssue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(noteIssue, "q1", body("Anything else?"));
+  const pauseIssue = linear.addIssue("TEAM-2", ["checkin"]);
+  linear.post(pauseIssue, "q2", body("Which project goes first?", "- A (recommended): The router.", "- B: The cells."));
+  const shown = await refresh();
+  const ask = (issueId: string, blockId: string, option: string, text: string) => ({
+    issueId,
+    blocks: [{ blockId, revision: revisionOf(shown, blockId), answers: [{ number: 1, option, text }] }],
+  });
+
+  const empty = await rejection(harness.behavior.callRpc("questions.answer", ask(noteIssue.id, "q1", "A", "  ")));
+  assert.equal(empty.code, "invalid");
+  assert.match(empty.message, /"Answer in the note below" takes an answer in the note/);
+  assert.equal(noteIssue.comments.length, 1, "an empty note posts nothing");
+
+  await harness.behavior.callRpc("questions.answer", ask(noteIssue.id, "q1", "A", "Ship Friday."));
+  assert.match(noteIssue.comments.at(-1)!.body, /Q1\.\n> Ship Friday\./);
+
+  await harness.behavior.callRpc("questions.answer", ask(pauseIssue.id, "q2", "C", ""));
+  assert.ok(pauseIssue.comments.at(-1)!.body.includes(`Q1. C: ${PAUSE_OPTION}`), pauseIssue.comments.at(-1)!.body);
+});
 
 /** The comment id the server asked Linear to create. */
 function createdId(calls: readonly string[]): string {
@@ -928,7 +956,8 @@ test("ask refuses what breaks a limit, with code invalid and the limit in the me
     assert.match(result.stderr, pattern);
   };
   await refused(["--question", words(81), "--label", "x"], /at most 80 words/);
-  await refused(["--question", "Q?", "--option", "a", "--option", "b", "--option", "c", "--option", "d", "--label", "x"], /at most 3 options/);
+  await refused(["--question", "Q?", "--label", "x"], /a question takes 1 to 3 options/);
+  await refused(["--question", "Q?", "--option", "a", "--option", "b", "--option", "c", "--option", "d", "--label", "x"], /1 to 3 options/);
   await refused(["--question", "Q?", "--option", words(26), "--label", "x"], /option A is over 25 words/);
   await refused(["--question", "Q?"], /exactly 1 label/);
   await refused(["--question", "Q?", "--label", "a", "--label", "b"], /exactly 1 label/);

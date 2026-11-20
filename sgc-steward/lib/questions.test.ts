@@ -14,6 +14,7 @@ import {
   type LinearComment,
   type QuestionBlock,
 } from "./questions.ts";
+import { PAUSE_OPTION } from "./choices.ts";
 
 let clock = Date.parse("2026-01-05T10:00:00Z");
 /** A comment one minute after the previous one, so order is unambiguous. */
@@ -412,6 +413,23 @@ test("an answer to every question of a block names the block, numbered to match"
   );
 });
 
+test("a question with no options answers in the note, or pauses, by the letters the page shows", () => {
+  const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
+  const answer = (option: string, text: string) =>
+    composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 3, option, text }] }]);
+  const header = `Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q3`;
+  assert.equal(answer("A", "Ship Friday."), [header, "", "Q3.", "> Ship Friday."].join("\n"), "A is the note, so it answers with the note");
+  assert.equal(answer("B", ""), [header, "", `Q3. B: ${PAUSE_OPTION}`].join("\n"), "B is the Pause choice");
+  assert.throws(() => answer("A", "  "), /"Answer in the note below" takes an answer in the note/);
+  assert.throws(() => answer("C", "x"), /Q3 has no option C/);
+});
+
+test("the Pause choice the page adds to a question with options is answered like any other", () => {
+  const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
+  const body = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "C", text: "" }] }]);
+  assert.equal(body, [`Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q1`, "", `Q1. C: ${PAUSE_OPTION}`].join("\n"));
+});
+
 test("an answer to some questions of a block names each one, and says nothing of the rest", () => {
   const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
   const one = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 2, option: "B", text: "Start with the cells project." }] }]);
@@ -505,7 +523,7 @@ test("composeAnswer refuses answers that do not fit the open blocks", () => {
   assert.throws(attempt([{ blockId: "q1", revision: "000000000000", answers: [{ number: 1, option: "A", text: "" }] }]), /block q1 changed after the answers were written/);
   assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 9, option: null, text: "x" }] }]), /Q9 is not a question/);
   assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 1, option: "D", text: "" }] }]), /Q1 has no option D/);
-  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 3, option: "A", text: "" }] }]), /Q3 has no option A/);
+  assert.throws(attempt([{ blockId: "q1", revision: block.revision, answers: [{ number: 3, option: "C", text: "" }] }]), /Q3 has no option C/);
   assert.throws(
     attempt([
       {

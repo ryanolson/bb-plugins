@@ -16,13 +16,13 @@ test("a question takes 3 options of 25 words, and the Pause option comes last an
   assert.deepEqual(three.map((option) => [option.letter, option.recommended]), [["A", false], ["B", true], ["C", false], ["D", false]]);
   assert.equal(three.at(-1)!.text, PAUSE_OPTION);
   assert.equal(PAUSE_OPTION, "Pause it: stop this work for now, and resume it later.");
-  assert.throws(() => askOptions(["a", "b", "c", "d"], null), /at most 3 options/);
+  assert.throws(() => askOptions(["a", "b", "c", "d"], null), /1 to 3 options/);
   assert.throws(() => askOptions([words(26)], null), /option A is over 25 words/);
   assert.throws(() => askOptions(["a"], "B"), /no option B to recommend/, "the Pause option cannot be recommended");
 });
 
-test("no options still leaves the Pause option, as option A", () => {
-  assert.deepEqual(askOptions([], null), [{ letter: "A", text: PAUSE_OPTION, recommended: false }]);
+test("a question offers 1 to 3 options: none is refused, so every card has an answer to pick", () => {
+  assert.throws(() => askOptions([], null), /a question takes 1 to 3 options/);
 });
 
 test("exactly one label is taken: none and two are refused", () => {

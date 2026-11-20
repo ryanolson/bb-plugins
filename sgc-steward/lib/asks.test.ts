@@ -16,6 +16,7 @@ import {
   withdrawalRecord,
   type Ask,
 } from "./asks.ts";
+import { PAUSE_OPTION } from "./choices.ts";
 import { answeredBlocks, commentRole } from "./questions.ts";
 
 const ASK: Ask = {
@@ -46,10 +47,11 @@ test("options get letters in order, then the Pause option, and the recommendatio
   ]);
   assert.deepEqual(letters(askOptions(["Yes.", "No."], "B")), [["A", false], ["B", true], ["C", false]]);
   assert.deepEqual(letters(askOptions(["Yes.", "No."], null)), [["A", false], ["B", false], ["C", false]]);
-  assert.throws(() => askOptions(Array.from({ length: ASK_LIMITS.options + 1 }, (_, n) => `o${n}`), "A"), /at most 3 options/);
+  assert.throws(() => askOptions(Array.from({ length: ASK_LIMITS.options + 1 }, (_, n) => `o${n}`), "A"), /1 to 3 options/);
   assert.throws(() => askOptions(["Yes.", " "], "A"), /option B is empty/);
   assert.throws(() => askOptions(["x".repeat(ASK_LIMITS.optionChars + 1)], "A"), /option A is over 500 characters/);
   assert.throws(() => askOptions(["Yes.", "No."], "C"), /there is no option C to recommend/);
+  assert.throws(() => askOptions([], null), /a question takes 1 to 3 options/);
 });
 
 test("an issue is named by its identifier", () => {
@@ -68,9 +70,16 @@ test("the answer keeps the owner's words exactly", () => {
   assert.equal(answerText(ASK, { option: "B", text: "" }), "B: No, wait for the soak.");
   assert.equal(answerText(ASK, { option: "A", text: "  Only behind\nthe `flag`.  " }), "A: Yes, today.\nOnly behind\nthe `flag`.");
   assert.equal(answerText(ASK, { option: null, text: "Ask the router owner." }), "Ask the router owner.");
-  assert.throws(() => answerText(ASK, { option: "C", text: "" }), /there is no option C/);
+  assert.equal(answerText(ASK, { option: "C", text: "" }), `C: ${PAUSE_OPTION}`, "the Pause choice the card adds");
+  assert.throws(() => answerText(ASK, { option: "D", text: "" }), /there is no option D/);
   assert.throws(() => answerText(ASK, { option: null, text: "  " }), /the answer is empty/);
-  assert.throws(() => answerText({ ...ASK, options: [] }, { option: "A", text: "" }), /there is no option A/);
+});
+
+test("picking the note choice answers with the note, which it requires", () => {
+  const noOptions: Ask = { ...ASK, options: [] };
+  assert.equal(answerText(noOptions, { option: "A", text: "  Ship Friday.  " }), "Ship Friday.");
+  assert.throws(() => answerText(noOptions, { option: "A", text: "  " }), /"Answer in the note below" takes an answer in the note/);
+  assert.equal(answerText(noOptions, { option: "B", text: "" }), `B: ${PAUSE_OPTION}`);
 });
 
 test("the delivered message quotes the id, the question, and the answer", () => {

@@ -1,6 +1,7 @@
 // The pure logic behind the Questions page and the notifier, kept out of the
 // React code so it can be tested without a DOM.
 
+import { noteRequired, type Choice } from "./choices.ts";
 import type { DeliveryView, Panel } from "./contract.ts";
 import type { HostsView } from "./hosts.ts";
 import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
@@ -78,17 +79,20 @@ export function questionAnswerInput(
   question: number | null,
   draft: AskDraft,
 ): { issueId: string; blocks: BlockAnswer[] } | null {
+  // A block not in the question format takes a typed answer and nothing else:
+  // its card's choices are not sent, so the box must say something.
+  if (question === null) return draft.text.trim() === "" ? null : { issueId, blocks: [{ blockId: block.commentId, revision: block.revision, answers: [], text: draft.text }] };
   if (draft.option === null && draft.text.trim() === "") return null;
-  const answer: BlockAnswer =
-    question === null
-      ? { blockId: block.commentId, revision: block.revision, answers: [], text: draft.text }
-      : { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
+  const asked = block.format === "parsed" ? block.questions.find((candidate) => candidate.number === question) : undefined;
+  if (noteRequired(asked?.options ?? [], draft.option) && draft.text.trim() === "") return null;
+  const answer: BlockAnswer = { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
   return { issueId, blocks: [answer] };
 }
 
-/** The `asks.answer` input, or null when the draft says nothing yet. */
-export function askAnswerInput(id: string, draft: AskDraft): { id: string; option: string | null; text: string } | null {
+/** The `asks.answer` input, or null when the draft says nothing yet, or picked the note and typed none. */
+export function askAnswerInput(id: string, draft: AskDraft, options: readonly Choice[]): { id: string; option: string | null; text: string } | null {
   if (draft.option === null && draft.text.trim() === "") return null;
+  if (noteRequired(options, draft.option) && draft.text.trim() === "") return null;
   return { id, option: draft.option, text: draft.text };
 }
 

@@ -10,6 +10,7 @@
 // are neither.
 
 import { createHash } from "node:crypto";
+import { cardChoices, isNoteChoice } from "./choices.ts";
 
 /** A Linear comment, reduced to what the rules need. */
 export interface LinearComment {
@@ -501,7 +502,7 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
       const question = block.questions.find((candidate) => candidate.number === item.number);
       if (question === undefined) throw new Error(`Q${item.number} is not a question in block ${block.commentId}`);
       if (byNumber.has(item.number)) throw new Error(`Q${item.number} is answered twice`);
-      if (item.option !== null && !question.options.some((option) => option.letter === item.option)) {
+      if (item.option !== null && !cardChoices(question.options).some((choice) => choice.letter === item.option)) {
         throw new Error(`Q${item.number} has no option ${item.option}`);
       }
       byNumber.set(item.number, item);
@@ -511,7 +512,13 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
     for (const question of block.questions) {
       const item = byNumber.get(question.number);
       const note = item?.text.trim() ?? "";
-      const option = question.options.find((candidate) => candidate.letter === item?.option);
+      // The choices the card drew, so the Pause it adds is answered like any
+      // other; the note choice answers with the note, and an empty note would
+      // post nothing.
+      const choice = cardChoices(question.options).find((candidate) => candidate.letter === item?.option);
+      const typed = isNoteChoice(question.options, choice);
+      if (typed && note === "") throw new Error(`Q${question.number}: "Answer in the note below" takes an answer in the note`);
+      const option = typed ? undefined : choice;
       if (option === undefined && note === "") continue;
       answered.push(question.number);
       // The owner's words start below the number, so they stay a quote whatever an edit does.

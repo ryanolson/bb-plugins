@@ -39,7 +39,7 @@ Q3. Anything else before the next run?
 - Each question starts a line with `Q1.`, `Q2.`, and so on, in order.
 - Options follow their question as `- A:`, `- B:`, and so on, in order. `*` and `+` bullets also work.
 - At most one option per question is marked `(recommended)`. The page shows it first.
-- A question with no options takes a typed answer.
+- A question with no options takes a typed answer. Its card offers "Answer in the note below" and then Pause, and the note is the answer: Send waits for it.
 - Any other line continues the question above it. An indented line continues the option above it.
 
 The page shows a comment that breaks these rules as written, with the reason, and takes a typed answer for it.
@@ -151,7 +151,7 @@ bb plugins cannot send a mobile push. The push-notifications plugin sends pushes
 ## CLI
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> --option <text> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
@@ -164,7 +164,7 @@ bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
 ```
 
-- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with at most 3 options of at most 25 words each; `ask` refuses more with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. An unanswered question expires 3 days after it was asked, or 1 day with `--urgent`; see "Expiry". The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
+- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with 1 to 3 options of at most 25 words each; `ask` refuses any other number with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. An unanswered question expires 3 days after it was asked, or 1 day with `--urgent`; see "Expiry". The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
 - `ask` also warns, in one more line that starts with `Warning:` (with `--json`, in a `warnings` list), when the question or an option holds a table the page will show as plain text. It parses the text as the page does (GFM and math blocks) and looks for two or more lines in one paragraph that start and end with `|`. A table the page draws, and pipes inside code, HTML or math, never count. The usual cause is a missing delimiter row, or one with the wrong number of cells. It still stores the question as written. Withdraw it and ask again to fix the table.
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
@@ -216,6 +216,7 @@ bb plugin logs sgc-steward
 - `lib/asks.ts`: checks for `bb sgc ask` and the text of what goes back: the message to the thread and the Linear record.
 - `lib/ask-store.ts`: the SQLite tables for bb questions, deliveries, and records.
 - `lib/linear.ts`: the Linear GraphQL client, and posting a comment under the id its answer derives.
+- `lib/choices.ts`: the choices a question card offers: the asker's options, then Pause, and for a question with none, the note to answer in. The page and the server both use it, so a letter names the same text on both.
 - `lib/panel.ts`: the page's tabs, answer drafts, card order, badges, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/views.ts`: the stored rows mapped to the shapes the page and `bb sgc questions --json` show.
@@ -234,6 +235,6 @@ bb plugin logs sgc-steward
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
-- `components/answer-fields.tsx`: a question card's options, rendered as Markdown, and its answer box.
+- `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

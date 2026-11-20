@@ -10,6 +10,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { installMarkdownRuntime } from "../test-support-tsx.ts";
 import { askOptions, checkQuestion, PAUSE_OPTION } from "../lib/asks.ts";
+import { NOTE_OPTION } from "../lib/choices.ts";
 import { parseQuestionBlock } from "../lib/questions.ts";
 
 const { AnswerFields } = await import("./answer-fields.tsx");
@@ -42,13 +43,31 @@ const OPTIONS = [
   "Measure more first:\n- a second host\n- real NICs",
 ];
 
-function render(options: ReturnType<typeof askOptions>) {
+function render(options: ReturnType<typeof askOptions>, draft: { option: string | null; text: string } = { option: null, text: "" }) {
   const calls = installMarkdownRuntime();
-  const html = renderToStaticMarkup(
-    createElement(AnswerFields, { name: "q", label: "Answer", options, draft: { option: null, text: "" }, onChange: () => {} }),
-  );
+  const html = renderToStaticMarkup(createElement(AnswerFields, { name: "q", label: "Answer", options, draft, onChange: () => {} }));
   return { calls, html };
 }
+
+test("a question with no options still offers choices: the note, then Pause", () => {
+  const { calls, html } = render([]);
+  assert.match(html, /type="radio"/, "the radio list is always drawn");
+  assert.equal((html.match(/name="q"/g) ?? []).length, 2, "both radios belong to the card");
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.deepEqual(calls.map((call) => call.content), [NOTE_OPTION, PAUSE_OPTION]);
+  assert.match(html, /<span class="font-mono">A<\/span>/);
+  assert.match(html, /<span class="font-mono">B<\/span>/);
+  assert.match(html, /placeholder="Add a note \(optional\)"/, "nothing picked yet: a note is optional");
+
+  const picked = render([], { option: "A", text: "" });
+  assert.match(picked.html, /placeholder="Type your answer"/, "the note is the answer, so it says so");
+});
+
+test("a question with options never offers to answer in the note", () => {
+  const { calls } = render(askOptions(OPTIONS, "A"), { option: "A", text: "" });
+  assert.ok(!calls.some((call) => call.content === NOTE_OPTION));
+  assert.equal(calls.at(-1)!.content, PAUSE_OPTION);
+});
 
 test("each option's text reaches Markdown whole", () => {
   const options = askOptions(OPTIONS, "A");
@@ -116,6 +135,6 @@ test("a Linear question keeps its table, list and code lines", () => {
   const { calls } = render(question.options);
   assert.deepEqual(
     calls.map((call) => call.content),
-    ["Option C, `own_runtime(true)`.", "Keep the **default**."],
+    ["Option C, `own_runtime(true)`.", "Keep the **default**.", PAUSE_OPTION],
   );
 });

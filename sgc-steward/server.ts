@@ -863,9 +863,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               option: {
                 type: "string",
                 repeatable: true,
-                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionWords} words each; they get letters A, B, and so on, and a last option, Pause, is added`,
+                description: `An answer to offer; 1 to ${ASK_LIMITS.options} of them, ${ASK_LIMITS.optionWords} words each. They get letters A, B, and so on, and a last option, Pause, is added`,
               },
-              recommend: { type: "string", description: "The letter of the recommended option, or none; default A when there are options" },
+              recommend: { type: "string", description: "The letter of the recommended option, or none; default A" },
               label: {
                 type: "string",
                 repeatable: true,
@@ -899,7 +899,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
                 question = checkQuestion(raw);
                 labels = checkLabels(input.options.label ?? [], projects);
                 const texts = input.options.option ?? [];
-                const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
+                const recommend = input.options.recommend === undefined ? "A" : input.options.recommend === "none" ? null : input.options.recommend;
                 options = askOptions(texts, recommend);
                 issue = input.options.issue === undefined ? null : checkIssueRef(input.options.issue);
               } catch (error) {

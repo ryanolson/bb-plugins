@@ -122,7 +122,7 @@ test("bb sgc paused lists paused issues and expired questions, and bb sgc resume
   const clock = { at: Date.parse("2026-11-20T10:00:00Z") };
   const { harness, linear, refresh: poll } = await setup({ now: () => clock.at });
   const { older } = seed(linear);
-  const asked = await harness.behavior.runCli(["ask", "--label", "Project", "--question", "Ship?", "--issue", "TEAM-1", "--json"], { threadId: "thr_asker", cwd: "/work" });
+  const asked = await harness.behavior.runCli(["ask", "--label", "Project", "--question", "Ship?", "--option", "Yes.", "--issue", "TEAM-1", "--json"], { threadId: "thr_asker", cwd: "/work" });
   const { id } = JSON.parse(asked.stdout) as { id: string };
   clock.at += 3 * 86_400_000;
   await poll();

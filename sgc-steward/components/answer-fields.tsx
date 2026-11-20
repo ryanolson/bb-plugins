@@ -1,11 +1,13 @@
-// The answer controls a question card shows: its options as radio choices,
-// then a box for a typed answer or a note. Linear and bb question cards share
-// them.
+// The answer controls a question card shows: its choices as radios, then a box
+// for a typed answer or a note. Linear and bb question cards share them. The
+// choices come from `cardChoices`, so a card with no options still offers the
+// note, and then Pause.
 //
 // Agents write the options, so each goes through bb's Markdown renderer, like
 // the question text: tables, lists and code render, and bb's sanitizer drops
 // any raw HTML that could run. Never render option text as HTML here.
 import { Markdown } from "@get-bb/plugin-sdk/app";
+import { cardChoices, isNoteChoice, type Choice } from "@/lib/choices";
 import type { AskDraft } from "@/lib/panel";
 import { cn } from "@/lib/utils";
 
@@ -22,44 +24,46 @@ export function AnswerFields({
 }: {
   name: string;
   label: string;
-  options: ReadonlyArray<{ letter: string; text: string; recommended: boolean }>;
+  options: ReadonlyArray<Choice>;
   draft: AskDraft;
   onChange: (next: AskDraft) => void;
 }) {
+  // Always a radio list: a question with no options still offers the note, and
+  // then Pause, and the note is where its answer goes.
+  const choices = cardChoices(options);
+  const note = isNoteChoice(options, choices.find((choice) => choice.letter === draft.option));
   return (
     <>
-      {options.length === 0 ? null : (
-        <div className="space-y-1.5">
-          {options.map((option) => (
-            <label
-              key={option.letter}
-              className={cn(
-                "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
-                draft.option === option.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
-              )}
-            >
-              <input type="radio" name={name} className="mt-0.5" checked={draft.option === option.letter} onChange={() => onChange({ ...draft, option: option.letter })} />
-              <span className="font-mono">{option.letter}</span>
-              <Markdown content={option.text} className="min-w-0 flex-1" />
-              {option.recommended ? <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span> : null}
-            </label>
-          ))}
-          {draft.option === null ? null : (
-            <button
-              type="button"
-              className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              onClick={() => onChange({ ...draft, option: null })}
-            >
-              Clear choice
-            </button>
-          )}
-        </div>
-      )}
+      <div className="space-y-1.5">
+        {choices.map((choice) => (
+          <label
+            key={choice.letter}
+            className={cn(
+              "flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm",
+              draft.option === choice.letter ? "border-foreground/50 bg-state-active" : "border-border hover:bg-state-hover",
+            )}
+          >
+            <input type="radio" name={name} className="mt-0.5" checked={draft.option === choice.letter} onChange={() => onChange({ ...draft, option: choice.letter })} />
+            <span className="font-mono">{choice.letter}</span>
+            <Markdown content={choice.text} className="min-w-0 flex-1" />
+            {choice.recommended ? <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground">Recommended</span> : null}
+          </label>
+        ))}
+        {draft.option === null ? null : (
+          <button
+            type="button"
+            className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => onChange({ ...draft, option: null })}
+          >
+            Clear choice
+          </button>
+        )}
+      </div>
       <textarea
         className={textareaClass()}
         value={draft.text}
         aria-label={label}
-        placeholder={options.length === 0 ? "Type your answer" : draft.option === null ? "Or type your own answer" : "Add a note (optional)"}
+        placeholder={note ? "Type your answer" : "Add a note (optional)"}
         onChange={(event) => onChange({ ...draft, text: event.target.value })}
       />
     </>

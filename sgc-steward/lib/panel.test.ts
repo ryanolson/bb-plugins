@@ -88,10 +88,30 @@ test("every open question is its own card, beside raw blocks and bb questions, o
   assert.deepEqual(orderCards(issues, asks).map(name), ["bbq_early", "i1:q1:Q1", "i1:q1:Q2", "i2:q2", "i1:q2", "bbq_late"]);
 });
 
+const NO_OPTIONS: Array<{ letter: string; text: string; recommended: boolean }> = [];
+
 test("a bb question's answer is a picked option, typed text, or both", () => {
-  assert.equal(askAnswerInput("bbq_1", { option: null, text: "  " }), null);
-  assert.deepEqual(askAnswerInput("bbq_1", { option: "B", text: "" }), { id: "bbq_1", option: "B", text: "" });
-  assert.deepEqual(askAnswerInput("bbq_1", { option: null, text: "Later." }), { id: "bbq_1", option: null, text: "Later." });
+  assert.equal(askAnswerInput("bbq_1", { option: null, text: "  " }, NO_OPTIONS), null);
+  assert.deepEqual(askAnswerInput("bbq_1", { option: "B", text: "" }, NO_OPTIONS), { id: "bbq_1", option: "B", text: "" });
+  assert.deepEqual(askAnswerInput("bbq_1", { option: null, text: "Later." }, NO_OPTIONS), { id: "bbq_1", option: null, text: "Later." });
+});
+
+test("choosing to answer in the note takes text before the page offers to send", () => {
+  // A question with no options offers "Answer in the note below" as A, so
+  // the note is the answer: with none typed there is nothing to send.
+  assert.equal(askAnswerInput("bbq_1", { option: "A", text: "  " }, NO_OPTIONS), null);
+  assert.deepEqual(askAnswerInput("bbq_1", { option: "A", text: "Yes." }, NO_OPTIONS), { id: "bbq_1", option: "A", text: "Yes." });
+  assert.deepEqual(askAnswerInput("bbq_1", { option: "B", text: "" }, NO_OPTIONS), { id: "bbq_1", option: "B", text: "" }, "Pause needs no note");
+  assert.equal(questionAnswerInput("uuid-1", parsed, 2, { option: "A", text: "" }), null, "Q2 has no options: A is the note");
+  assert.deepEqual(questionAnswerInput("uuid-1", parsed, 2, { option: "A", text: "Ship Friday." }), {
+    issueId: "uuid-1",
+    blocks: [{ blockId: "q1", revision: parsed.revision, answers: [{ number: 2, option: "A", text: "Ship Friday." }] }],
+  });
+  assert.deepEqual(
+    questionAnswerInput("uuid-1", parsed, 1, { option: "C", text: "" }),
+    { issueId: "uuid-1", blocks: [{ blockId: "q1", revision: parsed.revision, answers: [{ number: 1, option: "C", text: "" }] }] },
+    "Q1's Pause choice needs no note",
+  );
 });
 
 test("the badge counts open questions, then flags answers that did not go out, then Linear trouble", () => {
