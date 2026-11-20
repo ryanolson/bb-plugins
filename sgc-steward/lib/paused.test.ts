@@ -101,3 +101,15 @@ test("the team's Todo state is its unstarted state named Todo, else the first un
   assert.equal(await client.todoStateId("TEAM"), null);
   assert.match(calls[0]!.query, /type: \{ eq: "unstarted" \}/);
 });
+
+test("the project list uses a filter accepted by Linear", async () => {
+  const fetch: FetchLike = async (_url, init) => {
+    const { query } = JSON.parse(init.body) as { query: string };
+    const body = /accessibleTeams:\s*\{\s*key\s*:/.test(query)
+      ? { errors: [{ message: 'Field "key" is not defined by type "TeamCollectionFilter".' }] }
+      : { data: { projects: { nodes: [{ name: "Tools", status: { type: "started" } }], pageInfo: { hasNextPage: false, endCursor: null } } } };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const client = createLinearClient({ apiKey: "lin_api_test_not_a_real_key", fetch });
+  assert.deepEqual(await client.listProjectNames("TEAM"), ["Tools"]);
+});
