@@ -32,7 +32,7 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
   const clock = { now: START };
   const kit = await setup({ now: () => clock.now, ...options });
   const sdk = kit.harness.inspection.sdk;
-  const state = { threads, env: new Map<string, unknown>(), listFails: false };
+  const state = { threads, env: new Map<string, unknown>(), listFails: false, archived: new Set<string>() };
   const row = (thread: FakeThread) => ({
     id: thread.id,
     title: thread.title,
@@ -51,7 +51,7 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
   });
   sdk.stub("threads.list", async () => {
     if (state.listFails) throw new Error("bb is down");
-    return state.threads.map(row);
+    return state.threads.filter((thread) => !state.archived.has(thread.id)).map(row);
   });
   sdk.stub("hosts.list", async () => [{ id: "host_a", name: "spark-d", status: "connected" }]);
   const acted: string[] = [];
@@ -61,6 +61,7 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
       const { threadId } = args as { threadId: string };
       if (actFails.has(action)) throw new Error(`${action} boom`);
       acted.push(`${action} ${threadId}`);
+      if (action === "archive") state.archived.add(threadId);
       return action === "archive" ? { archived: [threadId] } : { ok: true };
     });
   }
@@ -419,4 +420,218 @@ test("an unknown thread is not found", async () => {
   const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
   const refused = await rejection(t.act("thr_nope", "keep"));
   assert.equal(refused.code, "not_found");
+});
+
+// --- act mode ---------------------------------------------------------------
+
+const ACT = { threadLifecycleMode: "act", stewardThread: "thr_steward" };
+
+test("act mode archives a safe done thread, after a signed comment on its issue, and logs it done", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  let commentsAtArchive = -1;
+  t.sdk.stub("threads.archive", async (args: unknown) => {
+    commentsAtArchive = issue.comments.length;
+    const { threadId } = args as { threadId: string };
+    t.acted.push(`archive ${threadId}`);
+    t.state.archived.add(threadId);
+    return { archived: [threadId] };
+  });
+  const view = await t.list();
+  assert.equal(view.mode, "act");
+  assert.deepEqual(t.acted, ["archive thr_done"]);
+  assert.equal(commentsAtArchive, 1, "the comment is posted before the archive");
+  assert.equal(issue.comments.length, 1);
+  assert.equal(issue.comments[0]!.body, "[agent:sgc-steward] archived thr_done: TEAM-1 is Done; branch f at abc");
+  assert.deepEqual(view.threads.map((thread) => thread.id), [], "an archived thread leaves the list");
+  const entry = (await t.log())[0]!;
+  assert.deepEqual([entry.threadId, entry.decision, entry.result], ["thr_done", "archive", "done"]);
+});
+
+test("a thread that turned unsafe between the decision and the action is refused", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  let reads = 0;
+  t.sdk.stub("environments.status", async () => {
+    reads += 1;
+    const tree = reads === 1 ? "clean" : "dirty_uncommitted";
+    return { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: tree, hasUncommittedChanges: tree !== "clean" } } };
+  });
+  await t.list();
+  assert.ok(reads >= 2, "the checkout is read again before the action");
+  assert.deepEqual(t.acted, []);
+  assert.equal(issue.comments.length, 0, "no comment for an archive that did not happen");
+  const entry = (await t.log()).find((row) => row.decision === "archive")!;
+  assert.deepEqual([entry.result], ["refused"]);
+  assert.match(entry.reason, /changed since the decision/);
+  assert.match(entry.reason, /uncommitted/);
+});
+
+test("a thread that began a turn between the decision and the action is refused", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000 }], { settings: ACT });
+  t.issue("TEAM-1", "state-started");
+  let lists = 0;
+  const original = t.state.threads;
+  t.sdk.stub("threads.list", async () => {
+    lists += 1;
+    // The first list is the decision; later lists see a running turn.
+    return original.map((thread) => t.row({ ...thread, status: lists === 1 ? "idle" : "active" }));
+  });
+  await t.list();
+  assert.deepEqual(t.acted, []);
+  assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["compact", "refused"]]);
+});
+
+test("compact runs once per cache life", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000 }], { settings: ACT });
+  t.issue("TEAM-1", "state-started");
+  await t.list();
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  assert.deepEqual(t.acted, ["compact thr_a"]);
+  assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["compact", "done"]]);
+});
+
+test("a failed compact is logged with its error and tried again in the next pass; a success after that ends it", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000 }], { settings: ACT });
+  t.issue("TEAM-1", "state-started");
+  t.actFails.add("compact");
+  await t.list();
+  t.actFails.delete("compact");
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  assert.deepEqual(t.acted, ["compact thr_a"]);
+  const rows = await t.log();
+  assert.deepEqual(rows.map((row) => [row.result, row.error]), [["done", undefined], ["failed", "compact boom"]]);
+});
+
+test("the issue comment goes out once, even when the archive fails and is tried again", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  t.actFails.add("archive");
+  await t.list();
+  t.actFails.delete("archive");
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  assert.deepEqual(t.acted, ["archive thr_done"]);
+  assert.equal(issue.comments.length, 1);
+});
+
+test("an archive stops when the issue comment cannot be posted", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  t.linear.createFaults.push("dropped", "dropped");
+  await t.list();
+  assert.deepEqual(t.acted, []);
+  const entry = (await t.log())[0]!;
+  assert.equal(entry.result, "failed");
+  assert.match(entry.error ?? "", /comment/i);
+});
+
+test("a stuck thread is flagged to the steward once a day", async () => {
+  const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: ACT });
+  t.issue("TEAM-2", "state-started");
+  await t.list();
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  const flags = t.sends.filter((send) => send.threadId === "thr_steward");
+  assert.equal(flags.length, 1);
+  assert.equal(flags[0]!.input[0]!.text, "[sgc-steward] Thread thr_err stuck: the thread is in error");
+  t.clock.now += 25 * HOUR;
+  await t.list();
+  assert.equal(t.sends.filter((send) => send.threadId === "thr_steward").length, 2, "a day later, it says so again");
+});
+
+test("an unsafe archive candidate is flagged to the steward with the reason", async () => {
+  const t = await lifecycleSetup([{ id: "thr_dirty", title: "1: a" }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  t.state.env.set("env_thr_dirty", { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: "dirty_uncommitted", hasUncommittedChanges: true } } });
+  await t.list();
+  assert.deepEqual(t.acted, []);
+  assert.match(t.sends[0]!.input[0]!.text, /^\[sgc-steward\] Thread thr_dirty stuck: done but not safe to archive: the environment has uncommitted changes$/);
+});
+
+test("a failed steward message is tried again in the next pass, and not logged as sent", async () => {
+  const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: ACT });
+  t.issue("TEAM-2", "state-started");
+  let fail = true;
+  t.sdk.stub("threads.send", async (args: unknown) => {
+    if (fail) throw new Error("steward gone");
+    t.sends.push(args as (typeof t.sends)[number]);
+    return {};
+  });
+  await t.list();
+  assert.deepEqual(t.sends, []);
+  assert.equal((await t.log())[0]!.result, "failed");
+  fail = false;
+  t.clock.now += 5 * MINUTE;
+  await t.list();
+  assert.equal(t.sends.length, 1);
+});
+
+test("without a steward thread, a flag is logged and nothing is sent", async () => {
+  const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: { threadLifecycleMode: "act" } });
+  t.issue("TEAM-2", "state-started");
+  await t.list();
+  assert.deepEqual(t.sends, []);
+  assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["flag", "observed"]]);
+});
+
+test("observe mode never acts, flags, or comments, even with every other setting on", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_done", title: "1: finished" },
+      { id: "thr_big", title: "2: big", tokens: 300_000 },
+      { id: "thr_err", title: "2: broken", status: "error" },
+    ],
+    { settings: { stewardThread: "thr_steward", lifecycleActions: "archive-done,archive-parked,compact" } },
+  );
+  t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  const view = await t.list();
+  assert.equal(view.mode, "observe");
+  assert.deepEqual(t.acted, []);
+  assert.deepEqual(t.sends, []);
+  assert.deepEqual(t.linear.calls.filter((call) => call.startsWith("createComment")), []);
+  assert.ok((await t.log()).every((row) => row.result === "observed"));
+});
+
+test("a thread that is protected, or whose child is working, is never acted on", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_pinned", title: "1: a", pinnedAt: 1 },
+      { id: "thr_parent", title: "1: b" },
+      { id: "thr_child", title: "x", parentThreadId: "thr_parent", status: "active" },
+    ],
+    { settings: ACT },
+  );
+  t.issue("TEAM-1", "state-done");
+  await t.list();
+  assert.deepEqual(t.acted, []);
+});
+
+test("lifecycleActions turns each kind of action on or off", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_done", title: "1: finished" },
+      { id: "thr_big", title: "2: big", tokens: 300_000 },
+    ],
+    { settings: { ...ACT, lifecycleActions: "compact" } },
+  );
+  t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  await t.list();
+  assert.deepEqual(t.acted, ["compact thr_big"]);
+  assert.deepEqual((await t.log()).find((row) => row.threadId === "thr_done")?.result, "observed");
+});
+
+test("cacheLifeOverrides changes a provider's cache life", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", updatedAt: START - 25 * MINUTE }], { settings: { cacheLifeOverrides: "claude-code=30" } });
+  t.issue("TEAM-1", "state-done");
+  const thread = byId(await t.list(), "thr_a");
+  assert.deepEqual([thread.expiresAt, thread.expiresSource, thread.decision], [START + 5 * MINUTE, "override", "archive"]);
 });

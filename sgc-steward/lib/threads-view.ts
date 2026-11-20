@@ -6,7 +6,8 @@
 import { MINUTE, formatExpiresIn, type Decision, type ThreadState } from "./lifecycle.ts";
 import { appLink } from "./links.ts";
 
-export type DecisionResult = "observed" | "done" | "failed";
+/** observed: logged, not acted on; done: carried out; failed: tried and failed (see `error`); refused: not carried out because the thread changed or was not safe. */
+export type DecisionResult = "observed" | "done" | "failed" | "refused";
 
 /** One thread as the snapshot holds it. */
 export interface ThreadRowView {

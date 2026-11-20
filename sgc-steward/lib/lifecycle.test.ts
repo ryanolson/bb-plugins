@@ -11,6 +11,10 @@ import {
   decide,
   formatExpiresIn,
   issueFor,
+  cacheLifeOverridesProblem,
+  lifecycleActionsProblem,
+  parseCacheLifeOverrides,
+  parseLifecycleActions,
   safetyBlockers,
   titleIdentifier,
   type EnvFacts,
@@ -48,7 +52,7 @@ function thread(extra: Partial<ThreadFacts> = {}): ThreadFacts {
 }
 
 function issue(stateName: string, stateType: string, extra: Partial<IssueFacts> = {}): IssueFacts {
-  return { identifier: "TEAM-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, ...extra };
+  return { id: "uuid-1678", identifier: "TEAM-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, ...extra };
 }
 
 function context(extra: Partial<LifecycleContext> = {}): LifecycleContext {
@@ -237,6 +241,19 @@ test("the countdown reads in minutes and hours, and cold once past", () => {
   assert.equal(formatExpiresIn(10 * MINUTE), "10m");
   assert.equal(formatExpiresIn(HOUR), "1h");
   assert.equal(formatExpiresIn(HOUR + 5 * MINUTE), "1h 5m");
+});
+
+test("lifecycleActions and cacheLifeOverrides settings parse, and bad values are named", () => {
+  assert.deepEqual([...parseLifecycleActions("archive-done, compact")].sort(), ["archive-done", "compact"]);
+  assert.deepEqual([...parseLifecycleActions(undefined)], []);
+  assert.deepEqual([...parseLifecycleActions("archive-done,nope")], ["archive-done"]);
+  assert.match(lifecycleActionsProblem("archive-done,nope") ?? "", /Unknown action nope/);
+  assert.equal(lifecycleActionsProblem("archive-done, compact"), null);
+  assert.deepEqual(parseCacheLifeOverrides("pi=360, claude-code=30"), { pi: 6 * HOUR, "claude-code": 30 * MINUTE });
+  assert.deepEqual(parseCacheLifeOverrides("pi=0,bad,x=y,codex=5"), { codex: 5 * MINUTE });
+  assert.match(cacheLifeOverridesProblem("pi=360,oops") ?? "", /"oops" is not provider=minutes/);
+  assert.equal(cacheLifeOverridesProblem(""), null);
+  assert.equal(cacheLifeOverridesProblem("pi=360"), null);
 });
 
 test("a title names its issue by TEAM-NNNN or NNNN:", () => {

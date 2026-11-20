@@ -71,6 +71,7 @@ import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
+import { parseCacheLifeOverrides, parseLifecycleActions } from "./lib/lifecycle.ts";
 import { THREADS_MIGRATIONS, THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
@@ -178,9 +179,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       sdk: bb.sdk,
       now,
       settings: async () => {
-        const { stewardThread, teamKey } = await settings.get();
-        return { stewardThread, teamKey, cacheLifeOverrides: {} };
+        const { stewardThread, teamKey, threadLifecycleMode, lifecycleActions, cacheLifeOverrides } = await settings.get();
+        return {
+          mode: threadLifecycleMode === "act" ? ("act" as const) : ("observe" as const),
+          actions: parseLifecycleActions(lifecycleActions),
+          stewardThread,
+          teamKey,
+          cacheLifeOverrides: parseCacheLifeOverrides(cacheLifeOverrides),
+        };
       },
+      // A Linear write: ahead of polls and under the plugin's one lock. The comment's id comes from its text, so a repeat posts nothing new.
+      comment: async (issueId, body) => void (await writeLinear((linear) => postComment(linear, issueId, body))),
+      steward: () => stewardFor(),
+      send: async (threadId, text) => void (await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] })),
       // Reads only: it never takes the plugin's Linear lock, and errors say nothing of the key.
       linear: async () => {
         const { linearApiKey, teamKey } = await settings.get();

@@ -246,7 +246,7 @@ const decisionRowSchema = z.object({
   decision: decisionSchema,
   state: threadStateSchema,
   reason: z.string(),
-  result: z.enum(["observed", "done", "failed"]),
+  result: z.enum(["observed", "done", "failed", "refused"]),
   error: z.string().optional(),
   inputs: z.record(z.string(), z.unknown()),
 });

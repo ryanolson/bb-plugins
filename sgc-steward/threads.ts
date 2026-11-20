@@ -29,6 +29,7 @@ import {
   safetyBlockers,
   cacheExpiry,
   classify,
+  cacheLifeMs,
   decide,
   formatExpiresIn,
   issueFor,
@@ -36,6 +37,7 @@ import {
   type Classification,
   type Decision,
   type EnvFacts,
+  type LifecycleAction,
   type IssueFacts,
   type IssueWithComments,
   type LifecycleContext,
@@ -81,12 +83,24 @@ export const THREADS_MIGRATIONS: readonly string[] = [
   )`,
   // The reason a failed action failed.
   `ALTER TABLE thread_decisions ADD COLUMN error TEXT`,
+  // When the steward was last told that a thread needs attention: once a day per thread.
+  `CREATE TABLE IF NOT EXISTS thread_flags (
+    thread_id TEXT PRIMARY KEY,
+    sent_at INTEGER NOT NULL
+  )`,
 ];
+
+/** A flagged thread is reported to the steward at most this often. */
+export const FLAG_EVERY_MS = 24 * HOUR;
 
 /** How long Keep protects a thread. */
 export const KEEP_MS = 24 * HOUR;
 
 export interface ThreadsSettings {
+  /** observe: only log decisions. act: carry them out. */
+  mode: "observe" | "act";
+  /** The kinds of action that are on in act mode. */
+  actions: ReadonlySet<LifecycleAction>;
   stewardThread: string | undefined;
   teamKey: string;
   cacheLifeOverrides: Readonly<Record<string, number>>;
@@ -99,6 +113,12 @@ export interface ThreadsDeps {
   settings(): Promise<ThreadsSettings>;
   /** A Linear client and the team to read, or null when no key is set. Errors come back without the key. */
   linear(): Promise<{ client: LinearClient; teamKey: string } | null>;
+  /** Post a comment on a Linear issue under an id the text derives, so a repeat posts nothing new. Errors come back without the key. */
+  comment(issueId: string, body: string): Promise<void>;
+  /** The steward thread to tell, or null when none is set or bb reports it gone. */
+  steward(): Promise<string | null>;
+  /** Send a message to a thread, queued if it is running. */
+  send(threadId: string, text: string): Promise<void>;
   log(text: string): void;
 }
 
@@ -125,6 +145,7 @@ const ACTIVE = new Set(["active", "starting", "stopping", "pending", "provisioni
 
 function withComments(issue: LifecycleIssue): IssueWithComments {
   return {
+    id: issue.id,
     identifier: issue.identifier,
     url: issue.url,
     title: issue.title,
@@ -168,11 +189,15 @@ export function createThreads(deps: ThreadsDeps) {
 
   const loadSnapshot = db.prepare("SELECT body FROM thread_snapshot WHERE id = 1");
   const saveSnapshot = db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET taken_at = excluded.taken_at, body = excluded.body");
-  const lastDecision = db.prepare("SELECT decision, reason FROM thread_decisions WHERE thread_id = ? AND cycle = ? ORDER BY id DESC LIMIT 1");
+  const lastDecision = db.prepare("SELECT decision, reason, result, error FROM thread_decisions WHERE thread_id = ? AND cycle = ? ORDER BY id DESC LIMIT 1");
   const insertDecision = db.prepare(
     "INSERT INTO thread_decisions (at, thread_id, thread_title, cycle, decision, state, reason, inputs, result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const readDecisions = db.prepare("SELECT id, at, thread_id, thread_title, decision, state, reason, inputs, result, error FROM thread_decisions ORDER BY id DESC LIMIT ?");
+  const compactedSince = db.prepare("SELECT 1 FROM thread_decisions WHERE thread_id = ? AND decision = 'compact' AND result = 'done' AND at > ? LIMIT 1");
+  const lastFlag = db.prepare("SELECT sent_at FROM thread_flags WHERE thread_id = ?");
+  const setFlag = db.prepare("INSERT INTO thread_flags (thread_id, sent_at) VALUES (?, ?) ON CONFLICT (thread_id) DO UPDATE SET sent_at = excluded.sent_at");
+  const clearFlag = db.prepare("DELETE FROM thread_flags WHERE thread_id = ?");
   const keepStmt = db.prepare("INSERT INTO thread_keeps (thread_id, until, at) VALUES (?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET until = excluded.until, at = excluded.at");
   const activeKeeps = db.prepare("SELECT thread_id, until FROM thread_keeps WHERE until > ?");
 
@@ -277,23 +302,20 @@ export function createThreads(deps: ThreadsDeps) {
     };
   }
 
-  /** Record a decision once per cache life; again only when the decision or its reason changes. */
-  function record(row: ThreadRowView, facts: ThreadFacts, issue: IssueFacts | null | undefined, result: DecisionResult): void {
-    if (row.decision === "none") return;
-    const last = lastDecision.get(row.id, row.expiresAt) as { decision: string; reason: string } | undefined;
-    if (last !== undefined && last.decision === row.decision && last.reason === row.reason) return;
-    insertDecision.run(
-      now(),
-      row.id,
-      row.title,
-      row.expiresAt,
-      row.decision,
-      row.state,
-      row.reason,
-      JSON.stringify(inputsOf(facts, issue, row.expiresAt, row.expiresSource)),
-      result,
-      null,
-    );
+  /**
+   * Record a decision once per cache life; again only when the decision, its
+   * reason, or its result changes, so a pass that finds the same thing does not
+   * repeat the row.
+   */
+  function record(entry: Pick<Entry, "row" | "facts" | "issue">, result: DecisionResult, extra: { error?: string; reason?: string; decision?: Decision } = {}): void {
+    const { row, facts, issue } = entry;
+    const decision = extra.decision ?? row.decision;
+    const reason = extra.reason ?? row.reason;
+    if (decision === "none") return;
+    const error = extra.error ?? null;
+    const last = lastDecision.get(row.id, row.expiresAt) as { decision: string; reason: string; result: string; error: string | null } | undefined;
+    if (last !== undefined && last.decision === decision && last.reason === reason && last.result === result && last.error === error) return;
+    insertDecision.run(now(), row.id, row.title, row.expiresAt, decision, row.state, reason, JSON.stringify(inputsOf(facts, issue, row.expiresAt, row.expiresSource)), result, error);
   }
 
   /** Record what the owner asked for from the page: always logged, never folded into an earlier row. */
@@ -322,9 +344,9 @@ export function createThreads(deps: ThreadsDeps) {
   /**
    * Every thread's facts, state, and verdict now. With `only`, just that
    * thread's, and without reading Linear: a manual action needs the thread as
-   * it is, not its issue.
+   * it is, not its issue. A caller that has the issue passes it as `known`.
    */
-  async function collect(only?: string): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
+  async function collect(only?: string, known?: { issue: IssueFacts | null | undefined }): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
     const settings = await deps.settings();
     const at = now();
     const listed = await listThreads();
@@ -349,6 +371,7 @@ export function createThreads(deps: ThreadsDeps) {
     const kept = new Map((activeKeeps.all(at) as Array<{ thread_id: string; until: number }>).map((row) => [row.thread_id, row.until]));
     const issueCache = new Map<string, IssueWithComments | null>();
     const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
+      if (only !== undefined) return known?.issue;
       if ("error" in linear) return undefined;
       const found = issueFor(thread, linear.issues, linear.teamKey);
       if (found !== null) return asFacts(found);
@@ -425,12 +448,103 @@ export function createThreads(deps: ThreadsDeps) {
     return { at, linearError: "error" in linear && only === undefined ? linear.error : null, entries };
   }
 
+  /** The settings kind that turns on the archive or compact a verdict calls for. */
+  function actionFor(entry: Entry): LifecycleAction | null {
+    if (entry.row.decision === "compact") return "compact";
+    if (entry.row.decision === "archive") return entry.row.state === "parked" ? "archive-parked" : "archive-done";
+    return null;
+  }
+
+  /**
+   * Act mode, at decision time: read the thread again, since it may have
+   * changed since the pass began, check it is still safe, then archive or
+   * compact. Returns whether the thread was archived. Every outcome is logged.
+   */
+  async function carryOut(entry: Entry, settings: ThreadsSettings): Promise<boolean> {
+    const action = entry.row.decision === "compact" ? "compact" : "archive";
+    const fresh = (await collect(entry.row.id, { issue: entry.issue })).entries[0];
+    if (fresh === undefined) {
+      record(entry, "refused", { reason: "changed since the decision: the thread is gone" });
+      return false;
+    }
+    if (fresh.row.decision !== entry.row.decision) {
+      record(entry, "refused", { reason: `changed since the decision: now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})` });
+      return false;
+    }
+    if (action === "archive" && fresh.facts.env === undefined) {
+      fresh.facts.env = fresh.facts.environmentId === null ? null : await readEnv(sdk, fresh.facts.environmentId);
+    }
+    const blockers = actionBlockers(fresh, action);
+    if (blockers.length > 0) {
+      record(entry, "refused", { reason: `changed since the decision: ${blockers.join("; ")}` });
+      return false;
+    }
+    if (action === "compact") {
+      const life = cacheLifeMs(fresh.facts.providerId, settings.cacheLifeOverrides).ms;
+      // A compact starts a new cache life, so one inside the last life means this one was already compacted.
+      if (compactedSince.get(fresh.row.id, now() - life) !== undefined) return false;
+    }
+    if (action === "archive" && fresh.issue !== null && fresh.issue !== undefined) {
+      const env = fresh.facts.env;
+      const body = `[agent:sgc-steward] archived ${fresh.row.id}: ${fresh.row.reason}; branch ${env?.branch ?? "none"} at ${env?.head ?? "none"}`;
+      try {
+        await deps.comment(fresh.issue.id, body);
+      } catch (error) {
+        record(entry, "failed", { error: `could not post the issue comment: ${message(error)}` });
+        return false;
+      }
+    }
+    try {
+      if (action === "archive") await sdk.threads.archive({ threadId: fresh.row.id });
+      else await sdk.threads.compact({ threadId: fresh.row.id });
+    } catch (error) {
+      record(entry, "failed", { error: message(error) });
+      return false;
+    }
+    record(entry, "done");
+    return action === "archive";
+  }
+
+  /** Act mode: tell the steward that a thread needs attention, once a day per thread. */
+  async function flagSteward(entry: Entry): Promise<void> {
+    const steward = await deps.steward();
+    if (steward === null) {
+      record(entry, "observed");
+      return;
+    }
+    const id = entry.row.id;
+    const previous = lastFlag.get(id) as { sent_at: number } | undefined;
+    if (previous !== undefined && now() - previous.sent_at < FLAG_EVERY_MS) return;
+    // Kept before the send, so a crash after it does not send twice; a send that failed is forgotten, so the next pass tries again.
+    setFlag.run(id, now());
+    try {
+      await deps.send(steward, `[sgc-steward] Thread ${id} stuck: ${entry.row.reason}`);
+    } catch (error) {
+      if (previous === undefined) clearFlag.run(id);
+      else setFlag.run(id, previous.sent_at);
+      record(entry, "failed", { error: `could not tell the steward: ${message(error)}` });
+      return;
+    }
+    record(entry, "done");
+  }
+
   async function gather(): Promise<ThreadsView> {
+    const settings = await deps.settings();
     const { at, linearError, entries } = await collect();
-    // Observe only: log each decision, take no action.
-    for (const entry of entries) record(entry.row, entry.facts, entry.issue, "observed");
-    const rows = entries.map((entry) => entry.row).sort((a, b) => a.expiresAt - b.expiresAt || a.id.localeCompare(b.id));
-    return { checkedAt: at, mode: "observe", linearError, threads: rows };
+    const archived = new Set<string>();
+    for (const entry of entries) {
+      const kind = actionFor(entry);
+      if (settings.mode !== "act") record(entry, "observed");
+      else if (kind !== null && settings.actions.has(kind)) {
+        if (await carryOut(entry, settings)) archived.add(entry.row.id);
+      } else if (entry.row.decision === "flag") await flagSteward(entry);
+      else record(entry, "observed");
+    }
+    const rows = entries
+      .filter((entry) => !archived.has(entry.row.id))
+      .map((entry) => entry.row)
+      .sort((a, b) => a.expiresAt - b.expiresAt || a.id.localeCompare(b.id));
+    return { checkedAt: at, mode: settings.mode, linearError, threads: rows };
   }
 
   /** What stops an archive or a compact of this thread now: empty when it may go ahead. */

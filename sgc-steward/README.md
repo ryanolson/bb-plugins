@@ -139,7 +139,7 @@ The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, co
 
 ## Thread lifecycle
 
-Threads go cold. Each provider keeps a prompt cache for a fixed time after a thread's last turn, and a thread that resumes after that pays to read its whole context again. The plugin reads every bb thread every 5 minutes, works out each one's state and when its cache expires, and decides what should happen to it before then. So far it only observes: it logs each decision with its inputs and reason, and takes no action.
+Threads go cold. Each provider keeps a prompt cache for a fixed time after a thread's last turn, and a thread that resumes after that pays to read its whole context again. The plugin reads every bb thread every 5 minutes, works out each one's state and when its cache expires, and decides what should happen to it before then. It starts in observe mode, where it logs each decision with its inputs and reason and takes no action. The owner switches it to act mode in the plugin settings (see "Act mode").
 
 **State.** `working` (a turn is running), `waiting` (idle with a queued message, or while a child thread, background agent, or workflow runs), `idle-active` (idle, and its issue is In Progress or Todo, or it has no issue yet, or Linear could not be read), `parked` (its issue is Backlog with `paused`, or has a `waiting:*` label, or has been In Review with no change for 48 hours), `done` (its issue is Done or Canceled), `orphan` (no issue and idle for 24 hours), `stuck` (error status, or a queued turn older than 30 minutes). Mission Control (`thr_zrybxd2ijw`), the `stewardThread`, and any thread pinned in bb are `protected`, and never anything else.
 
@@ -159,6 +159,19 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 | `working`, `waiting`, `protected` | none |
 
 Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
+
+### Act mode
+
+Set `threadLifecycleMode` to `act` and the plugin carries out its decisions. Only the owner changes this setting. For each thread with an `archive` or `compact` decision, in the same pass that decided it:
+
+1. It reads the thread again, since it may have changed, and checks it is still safe: the same decision, no running turn or queued message, no working child, not protected, and for an archive a checkout that is clean with no commits ahead of its base. If anything changed it does nothing, and logs `refused` with what changed.
+2. A compact goes only to an idle thread, and not twice in one cache life: it is skipped when a compact of the thread was logged `done` within the provider's cache life.
+3. Before an archive of a thread that has an issue, it posts a signed comment on the issue: `[agent:sgc-steward] archived <thread>: <reason>; branch <name> at <commit>`. The comment's id comes from its text, so a retry posts no second comment. If the comment cannot be posted, the thread is not archived, and the next pass tries again within the window.
+4. It archives or compacts, and logs `done`, or `failed` with the error. bb removes an archived worktree 5 minutes later, and keeps any branch whose commits are not on a remote.
+
+For a `flag` decision (stuck, orphan, or an unsafe archive candidate), it sends the `stewardThread` one message per thread per 24 hours: `[sgc-steward] Thread <id> stuck: <reason>`. With no steward thread, the flag is only logged. A message that fails to send is tried again in the next pass. A decision whose action is turned off is only logged. Observe mode never archives, compacts, comments, or sends.
+
+In act mode a thread archived in a pass leaves the snapshot at once. `bb sgc threads` shows the mode.
 
 **The Threads tab** shows the same view as `bb sgc threads`. A summary line on top gives the counts by state, the threads going cold in the next 15 minutes, the tokens held in threads whose cache is already cold, and the mode. Below it, the threads are grouped by host (threads on no host last), each group with the soonest cache expiry first: title (a link to the thread), state, issue (a `linear://` link), provider and model, tokens used and window, a live countdown to cache expiry (`cold` once past), the decision and its reason, and the last logged action for the thread. The decision log follows, newest first: time, thread, decision, reason, and result (`observed`, `done`, or `failed` with the error). The tab's badge counts the threads that are `stuck` or flagged. The page reads the stored snapshot every 30 seconds while the tab is open, and Refresh reads bb now; the service itself refreshes every 5 minutes. A running thread is never counted as cold.
 
@@ -232,6 +245,9 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.
 - `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool, and it gets a message when you mark a todo done or reopen one. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns both off. A known limit: any agent can change this setting, because every agent runs as you and bb has no setting that only you can change, so an agent can name itself the steward and then get your todo messages too. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
+- `threadLifecycleMode` (default `observe`): `observe` logs the lifecycle decisions; `act` carries them out. See "Act mode".
+- `lifecycleActions` (default `archive-done,archive-parked,compact`): the actions that are on in act mode. A decision for one that is off is only logged. Unknown names are refused.
+- `cacheLifeOverrides` (default empty): `provider=minutes` pairs, like `pi=360,claude-code=30`, for the cache life used when bb gives no expiry. They replace the built-in table's row for that provider.
 
 ## Coding gotchas
 

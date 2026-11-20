@@ -45,6 +45,8 @@ export type Decision = "archive" | "compact" | "let-cool" | "flag" | "keep" | "n
 
 /** The Linear issue a thread works on, as far as the lifecycle needs it. */
 export interface IssueFacts {
+  /** Linear's own id, for writes. */
+  id: string;
   identifier: string;
   url: string;
   title: string;
@@ -276,4 +278,43 @@ export function issueFor(thread: { id: string; title: string }, issues: readonly
   if (best !== null) return best.issue;
   const identifier = titleIdentifier(thread.title, teamKey);
   return identifier === null ? null : (issues.find((issue) => issue.identifier.toUpperCase() === identifier) ?? null);
+}
+
+/** The kinds of action the plugin may take in act mode. */
+export const LIFECYCLE_ACTIONS = ["archive-done", "archive-parked", "compact"] as const;
+export type LifecycleAction = (typeof LIFECYCLE_ACTIONS)[number];
+
+/** The actions a `lifecycleActions` setting turns on: a comma-separated list; unknown names are ignored. */
+export function parseLifecycleActions(text: string | undefined): Set<LifecycleAction> {
+  const named = (text ?? "").split(",").map((name) => name.trim()).filter((name) => name !== "");
+  return new Set(LIFECYCLE_ACTIONS.filter((action) => named.includes(action)));
+}
+
+/** Why a `lifecycleActions` value is wrong, or null. */
+export function lifecycleActionsProblem(text: string): string | null {
+  const unknown = text.split(",").map((name) => name.trim()).filter((name) => name !== "" && !(LIFECYCLE_ACTIONS as readonly string[]).includes(name));
+  return unknown.length === 0 ? null : `Unknown action ${unknown.join(", ")}. Use ${LIFECYCLE_ACTIONS.join(", ")}.`;
+}
+
+const OVERRIDE = /^([A-Za-z0-9._-]+)\s*=\s*(\d+)$/;
+
+/** Cache lives in milliseconds from `provider=minutes` pairs, comma-separated: `pi=360, claude-code=60`. Bad pairs are ignored. */
+export function parseCacheLifeOverrides(text: string | undefined): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const pair of (text ?? "").split(",")) {
+    const match = OVERRIDE.exec(pair.trim());
+    if (match !== null && Number(match[2]) > 0) result[match[1]!] = Number(match[2]) * MINUTE;
+  }
+  return result;
+}
+
+/** Why a `cacheLifeOverrides` value is wrong, or null. */
+export function cacheLifeOverridesProblem(text: string): string | null {
+  for (const pair of text.split(",")) {
+    const trimmed = pair.trim();
+    if (trimmed === "") continue;
+    const match = OVERRIDE.exec(trimmed);
+    if (match === null || Number(match[2]) <= 0) return `"${trimmed}" is not provider=minutes, like pi=360.`;
+  }
+  return null;
 }
