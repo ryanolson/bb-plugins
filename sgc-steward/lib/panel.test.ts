@@ -46,6 +46,14 @@ test("one card's answer names its block, its revision, and its one question", ()
     issueId: "uuid-1",
     blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes." }],
   });
+  // A block not in the question format takes typed text only, and its card
+  // offers no choices, so a picked letter never rides along and never stands
+  // in for the answer.
+  assert.equal(questionAnswerInput("uuid-1", raw, null, { option: "B", text: "  " }), null);
+  assert.deepEqual(questionAnswerInput("uuid-1", raw, null, { option: "B", text: "Yes." }), {
+    issueId: "uuid-1",
+    blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes." }],
+  });
   const typed = questionAnswerInput("uuid-1", parsed, 2, { option: null, text: "Ship Friday." });
   assert.ok(typed);
   assert.equal(

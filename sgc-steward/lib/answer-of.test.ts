@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { STORE_MIGRATIONS, createAskStore } from "./ask-store.ts";
 import type { Ask } from "./asks.ts";
+import { PAUSE_OPTION } from "./choices.ts";
 import { defineCli } from "@get-bb/plugin-sdk";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { answerOf, answerOfCommand } from "./answer-of.ts";
@@ -109,19 +110,34 @@ test("an answer stored before the channel was kept reports no channel, so a chec
   assert.deepEqual([view.status, view.channel, view.option], ["answered", null, { letter: "A", text: "Approve" }]);
 });
 
+test("an answer that picked a choice the card adds is reported, not refused", () => {
+  // A row stored before every question carried Pause, or one with no options at
+  // all: the card still showed the owner a letter to pick.
+  const { store } = open();
+  store.admit(ask("bbq_pause"), true);
+  assert.equal(store.answer("bbq_pause", { option: "C", text: "Stop here." }, "bb", delivery, null), "answered");
+  assert.deepEqual(answerOf(store.get("bbq_pause")!).option, { letter: "C", text: PAUSE_OPTION });
+  store.admit(ask("bbq_note", { question: "Anything else?", options: [] }), true);
+  store.answer("bbq_note", { option: "A", text: "Ship Friday." }, "bb", delivery, null);
+  const note = answerOf(store.get("bbq_note")!);
+  assert.deepEqual([note.option, note.text], [null, "Ship Friday."], "the note is the typed answer");
+  assert.deepEqual(note.options, [], "the stored row still holds only the options as asked");
+});
+
 test("a stored answer naming an option its question lacks is refused as corrupt, not printed as a free-text answer", async (t) => {
   const { db, store } = open();
   store.admit(ask("bbq_1", { options: [{ letter: "A", text: "Approve", recommended: true }] }), true);
-  db.prepare(`UPDATE asks SET state = 'answered', answer = '{"option":"B","text":""}', answered_at = 1, answer_channel = 'bb' WHERE id = 'bbq_1'`).run();
-  assert.throws(() => answerOf(store.get("bbq_1")!), /option B, which it does not have/);
+  // B would be the Pause the card adds, so only a letter it never showed is corrupt.
+  db.prepare(`UPDATE asks SET state = 'answered', answer = '{"option":"C","text":""}', answered_at = 1, answer_channel = 'bb' WHERE id = 'bbq_1'`).run();
+  assert.throws(() => answerOf(store.get("bbq_1")!), /option C, which it does not have/);
   const { bb, harness } = createFakePluginHost({ pluginId: "sgc-steward" });
   t.after(() => harness.lifecycle.dispose());
   bb.cli.register(defineCli({ name: "sgc", summary: "Read stored answers", commands: { "answer-of": answerOfCommand(store) } }));
   const json = await harness.behavior.runCli(["answer-of", "bbq_1", "--json"]);
   assert.equal(json.exitCode, 1);
-  assert.deepEqual(JSON.parse(json.stdout), { ok: false, error: { code: "corrupt", message: "bbq_1 has an answer for option B, which it does not have" } });
+  assert.deepEqual(JSON.parse(json.stdout), { ok: false, error: { code: "corrupt", message: "bbq_1 has an answer for option C, which it does not have" } });
   const text = await harness.behavior.runCli(["answer-of", "bbq_1"]);
   assert.equal(text.exitCode, 1);
   assert.equal(text.stdout, "");
-  assert.match(text.stderr, /option B, which it does not have/);
+  assert.match(text.stderr, /option C, which it does not have/);
 });
