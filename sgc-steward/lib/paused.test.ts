@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createLinearClient, type FetchLike } from "./linear.ts";
 import { PANEL_TABS, tabBadges, tabOf, tabPath } from "./panel.ts";
-import { appLink, resumeComment, resumeMessage } from "./paused.ts";
+import { appLink } from "./links.ts";
+import { resumeComment, resumeMessage } from "./paused.ts";
 
 function fakeLinear(responses: unknown[]) {
   const calls: Array<{ query: string; variables: Record<string, unknown> }> = [];

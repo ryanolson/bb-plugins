@@ -122,7 +122,7 @@ The Paused tab lists work that stopped. It holds two kinds of row, with a count 
 
 Resume, on a paused issue, posts one comment from you, `Resumed (from the SGC page)` and your note, removes the `paused` label, moves the issue to the team's Todo state (its unstarted state named Todo, else its first unstarted state), and sends the steward thread a queued message that starts with `[sgc-steward] Resumed <issue>: <title>`. It works as Done does: the Resume is kept before it writes, its comment goes under its own id, and the message is kept in the transaction that finishes it. A repeat after a failed state change, or after a lost reply, finishes that same Resume, with its own comment, note, and steward thread, and posts no second comment. A repeat of a Resume that already finished is refused, because the issue is no longer paused. An expired question that names an issue gets the same Resume box; one with no issue gets only Dismiss, which hides the row in this browser (it keeps nothing on Linear or in the plugin).
 
-Every Linear link the page draws, on Questions, Todos, and Paused, is a `linear://` link, so it opens the Linear app. The CLI keeps `https://` links. The helper is `appLink` in `lib/paused.ts`.
+Every Linear link the page draws, on Questions, Todos, and Paused, is a `linear://` link, so it opens the Linear app. The CLI keeps `https://` links. The helper is `appLink` in `lib/links.ts`.
 
 ## Hosts
 
@@ -195,6 +195,7 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 ## Coding gotchas
 
 - **A state change that two paths can make must be one conditional write.** An answer, a withdrawal, and an expiry each move an open question on. Each does `UPDATE ... WHERE state = 'open'` inside the transaction that keeps its notice, and checks `changes`; a read of the state first is not enough. The loser saves nothing. The first expiry design read the question, awaited a thread lookup, and then wrote; the write still must not trust that read. Tests: `an answer that lands first wins, and an expired question takes no answer or withdrawal` in `lib/expiry.test.ts`.
+- **Page code must never import a module that reaches a `node:` builtin.** The page is bundled for the browser. `app.tsx` once imported `appLink` from `lib/paused.ts`, which reaches `lib/questions.ts` and `node:crypto`; every server test passed, and `bb plugin update` failed at the page build. Keep what the page needs in browser-safe modules such as `lib/links.ts`, and use `import type` for types. Test: `lib/page-imports.test.ts` walks the page's import graph.
 - **Test time with the injected clock, never with a sleep.** `createAskStore(db, now)` and `setup({ now })` take the clock; expiry tests move it by whole days and poll.
 
 ## Develop
@@ -222,7 +223,8 @@ bb plugin logs sgc-steward
 - `lib/format.ts`: plain text for questions: notification previews, the `bb sgc questions` listing, and its `--block` option.
 - `lib/host-file.ts`: reading a file named on the command line, on the machine the command came from.
 - `lib/settings.ts`: the plugin's settings.
-- `lib/paused.ts`: the Resume comment and message, the `linear://` link helper, and the text of `bb sgc paused`.
+- `lib/links.ts`: the `linear://` link helper, which the page imports.
+- `lib/paused.ts`: the Resume comment and message, and the text of `bb sgc paused`.
 - `lib/resume-store.ts`: where an unfinished Resume is kept.
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
