@@ -137,6 +137,56 @@ The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, co
 - The tab reads bb when the page opens, and every 30 seconds while the tab is open. Its count is the waiting turns, and its dot means the limits could not be read.
 - `bb sgc hosts --digest` prints only the flags for the steward: the global limit when it is reached, the hosts at their limit, and the hosts with waiting turns and the oldest wait.
 
+## Thread lifecycle
+
+Threads go cold. Each provider keeps a prompt cache for a fixed time after a thread's last turn, and a thread that resumes after that pays to read its whole context again. The plugin reads every bb thread every 5 minutes, works out each one's state and when its cache expires, and decides what should happen to it before then. It starts in observe mode, where it logs each decision with its inputs and reason and takes no action. The owner switches it to act mode in the plugin settings (see "Act mode").
+
+**State.** `working` (a turn is running), `waiting` (idle with a queued message, or while a child thread, background agent, or workflow runs), `idle-active` (idle, and its issue is In Progress or Todo, or it has no issue yet, or Linear could not be read), `parked` (its issue is Backlog with `paused`, or has a `waiting:*` label, or has been In Review with no change for 48 hours), `done` (its issue is Done or Canceled), `orphan` (no issue and idle for 24 hours), `stuck` (error status, or a queued turn older than 30 minutes). Mission Control (`thr_zrybxd2ijw`), the `stewardThread`, and any thread pinned in bb are `protected`, and never anything else.
+
+**Issue.** A thread's issue is the one named by its latest signed `claim:` comment (`[agent:<tool> <thread id>] claim: ...`), else by a `<TEAM>-NNNN` or `NNNN:` prefix in its title, where `<TEAM>` is the team key setting. Each pass reads the team's issues changed in the last 30 days, with their oldest 15 and newest 15 comments, and asks for a titled issue that is older by name.
+
+**Cache expiry.** bb's `compactionOfferAt`, else the thread's last activity plus its provider's cache life: 1 hour for `claude-code` and `codex`, 6 hours for `pi` and `acp-opencode`, and 1 hour for a provider not in the table (`DEFAULT_CACHE_LIFE_MS` in `lib/lifecycle.ts`).
+
+**Decision.** A compact is decided in the last 15 minutes before the cache expires (the last 5 for a cache that lives under 15 minutes). An archive of a `done` or `parked` thread, and a flag, are decided whenever the thread is seen: a cold cache has nothing left to save, and an issue can close long after the thread went quiet.
+
+| State | Decision |
+| --- | --- |
+| `done`, `parked`, and safe | `archive` |
+| `done` or `parked`, not safe | `flag`, with the reason |
+| `idle-active`, 100k tokens or more, with an open issue | `compact` |
+| `idle-active`, under 100k tokens or no issue | `let-cool` |
+| `stuck`, `orphan` | `flag`, whenever seen: a thread can stay stuck long after its cache is cold |
+| `working`, `waiting`, `protected` | none |
+
+Safe means the environment has no uncommitted changes, no commits that neither its base nor a remote has, no child is working, and the thread is not protected. bb reports commits ahead of the base branch, not ahead of the upstream, so a branch that a remote has (by name) counts as pushed. A local commit on a pushed branch is not lost: when bb tears down an archived worktree it keeps the branch while any commit is not on a remote, and the archive comment names the branch and commit. An archive also archives the thread's children and the threads it owns (bb's lifecycle owner), so every thread below it must be unprotected, with a safe checkout, as above. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no compact decision.
+
+### Act mode
+
+Set `threadLifecycleMode` to `act` and the plugin carries out its decisions. Only the owner changes this setting. Only the background service, in its five-minute pass, acts. `bb sgc threads`, the page, and its Refresh read and log, as `observed`, whatever the mode. For each thread with an `archive` or `compact` decision, in the same pass that decided it:
+
+1. It reads the thread again, since it may have changed, and checks it is still safe: the same decision, no running turn or queued message, no working child, no child with queued work, not protected, and for an archive a checkout with no uncommitted changes and no commits ahead of its base that no remote has. If anything changed it does nothing, and logs `refused` with what changed.
+2. A compact goes only to an idle thread, and not twice in one cache life: it is skipped when a compact of the thread was logged `done` for the same cache expiry, or within the provider's cache life.
+3. Before an archive of a thread that has an issue, it posts a signed comment on the issue: `[agent:sgc-steward] archived <thread>: <reason>; branch <name> at <commit>`. The comment's id comes from the thread and the issue, not its text or the thread's activity, so a retry posts no second comment even when the branch head moved or the thread was pinned and unpinned. The thread's issue is worked out again just before the action (and its category must still be the one decided and turned on); the whole check runs once more after the comment posts, on the thread, its checkouts, its pins, the cache, and the settings as they are then, from its title and the claims as they are then, so a Done that reopened, or a thread retitled to another issue, stops the archive. If the comment cannot be posted, the thread is not archived, and the next pass tries again within the window.
+4. It archives or compacts, and logs `done`, or `failed` with the error. bb removes an archived worktree 5 minutes later, and keeps any branch whose commits are not on a remote.
+
+For a `flag` decision (stuck, orphan, or an unsafe archive candidate), it sends the `stewardThread` one message per thread per 24 hours: `[sgc-steward] Thread <id> stuck: <reason>`. With no steward thread, the flag is only logged. A message that fails to send is not tried again the same day, because a reply that was lost may hide a message that landed; the failure is logged, and the next try is the next day. A decision whose action is turned off is only logged. Observe mode never archives, compacts, comments, or sends.
+
+In act mode a thread archived in a pass leaves the snapshot at once. `bb sgc threads` shows the mode.
+
+**The Threads tab** shows the same view as `bb sgc threads`. A summary line on top gives the counts by state, the threads going cold in the next 15 minutes, the tokens held in threads whose cache is already cold, and the mode. Below it, the threads are grouped by host (threads on no host last), each group with the soonest cache expiry first: title (a link to the thread), state, issue (a `linear://` link), provider and model, tokens used and window, a live countdown to cache expiry (`cold` once past), the decision and its reason, and the last logged action for the thread. The decision log follows, newest first: time, thread, decision, reason, and result (`observed`, `done`, or `failed` with the error). The tab's badge counts the threads that are `stuck` or flagged. The page reads the stored snapshot every 30 seconds while the tab is open, and Refresh reads bb now; the service itself refreshes every 5 minutes. A running thread is never counted as cold.
+
+Each row has three buttons. They act whatever the mode, because the owner pressed them:
+
+- **Keep** protects the thread for 24 hours: it is `protected` until then, so no decision touches it. The plugin keeps the time in its own SQLite table, not in bb's thread metadata. The keep is logged as `keep`.
+- **Compact now** compacts the thread. It refuses a thread that is protected, running a turn, in error, or holding a queued message or a child at work.
+- **Archive now** archives the thread. It refuses for the same reasons, and also when its checkout is dirty, has commits that neither its base nor a remote has, could not be read, or has a child thread that is protected or has such a checkout. It asks to confirm first.
+
+A refusal says why (`Cannot archive <id>: ...`) and changes nothing and logs nothing. A compact or archive that bb itself refuses is logged as `failed` with bb's error. A success is logged as `done`. The page disables a button for a protected, running, or waiting thread, with the reason on hover; the server checks again.
+
+The RPC is `threads.list` (`{ refresh }`: the snapshot, read now when `refresh` is true or none is stored yet, and the last 100 decisions) and `threads.act` (`{ threadId, action }`).
+
+The service keeps its last snapshot and the decision log in the plugin's SQLite database. A decision is logged once per cache life, and again only when the decision or its reason changes.
+
 ## How it works
 
 A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
@@ -162,6 +212,8 @@ bb sgc paused [--json] [--cached]
 bb sgc resume <issue> [--note <text>] [--json]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc hosts [--digest] [--json]
+bb sgc threads [--json] [--cached]
+bb sgc threads log [--limit <n>] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -177,6 +229,7 @@ bb sgc key --api-key-stdin
 - `resume` resumes a paused issue, as the Resume button does. `--note` adds a note to the comment and to the steward's message.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
+- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. It exits 1 when bb could not be read.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -192,6 +245,9 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.
 - `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool, and it gets a message when you mark a todo done or reopen one. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns both off. A known limit: any agent can change this setting, because every agent runs as you and bb has no setting that only you can change, so an agent can name itself the steward and then get your todo messages too. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
+- `threadLifecycleMode` (default `observe`): `observe` logs the lifecycle decisions; `act` carries them out. See "Act mode".
+- `lifecycleActions` (default `archive-done,archive-parked,compact`): the actions that are on in act mode. A decision for one that is off is only logged. Unknown names are refused.
+- `cacheLifeOverrides` (default empty): `provider=minutes` pairs, like `pi=360,claude-code=30`, for the cache life used when bb gives no expiry. They replace the built-in table's row for that provider.
 
 ## Coding gotchas
 
@@ -232,11 +288,14 @@ bb plugin logs sgc-steward
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
+- `lib/threads-view.ts`: the Threads tab's view model: row text, grouping by host, the summary, the badge count, and button refusals. The page imports it.
+- `lib/lifecycle.ts`: thread states, cache expiry, and the decision, as pure functions with no bb or Node imports.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
+- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, and `bb sgc threads`.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, and Threads tabs, its sidebar badge, and the notifier.
 - `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

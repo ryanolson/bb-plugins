@@ -207,6 +207,50 @@ const hostsViewSchema = z.object({
   unplaced: hostCountsSchema,
 });
 
+const threadStateSchema = z.enum(["working", "waiting", "idle-active", "parked", "done", "orphan", "stuck", "protected"]);
+const decisionSchema = z.enum(["archive", "compact", "let-cool", "flag", "keep", "none"]);
+/** The thread snapshot, as lib/threads-view.ts types it; the handler's return type checks the two agree. */
+const threadsViewSchema = z.object({
+  checkedAt: z.number(),
+  mode: z.enum(["observe", "act"]),
+  linearError: z.string().nullable(),
+  threads: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      state: threadStateSchema,
+      stateReason: z.string(),
+      issue: z.object({ identifier: z.string(), url: z.string(), stateName: z.string() }).nullable(),
+      provider: z.string(),
+      model: z.string().nullable(),
+      hostId: z.string().nullable(),
+      hostName: z.string().nullable(),
+      environmentId: z.string().nullable(),
+      usedTokens: z.number().nullable(),
+      contextWindow: z.number().nullable(),
+      lastActivityAt: z.number(),
+      expiresAt: z.number(),
+      expiresSource: z.enum(["offer", "provider-table", "override"]),
+      expiresIn: z.string(),
+      inWindow: z.boolean(),
+      decision: decisionSchema,
+      reason: z.string(),
+    }),
+  ),
+});
+const decisionRowSchema = z.object({
+  id: z.number(),
+  at: z.number(),
+  threadId: z.string(),
+  threadTitle: z.string(),
+  decision: decisionSchema,
+  state: threadStateSchema,
+  reason: z.string(),
+  result: z.enum(["observed", "done", "failed", "refused"]),
+  error: z.string().optional(),
+  inputs: z.record(z.string(), z.unknown()),
+});
+
 export const rpcContract = defineRpcContract({
   /** The questions from the last poll and the bb questions; reads nothing from Linear. */
   "questions.list": { input: z.null(), output: panelSchema },
@@ -265,6 +309,16 @@ export const rpcContract = defineRpcContract({
   },
   /** Per host: running and idle threads, turns waiting on the limit, and the limit. Reads bb only; never changes a limit. */
   "hosts.list": { input: z.null(), output: hostsViewSchema },
+  /** The thread lifecycle snapshot and the decision log. Reads bb when asked to, or when there is no snapshot yet. */
+  "threads.list": {
+    input: z.object({ refresh: z.boolean() }),
+    output: z.object({ view: threadsViewSchema.nullable(), log: z.array(decisionRowSchema) }),
+  },
+  /** Keep a thread (protected for 24 hours), compact it now, or archive it now. Refused with the reason when it is not safe. */
+  "threads.act": {
+    input: z.object({ threadId: z.string().min(1), action: z.enum(["keep", "compact", "archive"]) }),
+    output: z.object({ message: z.string() }),
+  },
   /** Hand out the questions no window has notified about yet, once each. */
   "notifications.claim": { input: z.null(), output: z.object({ notifications: z.array(notificationSchema) }) },
 });

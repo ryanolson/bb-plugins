@@ -2,6 +2,7 @@
 // page show them.
 import type { PluginSettingDescriptor } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { cacheLifeOverridesProblem, lifecycleActionsProblem } from "./lifecycle.ts";
 
 /** The agent tool the steward withdraws other threads' questions with. */
 export const WITHDRAW_TOOL = "sgc_withdraw_question";
@@ -41,5 +42,33 @@ export const SETTINGS = {
     label: "Steward thread",
     description: `The bb thread id of the steward, which may withdraw any open bb question, with a reason, through the ${WITHDRAW_TOOL} agent tool, and which gets a message when the owner marks a todo done or reopens it. Unset, each thread withdraws only its own, and no todo messages are sent.`,
     experimental_schema: z.string().regex(/^thr_[a-z0-9]+$/, "Use a bb thread id, like thr_abc123"),
+  },
+  threadLifecycleMode: {
+    type: "select",
+    label: "Thread lifecycle mode",
+    description:
+      "observe: the plugin decides what to do with each thread before its prompt cache expires, and only logs it. act: it also archives finished and parked threads, compacts large active ones, and tells the steward about stuck ones.",
+    options: ["observe", "act"],
+    default: "observe",
+  },
+  lifecycleActions: {
+    type: "string",
+    label: "Thread lifecycle actions",
+    description: "In act mode, which actions are on: archive-done, archive-parked, and compact, separated by commas. A decision for an action that is off is only logged.",
+    default: "archive-done,archive-parked,compact",
+    experimental_schema: z.string().superRefine((text, ctx) => {
+      const problem = lifecycleActionsProblem(text);
+      if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
+    }),
+  },
+  cacheLifeOverrides: {
+    type: "string",
+    label: "Cache life overrides (minutes)",
+    description: "How long a provider keeps a thread's prompt cache, when bb gives no expiry: provider=minutes, separated by commas, like pi=360,claude-code=60. Providers not listed use the built-in table: claude-code and codex 60, pi and acp-opencode 360, others 60.",
+    default: "",
+    experimental_schema: z.string().superRefine((text, ctx) => {
+      const problem = cacheLifeOverridesProblem(text);
+      if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
+    }),
   },
 } satisfies Record<string, PluginSettingDescriptor>;

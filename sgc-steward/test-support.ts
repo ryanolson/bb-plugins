@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createSgcStewardPlugin, type SgcStewardOptions } from "./server.ts";
 import type { Snapshot } from "./lib/contract.ts";
-import { HUMAN_LABEL, LinearError, PAUSED_LABEL, TODO_LABEL, type LinearClient, type LinearIssue, type PausedIssue, type TodoIssue } from "./lib/linear.ts";
+import { HUMAN_LABEL, LinearError, type LifecycleIssue, PAUSED_LABEL, TODO_LABEL, type LinearClient, type LinearIssue, type PausedIssue, type TodoIssue } from "./lib/linear.ts";
 import type { LinearComment } from "./lib/questions.ts";
 
 export const KEY = "lin_api_test_not_a_real_key";
@@ -180,6 +180,31 @@ export class FakeLinear implements LinearClient {
     return issue === undefined ? null : this.paused(issue);
   }
 
+  /** Reads for the thread lifecycle: every fake issue, any state; not recorded in `calls`. */
+  lifecycle(issue: FakeIssue): LifecycleIssue {
+    const state = this.states.find((candidate) => candidate.id === issue.state?.id);
+    return structuredClone({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      url: issue.url,
+      updatedAt: issue.updatedAt,
+      teamKey: issue.teamKey,
+      state: state === undefined ? null : { name: state.name, type: state.type },
+      labels: issue.labels.map((label) => (label.group === null ? label.name : `${label.group}/${label.name}`)),
+      comments: issue.comments.map((comment) => ({ body: comment.body, createdAt: comment.createdAt })),
+    });
+  }
+
+  async listLifecycleIssues(teamKey: string) {
+    return this.issues.filter((issue) => issue.teamKey === teamKey).map((issue) => this.lifecycle(issue));
+  }
+
+  async getLifecycleIssue(id: string) {
+    const issue = this.find(id);
+    return issue === undefined ? null : this.lifecycle(issue);
+  }
+
   async todoStateId(teamKey: string) {
     this.calls.push(`todoStateId ${teamKey}`);
     return this.states.find((state) => state.type === "unstarted")?.id ?? null;
@@ -233,7 +258,8 @@ export interface Notice {
  * The plugin on a fake host with a fake Linear. Thread sends are recorded in
  * `sends` and succeed; a test re-stubs `threads.send` to make them fail.
  */
-export async function setup(options: { key?: string | null; postWindowMs?: number; now?: () => number } = {}) {
+export async function setup(options: { key?: string | null; postWindowMs?: number; now?: () => number; settings?: Record<string, string> } = {}) {
+  const passWaiters: Array<() => void> = [];
   const linear = new FakeLinear();
   const factory = createSgcStewardPlugin({
     createClient: (apiKey) => {
@@ -243,8 +269,12 @@ export async function setup(options: { key?: string | null; postWindowMs?: numbe
     retryDelayMs: 0,
     ...(options.postWindowMs === undefined ? {} : { postWindowMs: options.postWindowMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    afterThreadsPass: () => passWaiters.splice(0).forEach((resolve) => resolve()),
   });
-  const settings: Record<string, string> = options.key === null ? { teamKey: "TEAM" } : { linearApiKey: options.key ?? KEY, teamKey: "TEAM" };
+  const settings: Record<string, string> = {
+    ...(options.key === null ? { teamKey: "TEAM" } : { linearApiKey: options.key ?? KEY, teamKey: "TEAM" }),
+    ...options.settings,
+  };
   const host = createFakePluginHost({ pluginId: "sgc-steward", settings });
   const { harness } = host;
   const sends: Array<{ threadId: string; mode: string; input: Array<{ type: string; text: string; mentions: unknown[] }> }> = [];
@@ -259,7 +289,15 @@ export async function setup(options: { key?: string | null; postWindowMs?: numbe
   await factory(host.bb);
   const refresh = async () => (await harness.behavior.callRpc("questions.refresh", null)) as Snapshot;
   const claim = async () => (await harness.behavior.callRpc("notifications.claim", null)) as { notifications: Notice[] };
-  return { linear, harness, refresh, claim, sends, factory };
+  /** One background pass of the thread lifecycle, the only one that acts in act mode. */
+  const pass = async () => {
+    const next = new Promise<void>((resolve) => passWaiters.push(resolve));
+    const { controller, done } = harness.runService("threads");
+    await next;
+    controller.abort();
+    await done;
+  };
+  return { linear, harness, refresh, claim, sends, factory, pass };
 }
 
 export function revisionOf(snapshot: Snapshot, blockId: string): string {

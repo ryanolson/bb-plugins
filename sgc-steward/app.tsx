@@ -3,7 +3,7 @@
 // a tab per list, each at its own route: Questions holds the two kinds of
 // question, Linear blocks and bb questions agents asked with `bb sgc ask`, and
 // Todos holds your todos from Linear. Paused lists work that stopped, with a Resume button. Hosts shows each host's threads against
-// bb's concurrency limit, read only.
+// bb's concurrency limit, read only. Threads shows each thread's lifecycle state, its prompt cache countdown, and the plugin's decision.
 //
 // bb gives plugins no way to send a mobile push, so the notifier shows a
 // system notification while bb is open in the background (with the browser's
@@ -25,6 +25,18 @@ import { appLink } from "./lib/links.ts";
 import type { QuestionBlock } from "./lib/questions.ts";
 import { limitText, UNPLACED_NAME, waitText, type HostsView } from "./lib/hosts.ts";
 import {
+  buttonRefusal,
+  groupByHost,
+  rowText,
+  summarize,
+  summaryText,
+  type DecisionRow,
+  type RowAction,
+  type StateTone,
+  type ThreadRowView,
+  type ThreadsView,
+} from "./lib/threads-view.ts";
+import {
   announcement,
   askAnswerInput,
   filterCards,
@@ -40,6 +52,7 @@ import {
   tabBadges,
   tabOf,
   tabPath,
+  threadsBadge,
   withDone,
   type AskDraft,
   type Card,
@@ -929,6 +942,217 @@ function Hosts({ view, error, onRefresh, now }: { view: HostsView | null; error:
   );
 }
 
+// --- threads --------------------------------------------------------------
+
+const THREADS_REFRESH_MS = 30_000;
+
+/** The thread lifecycle snapshot and log: read once for the tab's badge, and every 30 seconds while the tab is open. */
+function useThreads(active: boolean) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [data, setData] = useState<{ view: ThreadsView | null; log: DecisionRow[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Only the newest read may land, so an older one never replaces newer rows.
+  const latest = useRef(0);
+  const load = useCallback(
+    (refresh = false) => {
+      const request = ++latest.current;
+      rpc.call("threads.list", { refresh }).then(
+        (next) => {
+          if (request !== latest.current) return;
+          setData(next);
+          setError(null);
+        },
+        (cause: unknown) => {
+          if (request === latest.current) setError(errorText(cause));
+        },
+      );
+    },
+    [rpc],
+  );
+  useEffect(() => load(), [load]);
+  useEffect(() => {
+    if (!active) return;
+    load();
+    const timer = setInterval(load, THREADS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [active, load]);
+  return { data, error, load };
+}
+
+const TONE_CLASS: Record<StateTone, string> = {
+  active: "bg-primary/10 text-primary",
+  neutral: "bg-secondary text-secondary-foreground",
+  quiet: "text-muted-foreground",
+  warning: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  critical: "bg-destructive/10 text-destructive",
+};
+
+const ACTION_LABEL: Record<RowAction, string> = { keep: "Keep", compact: "Compact now", archive: "Archive now" };
+
+function ThreadRow({ thread, log, now, onChanged }: { thread: ThreadRowView; log: DecisionRow[]; now: number; onChanged: () => void }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [busy, setBusy] = useState<RowAction | null>(null);
+  const text = rowText(thread, now, log);
+
+  async function run(action: RowAction) {
+    if (action === "archive" && !window.confirm(`Archive ${text.title}? bb removes its worktree 5 minutes later.`)) return;
+    setBusy(action);
+    try {
+      const done = await rpc.call("threads.act", { threadId: thread.id, action });
+      toast.success(done.message);
+    } catch (cause) {
+      toast.error(errorText(cause));
+    } finally {
+      setBusy(null);
+      onChanged();
+    }
+  }
+
+  return (
+    <tr className="border-t border-border align-top">
+      <td className="px-2 py-1.5">
+        <button type="button" className="cursor-pointer text-left font-medium underline-offset-2 hover:underline" title={thread.id} onClick={() => navigate.toThread(thread.id)}>
+          {text.title}
+        </button>
+      </td>
+      <td className="px-2 py-1.5">
+        <span className={cn("rounded-full px-2 py-0.5 text-xs", TONE_CLASS[text.stateTone])} title={thread.stateReason}>
+          {text.state}
+        </span>
+      </td>
+      <td className="px-2 py-1.5 font-mono text-xs">
+        {text.issue === null ? (
+          "-"
+        ) : (
+          <UrlLink href={text.issue.href} className="underline-offset-2 hover:underline">
+            {text.issue.identifier}
+          </UrlLink>
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-xs">{text.providerModel}</td>
+      <td className="px-2 py-1.5 text-xs tabular-nums">{text.tokens}</td>
+      <td className={cn("px-2 py-1.5 tabular-nums", text.expires === "cold" && "text-muted-foreground")}>{text.expires}</td>
+      <td className="px-2 py-1.5">
+        <span className="font-medium">{text.decision}</span>
+        <div className="max-w-64 text-xs text-muted-foreground">{text.reason}</div>
+      </td>
+      <td className="px-2 py-1.5 text-xs text-muted-foreground">{text.lastAction}</td>
+      <td className="px-2 py-1.5">
+        <div className="flex flex-wrap gap-1">
+          {(["keep", "compact", "archive"] as const).map((action) => {
+            const refusal = buttonRefusal(thread, action);
+            return (
+              // A disabled button shows no tooltip of its own, so the reason goes on its wrapper.
+              <span key={action} title={refusal ?? undefined}>
+                <Button variant="outline" size="sm" disabled={busy !== null || refusal !== null} onClick={() => void run(action)}>
+                  {busy === action ? "Working…" : ACTION_LABEL[action]}
+                </Button>
+              </span>
+            );
+          })}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/** The Threads tab: a summary, the threads grouped by host with the soonest cache expiry first, and the decision log. */
+function Threads({
+  data,
+  error,
+  onRefresh,
+  onChanged,
+  now,
+}: {
+  data: { view: ThreadsView | null; log: DecisionRow[] } | null;
+  error: string | null;
+  onRefresh: () => void;
+  onChanged: () => void;
+  now: number;
+}) {
+  const view = data?.view ?? null;
+  const log = data?.log ?? [];
+  return (
+    <>
+      <div className="flex items-center gap-3 text-sm text-muted-foreground">
+        <span className="min-w-0 flex-1">{view === null ? "Loading…" : summaryText(summarize(view, now))}</span>
+        <Button variant="outline" size="sm" onClick={onRefresh}>
+          <Icon name="ArrowReloadHorizontal" className="size-4" />
+          Refresh
+        </Button>
+      </div>
+      {error === null ? null : <Notice tone="error">Could not read threads: {error}</Notice>}
+      {view?.linearError ? <Notice tone="error">{view.linearError} Threads show no issue until it can be read.</Notice> : null}
+      {view === null
+        ? null
+        : groupByHost(view.threads).map((group) => (
+            <div key={group.hostId ?? "none"} className="space-y-1">
+              <h3 className="text-sm font-medium">{group.name}</h3>
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-xs text-muted-foreground">
+                    <tr>
+                      {["Thread", "State", "Issue", "Provider/model", "Tokens", "Cache expires in", "Decision", "Last action", ""].map((title) => (
+                        <th key={title} scope="col" className="px-2 py-1.5 font-medium">
+                          {title}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {group.threads.map((thread) => (
+                      <ThreadRow key={thread.id} thread={thread} log={log} now={now} onChanged={onChanged} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+      {view !== null && view.threads.length === 0 ? <Notice>No threads.</Notice> : null}
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">Decision log</h3>
+        {log.length === 0 ? (
+          <Notice>No decisions yet. The plugin decides in the last minutes before a thread's cache expires.</Notice>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  {["Time", "Thread", "Decision", "Reason", "Result"].map((title) => (
+                    <th key={title} scope="col" className="px-2 py-1.5 font-medium">
+                      {title}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {log.map((entry) => (
+                  <tr key={entry.id} className="border-t border-border align-top">
+                    <td className="whitespace-nowrap px-2 py-1.5 text-xs tabular-nums">{new Date(entry.at).toLocaleString()}</td>
+                    <td className="px-2 py-1.5 text-xs" title={entry.threadId}>
+                      {entry.threadTitle || entry.threadId}
+                    </td>
+                    <td className="px-2 py-1.5">{entry.decision}</td>
+                    <td className="px-2 py-1.5 text-xs text-muted-foreground">{entry.reason}</td>
+                    <td className={cn("px-2 py-1.5 text-xs", entry.result === "failed" && "text-destructive")}>
+                      {entry.result === "failed" ? `failed: ${entry.error ?? "unknown error"}` : entry.result}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Each provider keeps a thread's prompt cache for a while after its last turn. Keep protects a thread for 24 hours. Compact now and Archive now run
+        the same safety checks as the plugin does, and say why when they refuse.
+      </p>
+    </>
+  );
+}
+
 /** The SGC page: the last check and its trouble on top, then a tab per list. */
 function SgcPage({ subPath }: { subPath: string }) {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
@@ -937,6 +1161,8 @@ function SgcPage({ subPath }: { subPath: string }) {
   const now = useNow(30_000);
   const tab = tabOf(subPath);
   const hosts = useHosts(tab === "hosts");
+  const threads = useThreads(tab === "threads");
+  const threadsNow = useNow(10_000);
   const [chosen, setChosen] = useState<string[]>([]);
   const [match, setMatch] = useState<LabelMatch>("any");
   const [order, setOrder] = useState<CardOrder>("age");
@@ -986,7 +1212,7 @@ function SgcPage({ subPath }: { subPath: string }) {
         ) : null}
         <TabBar
           active={tab}
-          badges={{ ...(snapshot === null ? {} : tabBadges({ ...snapshot, expired: expiredShown })), hosts: hostsBadge(hosts.view) }}
+          badges={{ ...(snapshot === null ? {} : tabBadges({ ...snapshot, expired: expiredShown })), hosts: hostsBadge(hosts.view), threads: threadsBadge(threads.data?.view ?? null) }}
           onSelect={(next) => navigate.toPluginPanel(PANEL_PATH, { subPath: tabPath(next) })}
         />
         <TabPanel tab="questions" active={tab}>
@@ -1053,6 +1279,9 @@ function SgcPage({ subPath }: { subPath: string }) {
         </TabPanel>
         <TabPanel tab="hosts" active={tab}>
           <Hosts view={hosts.view} error={hosts.error} onRefresh={hosts.load} now={now} />
+        </TabPanel>
+        <TabPanel tab="threads" active={tab}>
+          <Threads data={threads.data} error={threads.error} onRefresh={() => threads.load(true)} onChanged={() => threads.load()} now={threadsNow} />
         </TabPanel>
       </div>
     </div>

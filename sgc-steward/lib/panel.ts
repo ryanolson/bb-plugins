@@ -4,6 +4,7 @@
 import { noteRequired, type Choice } from "./choices.ts";
 import type { DeliveryView, Panel } from "./contract.ts";
 import type { HostsView } from "./hosts.ts";
+import { attentionCount, type ThreadsView } from "./threads-view.ts";
 import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
 
 /** A new question to announce: a Linear block, labeled by its issue, or a bb question, labeled by its thread. */
@@ -142,6 +143,7 @@ export const PANEL_TABS = [
   { id: "todos", label: "Todos", subPath: "todos" },
   { id: "paused", label: "Paused", subPath: "paused" },
   { id: "hosts", label: "Hosts", subPath: "hosts" },
+  { id: "threads", label: "Threads", subPath: "threads" },
 ] as const;
 
 export type PanelTab = (typeof PANEL_TABS)[number]["id"];
@@ -188,7 +190,7 @@ export interface TabBadge {
 }
 
 /** Each list tab's badge: open questions, or open todos, and an alert for a failed send, record, or read on that tab. */
-export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts">, TabBadge> {
+export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts" | "threads">, TabBadge> {
   return {
     questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
     todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },
@@ -200,6 +202,12 @@ export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts">, Ta
 export function hostsBadge(view: HostsView | null): TabBadge {
   if (view === null) return { count: 0, alert: false };
   return { count: view.hosts.reduce((sum, host) => sum + host.waiting, view.unplaced.waiting), alert: view.limitError !== null };
+}
+
+/** The Threads tab's badge: the threads that are stuck or flagged, and an alert when Linear could not be read for their issues. */
+export function threadsBadge(view: ThreadsView | null): TabBadge {
+  if (view === null) return { count: 0, alert: false };
+  return { count: attentionCount(view), alert: view.linearError !== null };
 }
 
 /** How a label filter matches, as Linear's does: a question with any of the labels, or with all of them. */

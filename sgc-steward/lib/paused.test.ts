@@ -21,6 +21,7 @@ test("the Paused tab has its own route after Todos", () => {
     ["todos", "Todos", "todos"],
     ["paused", "Paused", "paused"],
     ["hosts", "Hosts", "hosts"],
+    ["threads", "Threads", "threads"],
   ]);
   assert.equal(tabOf("paused"), "paused");
   assert.equal(tabOf("paused/anything"), "paused");

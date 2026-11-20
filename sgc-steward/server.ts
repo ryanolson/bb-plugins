@@ -71,6 +71,8 @@ import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
+import { parseCacheLifeOverrides, parseLifecycleActions } from "./lib/lifecycle.ts";
+import { THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -82,6 +84,8 @@ const EXPIRED_SHOWN_MS = 14 * 86_400_000;
 /** Re-read every issue's comments at least this often, cache or not. */
 const FULL_REFRESH_MS = 60 * 60 * 1000;
 const LABEL_ATTEMPTS = 3;
+/** How many decisions the Threads tab shows below the table. */
+const PAGE_LOG_ROWS = 100;
 const KEY_HINT = "Pipe the key in: <command that prints the key> | bb sgc key --api-key-stdin";
 /** bb clears a needs-configuration notice only when the plugin loads again; saving settings does not reload it. */
 const RELOAD_HINT = "Then run `bb plugin reload sgc-steward` to clear this notice.";
@@ -98,6 +102,8 @@ export interface SgcStewardOptions {
   postWindowMs?: number;
   /** Stand-in for the clock the Hosts view measures waits with. */
   now?: () => number;
+  /** Called after each background pass of the thread lifecycle, so a test can wait for one. */
+  afterThreadsPass?: () => void;
 }
 
 function message(error: unknown): string {
@@ -166,6 +172,33 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       linearError: () => snapshot.error,
       expired: () => asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
       now,
+      log: (text) => bb.log.warn(text),
+    });
+
+    const threads = createThreads({
+      db,
+      sdk: bb.sdk,
+      now,
+      settings: async () => {
+        const { stewardThread, teamKey, threadLifecycleMode, lifecycleActions, cacheLifeOverrides } = await settings.get();
+        return {
+          mode: threadLifecycleMode === "act" ? ("act" as const) : ("observe" as const),
+          actions: parseLifecycleActions(lifecycleActions),
+          stewardThread,
+          teamKey,
+          cacheLifeOverrides: parseCacheLifeOverrides(cacheLifeOverrides),
+        };
+      },
+      // A Linear write: ahead of polls and under the plugin's one lock. The comment's id comes from its text, so a repeat posts nothing new.
+      comment: async (issueId, body, key) => void (await writeLinear((linear) => postComment(linear, issueId, body, answerCommentId(issueId, key)))),
+      steward: () => stewardFor(),
+      send: async (threadId, text) => void (await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] })),
+      // Reads only: it never takes the plugin's Linear lock, and errors say nothing of the key.
+      linear: async () => {
+        const { linearApiKey, teamKey } = await settings.get();
+        if (!linearApiKey) return null;
+        return { client: clientFor(linearApiKey), teamKey };
+      },
       log: (text) => bb.log.warn(text),
     });
 
@@ -786,6 +819,19 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "records.dismiss": ({ askId }) => dismissed(asks.dismissRecord(askId)),
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
       "hosts.list": () => readHosts(bb.sdk, now),
+      "threads.list": async ({ refresh }) => {
+        const view = refresh ? await threads.refresh() : (threads.cached() ?? (await threads.refresh()));
+        return { view, log: threads.decisions(PAGE_LOG_ROWS) };
+      },
+      "threads.act": async ({ threadId, action }) => {
+        try {
+          const done = await threads.act(threadId, action);
+          publish(0);
+          return done;
+        } catch (error) {
+          return await refuse(error);
+        }
+      },
       ...todos.rpc,
       ...pausedWork.rpc,
     });
@@ -824,6 +870,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         commands: {
           ...todos.commands,
           ...pausedWork.commands,
+          threads: threadsCommand(threads, now),
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
@@ -1082,6 +1129,30 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       client = null;
       commentCache.clear();
       wake?.();
+    });
+
+    bb.background.service("threads", {
+      async start(signal) {
+        while (!signal.aborted) {
+          try {
+            // Only this pass acts: the CLI and the page's Refresh read and log.
+            await threads.refresh(true);
+          } catch (error) {
+            bb.log.warn(`thread lifecycle read failed: ${message(error)}`);
+          }
+          options.afterThreadsPass?.();
+          if (signal.aborted) break;
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              signal.removeEventListener("abort", done);
+              resolve();
+            };
+            const timer = setTimeout(done, THREADS_POLL_MS);
+            signal.addEventListener("abort", done, { once: true });
+          });
+        }
+      },
     });
 
     bb.background.service("poller", {

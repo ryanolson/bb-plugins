@@ -59,6 +59,20 @@ export interface TodoIssue {
   assignedToMe: boolean;
 }
 
+/** An issue as the thread lifecycle reads it: state, labels, and the first comments, where a claim is. */
+export interface LifecycleIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  updatedAt: string;
+  teamKey: string;
+  state: { name: string; type: string } | null;
+  /** Label names; a label in a group is written `group/name`. */
+  labels: string[];
+  comments: Array<{ body: string; createdAt: string }>;
+}
+
 export type LinearErrorKind = "auth" | "rate-limit" | "graphql" | "http" | "network" | "timeout" | "aborted" | "limit";
 
 export class LinearError extends Error {
@@ -155,6 +169,23 @@ export const COMMENTS_QUERY = `query SgcIssueComments($id: String!, $after: Stri
   }
 }`;
 
+// Smaller pages than the question reads: each issue carries its comments too.
+const LIFECYCLE_PAGE = 25;
+// A claim is near the start of an issue's comments or near the end, so both ends are read: the oldest and the newest.
+const LIFECYCLE_COMMENTS = 15;
+const LIFECYCLE_FIELDS = `id identifier title url updatedAt team { key } state { name type } labels(first: 20) { nodes { name parent { name } } } comments(first: ${LIFECYCLE_COMMENTS}, orderBy: createdAt) { nodes { body createdAt } } latest: comments(last: ${LIFECYCLE_COMMENTS}, orderBy: createdAt) { nodes { body createdAt } }`;
+
+export const LIFECYCLE_ISSUES_QUERY = `query SgcLifecycleIssues($teamKey: String!, $since: DateTimeOrDuration!, $after: String) {
+  issues(first: ${LIFECYCLE_PAGE}, after: $after, filter: { team: { key: { eq: $teamKey } }, updatedAt: { gte: $since } }) {
+    nodes { ${LIFECYCLE_FIELDS} }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+export const LIFECYCLE_ISSUE_QUERY = `query SgcLifecycleIssue($id: String!) {
+  issue(id: $id) { ${LIFECYCLE_FIELDS} }
+}`;
+
 export const CREATE_COMMENT_MUTATION = `mutation SgcPostAnswer($input: CommentCreateInput!) {
   commentCreate(input: $input) { success comment { id } }
 }`;
@@ -241,6 +272,19 @@ interface IssueNode {
   labels: { nodes: Array<{ id: string; name: string; parent?: { name: string } | null }> };
 }
 
+interface LifecycleNode {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  updatedAt: string;
+  team: { key: string } | null;
+  state: { name: string; type: string } | null;
+  labels: { nodes: Array<{ name: string; parent?: { name: string } | null }> };
+  comments: { nodes: Array<{ body: string; createdAt: string }> };
+  latest?: { nodes: Array<{ body: string; createdAt: string }> };
+}
+
 interface PausedNode {
   id: string;
   identifier: string;
@@ -306,6 +350,10 @@ export interface LinearClient {
   getTodoIssue(id: string, signal?: AbortSignal): Promise<TodoIssue | null>;
   /** Open issues of one team with the paused label, newest change first. */
   listPausedIssues(teamKey: string, signal?: AbortSignal): Promise<PausedIssue[]>;
+  /** Issues of one team changed since the given ISO time, any state, with labels and their first comments. */
+  listLifecycleIssues(teamKey: string, sinceIso: string, signal?: AbortSignal): Promise<LifecycleIssue[]>;
+  /** One issue in the same shape, by UUID or identifier; null when Linear has no such issue. */
+  getLifecycleIssue(id: string, signal?: AbortSignal): Promise<LifecycleIssue | null>;
   /** One issue as a paused issue, by UUID or identifier; null when Linear has no such issue. */
   getPausedIssue(id: string, signal?: AbortSignal): Promise<PausedIssue | null>;
   /** The team's Todo state: its unstarted state named Todo, else its first unstarted state. Null when it has none. */
@@ -336,6 +384,23 @@ function toPaused(node: PausedNode): PausedIssue {
     teamKey: node.team?.key ?? "",
     state: node.state === null ? null : { id: node.state.id, name: node.state.name, type: node.state.type },
     labels: node.labels.nodes.map((label) => ({ id: label.id, name: label.name })),
+  };
+}
+
+function toLifecycle(node: LifecycleNode): LifecycleIssue {
+  return {
+    id: node.id,
+    identifier: node.identifier,
+    title: node.title,
+    url: node.url,
+    updatedAt: node.updatedAt,
+    teamKey: node.team?.key ?? "",
+    state: node.state === null ? null : { name: node.state.name, type: node.state.type },
+    labels: node.labels.nodes.map((label) => labelName({ name: label.name, group: label.parent?.name ?? null })),
+    // The oldest and the newest comments; an issue with few comments returns the same ones twice.
+    comments: [...node.comments.nodes, ...(node.latest?.nodes ?? [])]
+      .filter((comment, index, all) => all.findIndex((other) => other.createdAt === comment.createdAt && other.body === comment.body) === index)
+      .map((comment) => ({ body: comment.body, createdAt: comment.createdAt })),
   };
 }
 
@@ -491,6 +556,24 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
       if (errors.some((error) => /not found/i.test(error.message ?? ""))) return null;
       if (errors.length > 0) throw new LinearError("graphql", clean(`Linear refused the request: ${firstMessage(errors)}`));
       return data?.issue ? toIssue(data.issue) : null;
+    },
+
+    async listLifecycleIssues(teamKey, sinceIso, signal) {
+      const issues: LifecycleIssue[] = [];
+      let after: string | null = null;
+      for (;;) {
+        const data: { issues: { nodes: LifecycleNode[]; pageInfo: PageInfo } } = await query(LIFECYCLE_ISSUES_QUERY, { teamKey, since: sinceIso, after }, signal);
+        issues.push(...data.issues.nodes.map(toLifecycle));
+        if (!data.issues.pageInfo.hasNextPage || data.issues.pageInfo.endCursor === null) return issues;
+        after = data.issues.pageInfo.endCursor;
+      }
+    },
+
+    async getLifecycleIssue(id, signal) {
+      const { data, errors } = await request<{ issue: LifecycleNode | null }>(LIFECYCLE_ISSUE_QUERY, { id }, signal);
+      if (errors.some((error) => /not found/i.test(error.message ?? ""))) return null;
+      if (errors.length > 0) throw new LinearError("graphql", clean(`Linear refused the request: ${firstMessage(errors)}`));
+      return data?.issue ? toLifecycle(data.issue) : null;
     },
 
     async listComments(issueId, signal, label = issueId) {
