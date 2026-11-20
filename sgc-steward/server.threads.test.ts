@@ -850,3 +850,19 @@ test("archive refuses a root with a pinned lifecycle dependent", async () => {
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("archive refuses a parent if its child becomes dirty during the issue comment", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_parent", title: "1: finished" },
+    { id: "thr_child", title: "Child", parentThreadId: "thr_parent" },
+  ], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  const createComment = t.linear.createComment.bind(t.linear);
+  t.linear.createComment = async (input) => {
+    const id = await createComment(input);
+    t.state.env.set("env_thr_child", DIRTY);
+    return id;
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});
