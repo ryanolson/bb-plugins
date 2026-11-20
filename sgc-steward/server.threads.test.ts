@@ -936,3 +936,32 @@ test("a steward flag whose send landed with no reply is delivered once per day",
   await t.pass();
   assert.equal(t.sends.length, 1);
 });
+
+// --- paid review, narrow pass -----------------------------------------------
+
+test("a thread pinned while the issue comment posts is not archived", async () => {
+  const thread: FakeThread = { id: "thr_done", title: "1: finished" };
+  const t = await lifecycleSetup([thread], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  const createComment = t.linear.createComment.bind(t.linear);
+  t.linear.createComment = async (input) => {
+    const id = await createComment(input);
+    thread.pinnedAt = START;
+    return id;
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});
+
+test("archive-done turned off after the decision stops the archive", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  const listIssues = t.linear.listLifecycleIssues.bind(t.linear);
+  let reads = 0;
+  t.linear.listLifecycleIssues = async (teamKey) => {
+    if (++reads === 2) await t.harness.behavior.setSettings({ lifecycleActions: "compact" });
+    return listIssues(teamKey);
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});

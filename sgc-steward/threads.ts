@@ -339,9 +339,9 @@ export function createThreads(deps: ThreadsDeps) {
   /**
    * Every thread's facts, state, and verdict now. With `only`, just that
    * thread's, and without reading Linear: a manual action needs the thread as
-   * it is, not its issue. `lookup` reads Linear for that thread's issue too, as the pass did.
+   * it is, not its issue. `lookup` reads Linear for that thread's issue too, as the pass did; otherwise a caller that knows the issue passes it as `issue`.
    */
-  async function collect(only?: string, options: { lookup?: boolean } = {}): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
+  async function collect(only?: string, options: { lookup?: boolean; issue?: IssueFacts | null | undefined } = {}): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
     const settings = await deps.settings();
     const at = now();
     const listed = await listThreads();
@@ -378,7 +378,7 @@ export function createThreads(deps: ThreadsDeps) {
     const kept = new Map((activeKeeps.all(at) as Array<{ thread_id: string; until: number }>).map((row) => [row.thread_id, row.until]));
     const issueCache = new Map<string, IssueWithComments | null>();
     const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
-      if (only !== undefined && !options.lookup) return undefined;
+      if (only !== undefined && !options.lookup) return options.issue;
       if ("error" in linear) return undefined;
       const found = issueFor(thread, linear.issues, linear.teamKey);
       if (found !== null) return asFacts(found);
@@ -482,35 +482,17 @@ export function createThreads(deps: ThreadsDeps) {
    * changed since the pass began, check it is still safe, then archive or
    * compact. Returns whether the thread was archived. Every outcome is logged.
    */
-  async function carryOut(entry: Entry, settings: ThreadsSettings): Promise<boolean> {
+  async function carryOut(entry: Entry): Promise<boolean> {
     const action = entry.row.decision === "compact" ? "compact" : "archive";
     // The thread's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened.
-    const fresh = (await collect(entry.row.id, { lookup: true })).entries[0];
-    if (fresh === undefined) {
-      record(entry, "refused", { reason: "changed since the decision: the thread is gone" });
+    const first = await recheck(entry, action, { lookup: true });
+    if ("refusal" in first) {
+      record(entry, "refused", { reason: first.refusal });
       return false;
     }
-    if (entry.issue?.identifier !== fresh.issue?.identifier) {
-      record(entry, "refused", { reason: `changed since the decision: its issue is now ${fresh.issue?.identifier ?? "none"}, not ${entry.issue?.identifier ?? "none"}` });
-      return false;
-    }
-    if (fresh.row.decision !== entry.row.decision) {
-      record(entry, "refused", { reason: `changed since the decision: now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})` });
-      return false;
-    }
-    const kind = actionFor(fresh);
-    if (kind !== actionFor(entry) || kind === null || !settings.actions.has(kind)) {
-      record(entry, "refused", { reason: `changed since the decision: its category is now ${fresh.row.state}, which is not the action that was decided or is turned off` });
-      return false;
-    }
-    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
-    const blockers = actionBlockers(fresh, action);
-    if (blockers.length > 0) {
-      record(entry, "refused", { reason: `changed since the decision: ${blockers.join("; ")}` });
-      return false;
-    }
+    const { fresh } = first;
     if (action === "compact") {
-      const life = cacheLifeMs(fresh.facts.providerId, settings.cacheLifeOverrides).ms;
+      const life = cacheLifeMs(fresh.facts.providerId, first.settings.cacheLifeOverrides).ms;
       // Once per cache cycle (the same expiry), and not within one cache life of the last: a compact starts a new life.
       if (compactedSince.get(fresh.row.id, fresh.row.expiresAt, now() - life) !== undefined) return false;
     }
@@ -524,18 +506,10 @@ export function createThreads(deps: ThreadsDeps) {
         return false;
       }
     }
-    // The comment and the reads above take time: check the thread's checkouts and its cache once more, as late as possible.
-    if (action === "archive") {
-      fresh.facts.env = undefined;
-      for (const child of fresh.facts.descendants ?? []) child.env = undefined;
-      await readArchiveEnvs(fresh.facts);
-      const late = actionBlockers(fresh, "archive");
-      if (late.length > 0) {
-        record(entry, "refused", { reason: `changed since the decision: ${late.join("; ")}` });
-        return false;
-      }
-    } else if (now() > fresh.row.expiresAt) {
-      record(entry, "refused", { reason: "changed since the decision: the cache expired" });
+    // The comment takes time: the whole check runs once more, as late as possible, on the thread, its checkouts, its cache, and the settings as they are then.
+    const late = await recheck(entry, action, { issue: fresh.issue });
+    if ("refusal" in late) {
+      record(entry, "refused", { reason: late.refusal });
       return false;
     }
     try {
@@ -547,6 +521,34 @@ export function createThreads(deps: ThreadsDeps) {
     }
     record(entry, "done");
     return action === "archive";
+  }
+
+  /**
+   * Read the thread again, with the settings as they are now, and check that
+   * the action decided is still the one to take, still turned on, and still
+   * safe. Returns the fresh entry, or why not.
+   */
+  async function recheck(
+    entry: Entry,
+    action: "compact" | "archive",
+    how: { lookup: true } | { issue: IssueFacts | null | undefined },
+  ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string }> {
+    const settings = await deps.settings();
+    const fresh = (await collect(entry.row.id, "lookup" in how ? { lookup: true } : { issue: how.issue })).entries[0];
+    const changed = (why: string) => ({ refusal: `changed since the decision: ${why}` });
+    if (fresh === undefined) return changed("the thread is gone");
+    if (settings.mode !== "act") return changed("act mode was turned off");
+    if (entry.issue?.identifier !== fresh.issue?.identifier) return changed(`its issue is now ${fresh.issue?.identifier ?? "none"}, not ${entry.issue?.identifier ?? "none"}`);
+    if (fresh.row.decision !== entry.row.decision) return changed(`now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})`);
+    const kind = actionFor(fresh);
+    if (kind !== actionFor(entry) || kind === null || !settings.actions.has(kind)) {
+      return changed(`its category is now ${fresh.row.state}, which is not the action that was decided or is turned off`);
+    }
+    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
+    const blockers = actionBlockers(fresh, action);
+    if (blockers.length > 0) return changed(blockers.join("; "));
+    if (action === "compact" && now() > fresh.row.expiresAt) return changed("the cache expired");
+    return { fresh, settings };
   }
 
   /** Act mode: tell the steward that a thread needs attention, once a day per thread. */
@@ -580,7 +582,7 @@ export function createThreads(deps: ThreadsDeps) {
       const kind = actionFor(entry);
       if (settings.mode !== "act" || !acting) record(entry, "observed");
       else if (kind !== null && settings.actions.has(kind)) {
-        if (await carryOut(entry, settings)) archived.add(entry.row.id);
+        if (await carryOut(entry)) archived.add(entry.row.id);
       } else if (entry.row.decision === "flag") await flagSteward(entry);
       else record(entry, "observed");
     }
