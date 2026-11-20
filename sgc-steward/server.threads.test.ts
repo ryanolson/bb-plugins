@@ -922,3 +922,17 @@ test("an archive retry does not post a second comment after a pin and unpin", as
   assert.deepEqual(t.acted, ["archive thr_done"]);
   assert.equal(issue.comments.length, 1);
 });
+
+test("a steward flag whose send landed with no reply is delivered once per day", async () => {
+  const t = await lifecycleSetup([{ id: "thr_err", title: "Broken", status: "error" }], { settings: ACT });
+  t.sdk.stub("threads.send", async (args: unknown) => {
+    t.sends.push(args as (typeof t.sends)[number]);
+    if (t.sends.length === 1) throw new Error("reply lost after delivery");
+    return {};
+  });
+  await t.pass();
+  assert.equal(t.sends.length, 1);
+  t.clock.now += HOUR + MINUTE;
+  await t.pass();
+  assert.equal(t.sends.length, 1);
+});
