@@ -14,7 +14,7 @@ test("withdraw review F3 (known limit): changing stewardThread through the confi
   const { harness, sends } = await setup({ key: null });
   t.after(() => harness.lifecycle.dispose());
   await harness.behavior.setSettings({ stewardThread: "thr_steward" });
-  const asked = await harness.behavior.runCli(["ask", "--question", "Keep this decision open?", "--json"], { threadId: "thr_asker" });
+  const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Keep this decision open?", "--json"], { threadId: "thr_asker" });
   assert.equal(asked.exitCode, 0, asked.stderr);
   const { id } = JSON.parse(asked.stdout) as { id: string };
   const invokeTool = () => harness.behavior.callAgentTool("sgc_withdraw_question", { id, reason: "Decided elsewhere." }, { threadId: "thr_other" });

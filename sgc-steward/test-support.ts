@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createSgcStewardPlugin, type SgcStewardOptions } from "./server.ts";
 import type { Snapshot } from "./lib/contract.ts";
-import { HUMAN_LABEL, LinearError, TODO_LABEL, type LinearClient, type LinearIssue, type TodoIssue } from "./lib/linear.ts";
+import { HUMAN_LABEL, LinearError, PAUSED_LABEL, TODO_LABEL, type LinearClient, type LinearIssue, type PausedIssue, type TodoIssue } from "./lib/linear.ts";
 import type { LinearComment } from "./lib/questions.ts";
 
 export const KEY = "lin_api_test_not_a_real_key";
@@ -44,9 +44,13 @@ export class FakeLinear implements LinearClient {
   removeLabelFaults: Array<"lost" | "dropped"> = [];
   /** The team's workflow states, as Linear lists them. */
   states = [
+    { id: "state-backlog", name: "Backlog", type: "backlog" },
+    { id: "state-todo", name: "Todo", type: "unstarted" },
     { id: "state-started", name: "In Progress", type: "started" },
     { id: "state-done", name: "Done", type: "completed" },
   ];
+  /** "lost": setState lands but the reply is lost. "dropped": it never lands. */
+  setStateFaults: Array<"lost" | "dropped"> = [];
   private clock = Date.parse("2026-01-05T10:00:00Z");
 
   tick(): string {
@@ -98,6 +102,14 @@ export class FakeLinear implements LinearClient {
       .map((issue) => this.strip(issue));
   }
 
+  /** The open project names a poll reads; null, the default, makes the read fail, so no list is known. Not recorded in `calls`. */
+  projects: string[] | null = null;
+
+  async listProjectNames() {
+    if (this.projects === null) throw new LinearError("network", "could not reach Linear: socket hang up");
+    return [...this.projects];
+  }
+
   async getIssue(id: string) {
     this.calls.push(`getIssue ${id}`);
     const issue = this.find(id);
@@ -140,6 +152,39 @@ export class FakeLinear implements LinearClient {
     return issue === undefined ? null : this.todo(issue);
   }
 
+  /** Reads of the paused list are not recorded in `calls`, so call-order assertions stay as they were. */
+  paused(issue: FakeIssue): PausedIssue {
+    const state = this.states.find((candidate) => candidate.id === issue.state?.id);
+    return structuredClone({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      url: issue.url,
+      updatedAt: issue.updatedAt,
+      teamKey: issue.teamKey,
+      state: state === undefined ? null : { id: state.id, name: state.name, type: state.type },
+      labels: issue.labels.map((label) => ({ id: label.id, name: label.name })),
+    });
+  }
+
+  async listPausedIssues(teamKey: string) {
+    return this.issues
+      .filter((issue) => issue.teamKey === teamKey && issue.labels.some((label) => label.name === PAUSED_LABEL))
+      .filter((issue) => issue.state?.type !== "completed" && issue.state?.type !== "canceled")
+      .map((issue) => this.paused(issue))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async getPausedIssue(id: string) {
+    const issue = this.find(id);
+    return issue === undefined ? null : this.paused(issue);
+  }
+
+  async todoStateId(teamKey: string) {
+    this.calls.push(`todoStateId ${teamKey}`);
+    return this.states.find((state) => state.type === "unstarted")?.id ?? null;
+  }
+
   async doneStateId(teamKey: string) {
     this.calls.push(`doneStateId ${teamKey}`);
     return this.states.find((state) => state.type === "completed")?.id ?? null;
@@ -147,10 +192,14 @@ export class FakeLinear implements LinearClient {
 
   async setState({ issueId, stateId }: { issueId: string; stateId: string }) {
     this.calls.push(`setState ${issueId} ${stateId}`);
-    const issue = this.find(issueId)!;
-    const state = this.states.find((candidate) => candidate.id === stateId)!;
-    issue.state = { id: state.id, type: state.type };
-    issue.updatedAt = this.tick();
+    const fault = this.setStateFaults.shift();
+    if (fault !== "dropped") {
+      const issue = this.find(issueId)!;
+      const state = this.states.find((candidate) => candidate.id === stateId)!;
+      issue.state = { id: state.id, type: state.type };
+      issue.updatedAt = this.tick();
+    }
+    if (fault !== undefined) throw new LinearError("network", "could not reach Linear: socket hang up");
   }
 
   async addLabel({ issueId, labelId }: { issueId: string; labelId: string }) {

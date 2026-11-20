@@ -35,7 +35,9 @@ import {
 } from "./lib/questions.ts";
 import {
   ASK_LIMITS,
+  ASK_TTL_MS,
   DELIVERY_PREFIX,
+  URGENT_TTL_MS,
   askDelivery,
   askOptions,
   askRecord,
@@ -44,13 +46,15 @@ import {
   checkLabels,
   checkQuestion,
   checkReason,
+  expiryFollowUps,
   isThreadId,
+  labelWarning,
   tableWarning,
   withdrawalFollowUps,
   type AskAnswer,
 } from "./lib/asks.ts";
 import { STORE_MIGRATIONS, createAskId, createAskStore, type Delivery, type RecordRow } from "./lib/ask-store.ts";
-import { askView, deliveryView, recordView } from "./lib/views.ts";
+import { askView, deliveryView, expiredView, recordView } from "./lib/views.ts";
 import { answerOfCommand } from "./lib/answer-of.ts";
 import { filterPanel } from "./lib/panel.ts";
 import {
@@ -65,6 +69,7 @@ import { readHostFile } from "./lib/host-file.ts";
 import { formatDigest, formatHosts, hostsDigest } from "./lib/hosts.ts";
 import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
+import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
@@ -72,6 +77,8 @@ import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawal
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
 const MAX_ANSWER_BYTES = 64 * 1024;
+/** How long an expired question stays in `bb sgc questions --json`, and on the Paused tab. */
+const EXPIRED_SHOWN_MS = 14 * 86_400_000;
 /** Re-read every issue's comments at least this often, cache or not. */
 const FULL_REFRESH_MS = 60 * 60 * 1000;
 const LABEL_ATTEMPTS = 3;
@@ -130,7 +137,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       )`,
       ...STORE_MIGRATIONS,
     ]);
-    const asks = createAskStore(db);
+    const asks = createAskStore(db, now);
     const todos = createTodos({
       db,
       postWindowMs,
@@ -142,6 +149,23 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       publish: () => publish(0),
       refresh: async () => void (await pollForCaller(false)),
       configured: () => snapshot.configured,
+      log: (text) => bb.log.warn(text),
+    });
+
+    const pausedWork = createPaused({
+      db,
+      postWindowMs,
+      write: writeLinear,
+      steward: stewardFor,
+      keep: (row) => asks.keep({ source: "resume", ...row }),
+      send: async (row) => ((await deliver(row.id))?.state === "delivered" ? "sent" : "failed"),
+      forget: (issueId) => commentCache.delete(issueId),
+      publish: () => publish(0),
+      refresh: async () => void (await pollForCaller(false)),
+      configured: () => snapshot.configured,
+      linearError: () => snapshot.error,
+      expired: () => asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
+      now,
       log: (text) => bb.log.warn(text),
     });
 
@@ -203,6 +227,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return fresh;
     }
 
+    /** Names of the team's open Linear projects from the last poll that read them; null before the first. */
+    let projectNames: { teamKey: string; names: string[] } | null = null;
+
     /** The poll in progress, so an answer can stop it instead of waiting. */
     let runningPoll: AbortController | null = null;
     /** Set when the poller should poll again at once: settings changed, or an answer stopped a poll. */
@@ -237,6 +264,14 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (signal.aborted) return null;
         const listed = await linear.listQuestionIssues(teamKey, signal);
         if (signal.aborted) return null;
+        // The names an ask's label is checked against. A failed read keeps the last good list.
+        try {
+          projectNames = { teamKey, names: await linear.listProjectNames(teamKey, signal) };
+        } catch (error) {
+          if (signal.aborted || (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit"))) throw error;
+          bb.log.warn(`could not read Linear projects: ${redact(message(error), [linearApiKey])}`);
+        }
+        if (signal.aborted) return null;
         const issues: IssueView[] = [];
         const issueErrors: Snapshot["issueErrors"] = [];
         const unread = new Set<string>();
@@ -262,6 +297,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         if (signal.aborted) return null;
         const todoNews = await todos.poll(linear, teamKey, notify, signal);
         if (todoNews === null) return null;
+        const pausedNews = await pausedWork.poll(linear, teamKey, signal);
+        if (pausedNews === null) return null;
         for (const id of commentCache.keys()) if (!listed.some((issue) => issue.id === id)) commentCache.delete(id);
         if (fullRefresh) lastFullRefreshAt = checkedAt;
         const oldest = (issue: IssueView) => Math.min(...issue.blocks.map((block) => Date.parse(block.createdAt)));
@@ -269,7 +306,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         snapshot = { configured: true, teamKey, polledAt: checkedAt, checkedAt, error: null, issueErrors, issues };
         const fresh = reconcileSeen(issues, unread, notify) + todoNews.fresh;
         const after = JSON.stringify([snapshot.configured, snapshot.error, snapshot.issueErrors, snapshot.issues]);
-        if (fresh > 0 || todoNews.changed || after !== before) publish(fresh);
+        if (fresh > 0 || todoNews.changed || pausedNews.changed || after !== before) publish(fresh);
       } catch (error) {
         if (signal.aborted) return null;
         const reason = redact(message(error), [linearApiKey]);
@@ -284,12 +321,42 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     let answerEpoch = 0;
     /** Deliveries a poll released from held, sent once the poll has left the lock. */
     const releasedByPoll: Delivery[] = [];
+    /** Questions a poll expired, whose notice and record go out once the poll has left the lock. */
+    const expiredByPoll: Array<{ id: string; threadId: string; issue: string | null }> = [];
+
+    /**
+     * Expire every open question whose time is up, under the poll's lock, with
+     * or without a Linear key. A question stored before expiry gets its
+     * clock first. The asker's notice and the issue's record are saved with
+     * the expiry, and sent after the poll.
+     */
+    async function expireAsks(): Promise<void> {
+      asks.startExpiryClocks(ASK_TTL_MS);
+      let expired = 0;
+      for (const row of asks.due(now())) {
+        const tell = !(await threadGone(row.threadId));
+        if (asks.expire(row.id, expiryFollowUps(row, row.expiresAt ?? row.askedAt, tell)) !== "expired") continue;
+        expiredByPoll.push({ id: row.id, threadId: row.threadId, issue: row.issue });
+        expired += 1;
+      }
+      if (expired > 0) publish(0);
+    }
+
     const poll = async (force: boolean, signal?: AbortSignal) => {
       const epoch = answerEpoch;
-      const polled = await locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
+      const polled = await locked(async () => {
+        await expireAsks();
+        return answerEpoch === epoch ? pollNow(force, signal) : null;
+      });
       // Outside the lock, so a slow thread send never holds up an answer.
       for (const row of releasedByPoll.splice(0)) await deliver(row.id);
+      for (const expired of expiredByPoll.splice(0)) {
+        const kept = asks.deliveryFor("expiry", expired.id, expired.threadId);
+        if (kept !== null) await deliver(kept.id);
+        if (expired.issue !== null) await postRecord(expired.id);
+      }
       await todos.sent();
+      await pausedWork.sent();
       return polled;
     };
     /** Poll for a caller who waits for the result: once more if an answer stopped the first poll. */
@@ -307,9 +374,11 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return {
         ...snapshot,
         asks: asks.listOpen().map(askView),
+        expired: asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
         undelivered: asks.undelivered().map(deliveryView),
         unposted: asks.unposted().map(recordView),
         ...todos.list(),
+        ...pausedWork.list(),
       };
     }
 
@@ -672,6 +741,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "asks.answer": async ({ id, option, text }) => {
         const row = asks.get(id);
         if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No bb question ${id}.` });
+        if (row.state === "expired") {
+          throw new experimental_PluginRpcRefusal({ code: "conflict", message: `${id} expired with no answer, and its thread was told to pause its work.` });
+        }
         if (row.state !== "open") throw new experimental_PluginRpcRefusal({ code: "conflict", message: `${id} is ${row.state}.` });
         const answer: AskAnswer = { option, text };
         let delivery: string;
@@ -714,6 +786,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "notifications.claim": async () => ({ notifications: await claimNotifications() }),
       "hosts.list": () => readHosts(bb.sdk, now),
       ...todos.rpc,
+      ...pausedWork.rpc,
     });
 
     // The steward's power to withdraw any question lives only here: bb hands
@@ -749,6 +822,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         summary: "Ask the owner questions without waiting, list them, show how one was answered, answer Linear questions, store the Linear key",
         commands: {
           ...todos.commands,
+          ...pausedWork.commands,
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
@@ -782,24 +856,25 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           }),
           ask: cliCommand({
             summary: "Ask the owner a question without waiting: store it and print its id",
-            description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
+            description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". An unanswered question expires after 3 days (1 day with --urgent); the plugin then tells the asking thread to save its work and pause. The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
             options: {
-              question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionChars} characters` },
+              question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionWords} words and ${ASK_LIMITS.questionChars} characters` },
               "question-file": { type: "string", description: "File with the question, on the calling thread's machine" },
               option: {
                 type: "string",
                 repeatable: true,
-                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionChars} characters each; they get letters A, B, and so on`,
+                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionWords} words each; they get letters A, B, and so on, and a last option, Pause, is added`,
               },
               recommend: { type: "string", description: "The letter of the recommended option, or none; default A when there are options" },
               label: {
                 type: "string",
                 repeatable: true,
-                description: `A label to sort and filter questions by, at most ${ASK_LIMITS.labels}, ${ASK_LIMITS.labelChars} characters each; kept from the first ask`,
+                description: `Exactly ${ASK_LIMITS.labels} label: the name of the issue's Linear project, at most ${ASK_LIMITS.labelChars} characters; kept from the first ask`,
               },
               issue: { type: "string", description: "A Linear issue, like TEAM-12, that gets a comment recording the question and its answer" },
               thread: { type: "string", description: "The asking thread, which gets the answer; default the calling thread" },
               machine: { type: "string", description: "Machine that holds --question-file, when not called from a thread" },
+              urgent: { type: "boolean", description: `The question expires after 1 day, not ${ASK_TTL_MS / 86_400_000}` },
               json,
             },
             constraints: [{ kind: "exactly-one", options: ["question", "question-file"] }],
@@ -817,9 +892,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               let options: ReturnType<typeof askOptions>;
               let issue: string | null;
               let labels: string[];
+              // Names read for another team are not this team's: with none read yet for it, any label is taken.
+              const { teamKey } = await settings.get();
+              const projects = projectNames?.teamKey === teamKey ? projectNames.names : null;
               try {
                 question = checkQuestion(raw);
-                labels = checkLabels(input.options.label ?? []);
+                labels = checkLabels(input.options.label ?? [], projects);
                 const texts = input.options.option ?? [];
                 const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
                 options = askOptions(texts, recommend);
@@ -836,22 +914,25 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               }
               // A table the page cannot draw gets a warning, not a refusal: the
               // question still reads, and the asker can withdraw and ask again.
-              const warning = tableWarning(question, options.map((option) => option.text));
+              const warnings = [tableWarning(question, options.map((option) => option.text)), labelWarning(projects)].filter((line): line is string => line !== null);
               const reply = (id: string, existing: boolean) => {
                 const where = threadId === ctx.threadId ? "this thread" : `thread ${threadId}`;
                 const asked = `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`;
                 return {
                   exitCode: 0,
                   stdout: input.options.json
-                    ? JSON.stringify(warning === null ? { id, existing } : { id, existing, warnings: [warning] })
-                    : warning === null
-                      ? asked
-                      : `${asked}\n${warning}`,
+                    ? JSON.stringify(warnings.length === 0 ? { id, existing } : { id, existing, warnings })
+                    : [asked, ...warnings].join("\n"),
                 };
               };
               // Read everything first: no other ask may run between the checks and the insert.
               const { notify } = await settings.get();
-              const admitted = asks.admit({ id: createAskId(), threadId, threadTitle, question, options, issue, labels, askedAt: Date.now() }, !notify);
+              const askedAt = now();
+              const admitted = asks.admit(
+                { id: createAskId(), threadId, threadTitle, question, options, issue, labels, askedAt },
+                !notify,
+                askedAt + (input.options.urgent === true ? URGENT_TTL_MS : ASK_TTL_MS),
+              );
               if (admitted.kind === "full") {
                 const thread = admitted.scope === "thread";
                 throw new PluginCliError(thread ? `${threadId} already has ${admitted.open} open questions.` : `${admitted.open} questions are already open.`, {

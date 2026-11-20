@@ -12,7 +12,7 @@ test("withdraw pass 2: caller arguments cannot replace the session identity", as
   const { harness, sends } = await setup({ key: null });
   t.after(() => harness.lifecycle.dispose());
   await harness.behavior.setSettings({ stewardThread: "thr_steward" });
-  const asked = await harness.behavior.runCli(["ask", "--question", "Still open?", "--json"], { threadId: "thr_asker" });
+  const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Still open?", "--json"], { threadId: "thr_asker" });
   assert.equal(asked.exitCode, 0, asked.stderr);
   const { id } = JSON.parse(asked.stdout) as { id: string };
   for (const threadId of ["thr_other", "thr_fork", "thr_child"]) {
@@ -37,7 +37,7 @@ test("withdraw pass 2: transient lookup errors retain a failed notice for retry"
       const { harness, sends } = await setup({ key: null });
       subtest.after(() => harness.lifecycle.dispose());
       await harness.behavior.setSettings({ stewardThread: "thr_steward" });
-      const asked = await harness.behavior.runCli(["ask", "--question", "Keep the notice?", "--json"], { threadId: "thr_asker" });
+      const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Keep the notice?", "--json"], { threadId: "thr_asker" });
       assert.equal(asked.exitCode, 0, asked.stderr);
       const { id } = JSON.parse(asked.stdout) as { id: string };
       harness.inspection.sdk.stub("threads.get", async () => { throw fault; });
@@ -59,7 +59,7 @@ test("withdraw pass 2: two steward calls save and send one notice and one record
   t.after(() => harness.lifecycle.dispose());
   await harness.behavior.setSettings({ stewardThread: "thr_steward" });
   const issue = linear.addIssue("TEAM-1", ["checkin"]);
-  const asked = await harness.behavior.runCli(["ask", "--question", "Which withdrawal wins?", "--issue", issue.identifier, "--json"], { threadId: "thr_asker" });
+  const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Which withdrawal wins?", "--issue", issue.identifier, "--json"], { threadId: "thr_asker" });
   assert.equal(asked.exitCode, 0, asked.stderr);
   const { id } = JSON.parse(asked.stdout) as { id: string };
   let release!: () => void;

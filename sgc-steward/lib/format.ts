@@ -88,6 +88,13 @@ export function formatPanel(view: Panel, labels: readonly string[] = [], match: 
     for (const option of ask.options) lines.push(`    ${option.letter}${option.recommended ? " (recommended)" : ""}: ${option.text}`);
     lines.push("  Answer it on the SGC questions page.", "");
   }
+  if (view.expired.length > 0) {
+    lines.push("Expired with no answer, in the last 14 days:");
+    for (const ask of view.expired) {
+      lines.push(`  ${ask.id}  from ${ask.threadTitle || ask.threadId} (${ask.threadId}), expired ${formatUtc(ask.expiredAt)}${ask.issue === null ? "" : `, issue ${ask.issue}`}: ${firstLine(ask.question)}`);
+    }
+    lines.push("");
+  }
   if (view.undelivered.length > 0) {
     lines.push("Answers not delivered:");
     for (const row of view.undelivered) {

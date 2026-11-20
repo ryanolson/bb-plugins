@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Panel } from "./lib/contract.ts";
-import { askDelivery, askRecord, blockDelivery, type Ask } from "./lib/asks.ts";
+import { PAUSE_OPTION, askDelivery, askRecord, blockDelivery, type Ask } from "./lib/asks.ts";
 import { LinearError } from "./lib/linear.ts";
 import { answerCommentId } from "./lib/questions.ts";
 import { KEY, QUESTIONS, rejection, revisionOf, setup } from "./test-support.ts";
@@ -12,7 +12,8 @@ const list = async (harness: Harness) => (await harness.behavior.callRpc("questi
 
 /** `threadId` null runs the command outside any thread. */
 function ask(harness: Harness, args: string[], threadId: string | null = "thr_asker") {
-  return harness.behavior.runCli(["ask", ...args], threadId === null ? { cwd: "/work" } : { threadId, cwd: "/work" });
+  const labelled = args.includes("--label") ? args : [...args, "--label", "Test project"];
+  return harness.behavior.runCli(["ask", ...labelled], threadId === null ? { cwd: "/work" } : { threadId, cwd: "/work" });
 }
 
 async function askId(harness: Harness, args: string[], threadId = "thr_asker"): Promise<string> {
@@ -41,19 +42,22 @@ test("an agent asks without waiting: the command stores the question and returns
   assert.deepEqual(panel.asks[0]!.options, [
     { letter: "A", text: "Yes, today.", recommended: true },
     { letter: "B", text: "No, wait.", recommended: false },
+    { letter: "C", text: PAUSE_OPTION, recommended: false },
   ]);
   const signals = harness.inspection.realtimeSignals.filter((signal) => signal.channel === "questions");
   assert.deepEqual(signals.at(-1)?.payload, { newBlocks: 1 });
 
   const plain = await ask(harness, ["--question", "Which branch?", "--option", "main", "--option", "next", "--recommend", "B"]);
-  assert.match(plain.stdout, /^Asked (bbq_[a-z0-9]{10})\. Keep working: the answer arrives in this thread as a message that starts with "\[sgc-steward\] Answer to \1"\.$/);
-  assert.deepEqual((await list(harness)).asks[1]!.options.map((option) => option.recommended), [false, true]);
+  assert.match(plain.stdout, /^Asked (bbq_[a-z0-9]{10})\. Keep working: the answer arrives in this thread as a message that starts with "\[sgc-steward\] Answer to \1"\.\nWarning: the label was not checked/);
+  assert.deepEqual((await list(harness)).asks[1]!.options.map((option) => option.recommended), [false, true, false]);
   await askId(harness, ["--question", "Free form?", "--option", "x", "--recommend", "none"]);
-  assert.deepEqual((await list(harness)).asks[2]!.options.map((option) => option.recommended), [false]);
+  assert.deepEqual((await list(harness)).asks[2]!.options.map((option) => option.recommended), [false, false]);
 });
 
 test("ask warns about a table with no delimiter row, and stores the question as written", async () => {
-  const { harness } = await setup();
+  const { harness, linear, refresh } = await setup();
+  linear.projects = ["Test project"];
+  await refresh();
   const question = "Cost:\n| Load | Default |\n| Flood | 441k |";
   const plain = await ask(harness, ["--question", question, "--option", "Fine."]);
   assert.equal(plain.exitCode, 0, plain.stderr);
@@ -78,7 +82,7 @@ test("asking the same open question again returns its id, and a thread can have 
   const { harness } = await setup();
   const first = await askId(harness, ["--question", "Same?", "--option", "Yes."]);
   const again = await ask(harness, ["--question", "Same?", "--option", "Yes.", "--json"]);
-  assert.deepEqual(JSON.parse(again.stdout), { id: first, existing: true });
+  assert.deepEqual({ ...(JSON.parse(again.stdout) as object), warnings: undefined }, { id: first, existing: true, warnings: undefined });
   for (let n = 2; n <= 10; n += 1) await askId(harness, ["--question", `Question ${n}?`]);
   const eleventh = await ask(harness, ["--question", "Question 11?"]);
   assert.equal(eleventh.exitCode, 1);
@@ -90,25 +94,26 @@ test("an agent labels its question, and bb sgc questions shows the labels and fi
   const { harness, linear, refresh } = await setup();
   linear.post(linear.addIssue("TEAM-1", ["checkin"]), "q1", QUESTIONS);
   await refresh();
-  const both = await askId(harness, ["--question", "Ship it?", "--label", "release", "--label", "Infra"]);
+  const both = await askId(harness, ["--question", "Ship it?", "--label", "Infra"]);
   const one = await askId(harness, ["--question", "Rename it?", "--label", "release"]);
-  const none = await askId(harness, ["--question", "Lunch?"]);
+  const none = await askId(harness, ["--question", "Lunch?", "--label", "Other"]);
   const listed = async (labels: string[], match?: "any" | "all") => {
     const result = await harness.behavior.runCli(["questions", "--cached", "--json", ...labels.flatMap((label) => ["--label", label]), ...(match === undefined ? [] : ["--match", match])]);
     const panel = JSON.parse(result.stdout) as Panel;
     return { asks: Object.fromEntries(panel.asks.map((row) => [row.id, row.labels])), issues: panel.issues.length };
   };
-  assert.deepEqual(await listed([]), { asks: { [both]: ["release", "Infra"], [one]: ["release"], [none]: [] }, issues: 1 }, "no filter lists everything, as before");
-  assert.deepEqual(await listed(["release"]), { asks: { [both]: ["release", "Infra"], [one]: ["release"] }, issues: 0 });
-  assert.deepEqual(await listed(["RELEASE", "infra"], "all"), { asks: { [both]: ["release", "Infra"] }, issues: 0 }, "every label named, in any case");
+  assert.deepEqual(await listed([]), { asks: { [both]: ["Infra"], [one]: ["release"], [none]: ["Other"] }, issues: 1 }, "no filter lists everything, as before");
+  assert.deepEqual(await listed(["release"]), { asks: { [one]: ["release"] }, issues: 0 });
+  assert.deepEqual(await listed(["RELEASE", "infra"]), { asks: { [both]: ["Infra"], [one]: ["release"] }, issues: 0 }, "any label named, in any case");
   assert.deepEqual(await listed(["nope"]), { asks: {}, issues: 0 });
 
   const text = await harness.behavior.runCli(["questions", "--cached", "--label", "release"]);
-  assert.match(text.stdout, new RegExp(`${both} {2}from .*, labels release, Infra\\n`));
+  assert.match(text.stdout, new RegExp(`${one} {2}from .*, labels release\\n`));
   assert.doesNotMatch(text.stdout, /TEAM-1/, "TEAM-1 has no label release");
-  const empty = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other"]);
-  assert.match(empty.stdout, /No open bb questions with the label nope or other\./);
-  assert.match(empty.stdout, /No open questions on TEAM issues with the label nope or other\./);
+  assert.doesNotMatch(text.stdout, new RegExp(both));
+  const empty = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "zzz"]);
+  assert.match(empty.stdout, /No open bb questions with the label nope or zzz\./);
+  assert.match(empty.stdout, /No open questions on TEAM issues with the label nope or zzz\./);
 });
 
 test("a Linear question takes its issue's labels, a grouped one as group/label, so one filter covers both kinds", async () => {
@@ -130,16 +135,16 @@ test("a Linear question takes its issue's labels, a grouped one as group/label, 
 
 test("a question matches any label named by default, every one with --match all, and another --match is refused", async () => {
   const { harness } = await setup();
-  const both = await askId(harness, ["--question", "Ship it?", "--label", "release", "--label", "infra"]);
+  const both = await askId(harness, ["--question", "Ship it?", "--label", "infra"]);
   const one = await askId(harness, ["--question", "Rename it?", "--label", "release"]);
-  await askId(harness, ["--question", "Lunch?"]);
+  await askId(harness, ["--question", "Lunch?", "--label", "other"]);
   const ids = async (...args: string[]) =>
     (JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json", "--label", "release", "--label", "infra", ...args])).stdout) as Panel).asks
       .map((row) => row.id)
       .sort();
   assert.deepEqual(await ids(), [both, one].sort(), "any of, by default");
   assert.deepEqual(await ids("--match", "any"), [both, one].sort());
-  assert.deepEqual(await ids("--match", "all"), [both]);
+  assert.deepEqual(await ids("--match", "all"), [], "no question has two labels now");
   const all = await harness.behavior.runCli(["questions", "--cached", "--label", "nope", "--label", "other", "--match", "all"]);
   assert.match(all.stdout, /No open bb questions with the labels nope and other\./);
   const refused = await harness.behavior.runCli(["questions", "--cached", "--label", "release", "--match", "some"]);
@@ -151,17 +156,16 @@ test("asking the same open question again with other labels returns its id and k
   const { harness } = await setup();
   const first = await askId(harness, ["--question", "Ship it?", "--label", "release"]);
   const again = await ask(harness, ["--question", "Ship it?", "--label", "other", "--json"]);
-  assert.deepEqual(JSON.parse(again.stdout), { id: first, existing: true });
+  assert.deepEqual({ ...(JSON.parse(again.stdout) as object), warnings: undefined }, { id: first, existing: true, warnings: undefined });
   assert.deepEqual((await list(harness)).asks.map((row) => row.labels), [["release"]]);
 });
 
 test("ask refuses a label that is empty, too long, or holds a control character, and too many labels", async () => {
   const { harness } = await setup();
-  const many = Array.from({ length: 11 }, (_, index) => `l${index}`);
-  for (const labels of [[" "], ["x".repeat(41)], ["two\nlines"], many]) {
+  for (const labels of [[" "], ["x".repeat(81)], ["two\nlines"], ["a", "b"]]) {
     const refused = await ask(harness, ["--question", "Ship it?", ...labels.flatMap((label) => ["--label", label])]);
     assert.equal(refused.exitCode, 1, JSON.stringify(labels));
-    assert.match(refused.stderr, /a label is empty|over 40 characters|control character|at most 10 labels/, JSON.stringify(labels));
+    assert.match(refused.stderr, /the label is empty|over 80 characters|control character|exactly 1 label/, JSON.stringify(labels));
   }
   assert.deepEqual((await list(harness)).asks, []);
 });
@@ -912,4 +916,157 @@ test("a withdrawal notice that fails to send is listed with a retry", async () =
   const retried = (await harness.behavior.callRpc("deliveries.retry", { id: panel.undelivered[0]!.id })) as { delivered: boolean };
   assert.equal(retried.delivered, true);
   assert.ok(sends[0]!.input[0]!.text.startsWith(`[sgc-steward] Withdrawn ${id}`));
+});
+
+const words = (count: number) => Array.from({ length: count }, (_, index) => `w${index}`).join(" ");
+
+test("ask refuses what breaks a limit, with code invalid and the limit in the message", async () => {
+  const { harness } = await setup();
+  const refused = async (args: string[], pattern: RegExp) => {
+    const result = await harness.behavior.runCli(["ask", ...args], { threadId: "thr_asker", cwd: "/work" });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, pattern);
+  };
+  await refused(["--question", words(81), "--label", "x"], /at most 80 words/);
+  await refused(["--question", "Q?", "--option", "a", "--option", "b", "--option", "c", "--option", "d", "--label", "x"], /at most 3 options/);
+  await refused(["--question", "Q?", "--option", words(26), "--label", "x"], /option A is over 25 words/);
+  await refused(["--question", "Q?"], /exactly 1 label/);
+  await refused(["--question", "Q?", "--label", "a", "--label", "b"], /exactly 1 label/);
+  assert.equal((await list(harness)).asks.length, 0, "nothing was stored");
+});
+
+test("ask checks the label against the open Linear projects after a poll, and warns before any poll has finished", async () => {
+  const { harness, linear, refresh } = await setup();
+  linear.projects = ["Operator tooling: lean restart", "Old work"];
+  const before = await ask(harness, ["--question", "Early?", "--label", "Whatever", "--json"]);
+  assert.equal(before.exitCode, 0, before.stderr);
+  assert.match((JSON.parse(before.stdout) as { warnings: string[] }).warnings[0]!, /not checked/);
+  await refresh();
+  const known = await ask(harness, ["--question", "Known?", "--label", "operator TOOLING: lean restart", "--json"]);
+  assert.deepEqual(Object.keys(JSON.parse(known.stdout) as object).sort(), ["existing", "id"], "a checked label warns of nothing");
+  const unknown = await ask(harness, ["--question", "Unknown?", "--label", "Nope"]);
+  assert.equal(unknown.exitCode, 1);
+  assert.match(unknown.stderr, /not the name of an open Linear project/);
+  linear.projects = null;
+  await refresh();
+  const kept = await ask(harness, ["--question", "Still known?", "--label", "Nope"]);
+  assert.equal(kept.exitCode, 1, "a failed read keeps the last good list");
+});
+
+test("every ask ends with the Pause option, which is not recommended, and an answer to it reaches the asker", async () => {
+  const { harness, sends } = await setup();
+  const id = await askId(harness, ["--question", "Go?", "--option", "Yes.", "--label", "x"]);
+  const [shown] = (await list(harness)).asks;
+  assert.deepEqual(shown!.options.map((option) => [option.letter, option.recommended]), [["A", true], ["B", false]]);
+  assert.match(shown!.options[1]!.text, /^Pause it: /);
+  await harness.behavior.callRpc("asks.answer", { id, option: "B", text: "" });
+  assert.match(sends.at(-1)!.input[0]!.text, /B: Pause it: stop this work for now/);
+});
+
+const DAY = 86_400_000;
+const T0 = Date.parse("2026-11-20T10:00:00Z");
+
+async function clocked() {
+  const clock = { at: T0 };
+  const made = await setup({ now: () => clock.at });
+  return { ...made, clock };
+}
+
+const expiryMessages = (sends: Array<{ input: Array<{ text: string }> }>) => sends.map((send) => send.input[0]!.text).filter((text) => text.startsWith("[sgc-steward] Expired"));
+
+test("an unanswered ask expires after 3 days, and 1 day when urgent, and the asker is told once", async () => {
+  const { harness, sends, refresh, clock } = await clocked();
+  const normal = await askId(harness, ["--question", "Slow?"]);
+  const urgent = await askId(harness, ["--question", "Fast?", "--urgent"]);
+  clock.at = T0 + DAY - 1;
+  await refresh();
+  assert.equal((await list(harness)).asks.length, 2, "nothing expires before its boundary");
+  clock.at = T0 + DAY;
+  await refresh();
+  assert.deepEqual((await list(harness)).asks.map((row) => row.id), [normal]);
+  assert.equal(expiryMessages(sends).length, 1);
+  assert.match(expiryMessages(sends)[0]!, new RegExp(`^\\[sgc-steward\\] Expired ${urgent}\\n`));
+  await refresh();
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 1, "later polls tell nobody again");
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 2);
+  assert.deepEqual((await list(harness)).asks, []);
+});
+
+test("an expired ask refuses an answer with a clear error, and an ask on an issue gets its record once", async () => {
+  const { harness, linear, refresh, clock } = await clocked();
+  linear.addIssue("TEAM-12", []);
+  const id = await askId(harness, ["--question", "Ship?", "--issue", "TEAM-12"]);
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  await refresh();
+  const refused = await rejection(harness.behavior.callRpc("asks.answer", { id, option: "A", text: "" }));
+  assert.equal(refused.code, "conflict");
+  assert.match(refused.message, /expired/);
+  assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 1, "one record, not one per poll");
+  assert.match(linear.find("TEAM-12")!.comments[0]!.body, /expired/);
+});
+
+test("bb sgc questions --json lists the asks that expired in the last 14 days", async () => {
+  const { harness, refresh, clock } = await clocked();
+  const id = await askId(harness, ["--question", "Ship?"]);
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  const shown = JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json"])).stdout) as Panel & { expired: Array<{ id: string; expiredAt: number }> };
+  assert.deepEqual(shown.expired.map((row) => [row.id, row.expiredAt]), [[id, T0 + 3 * DAY]]);
+  clock.at = T0 + 3 * DAY + 15 * DAY;
+  await refresh();
+  const later = JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json"])).stdout) as { expired: unknown[] };
+  assert.deepEqual(later.expired, [], "an expiry older than 14 days drops out");
+});
+
+test("an ask expires without a Linear key too", async () => {
+  const clock = { at: T0 };
+  const { harness, sends } = await setup({ key: null, now: () => clock.at });
+  await askId(harness, ["--question", "Ship?"]);
+  clock.at = T0 + 3 * DAY;
+  await harness.behavior.callRpc("questions.refresh", null);
+  assert.equal(expiryMessages(sends).length, 1);
+});
+
+test("the project list belongs to the team it was read for: after a team change, no list is known until the new one is read", async () => {
+  const { harness, linear, refresh } = await setup();
+  linear.projects = ["Old team project"];
+  await refresh();
+  assert.equal((await ask(harness, ["--question", "Old?", "--label", "old team project"])).exitCode, 0);
+  await harness.behavior.setSettings({ teamKey: "NEW" });
+  linear.projects = null;
+  await refresh();
+  const after = await ask(harness, ["--question", "New?", "--label", "Old team project", "--json"]);
+  assert.equal(after.exitCode, 0, "old-team names are not checked against: no list is known, so it only warns");
+  assert.match((JSON.parse(after.stdout) as { warnings: string[] }).warnings[0]!, /not checked/);
+});
+
+test("expiry does not record that it told an archived thread to pause", async () => {
+  const { harness, linear, sends, refresh, clock } = await clocked();
+  const issue = linear.addIssue("TEAM-12", []);
+  await askId(harness, ["--question", "Ship?", "--issue", issue.identifier]);
+  harness.inspection.sdk.stub("threads.get", async () => ({ archivedAt: new Date(T0).toISOString() }));
+
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 0);
+  assert.equal(issue.comments.length, 1);
+  assert.doesNotMatch(issue.comments[0]!.body, /thread was told to save its work and pause/);
+});
+
+test("the expiry record never says the asker was told, only that a notice was queued", async () => {
+  const { harness, linear, refresh, clock } = await clocked();
+  const issue = linear.addIssue("TEAM-12", []);
+  await askId(harness, ["--question", "Ship?", "--issue", issue.identifier]);
+  harness.inspection.sdk.stub("threads.send", async () => {
+    throw new Error("send failed");
+  });
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.doesNotMatch(issue.comments[0]!.body, /was told/);
+  assert.match(issue.comments[0]!.body, /notice to save its work and pause was queued/);
+  assert.equal(((await harness.behavior.callRpc("questions.list", null)) as Panel).undelivered.length, 1);
 });

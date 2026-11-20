@@ -218,19 +218,21 @@ export const RECORD_HEADER = "Answer to bb question";
 export const TODO_DONE_HEADER = "Done (from the SGC page)";
 /** The first line of the comment that reopens a todo marked done by mistake. */
 export const TODO_REOPENED_HEADER = "Reopened (from the SGC page)";
+/** The first line of the comment that resumes a paused issue. */
+export const RESUMED_HEADER = "Resumed (from the SGC page)";
 
 /**
  * What a plugin answer names in its header lines, or null for a plain
  * answer, which names nothing and so closes every block before it. The
  * record of a bb question starts with the record header and names no block,
  * whatever else it holds: the question it records can quote an answer
- * header. A comment that marks a todo done or reopened names no block
+ * header. A comment that marks a todo done or reopened, or resumes an issue, names no block
  * either: it is the owner's comment, but not an answer.
  */
 export function answeredBlocks(body: string): AnswerRef[] | null {
   const lines = body.replace(/\r\n?/g, "\n").split("\n");
   const first = (lines.find((line) => line.trim() !== "") ?? "").trim();
-  if (first.startsWith(`${RECORD_HEADER} `) || first === TODO_DONE_HEADER || first === TODO_REOPENED_HEADER) return [];
+  if (first.startsWith(`${RECORD_HEADER} `) || first === TODO_DONE_HEADER || first === TODO_REOPENED_HEADER || first === RESUMED_HEADER) return [];
   const refs: AnswerRef[] = [];
   for (const line of lines) {
     if (!ANSWER_HEADER.test(line)) continue;

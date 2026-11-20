@@ -5,7 +5,7 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import { ASK_LIMITS, type AnswerChannel, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
+import { ASK_LIMITS, PAUSE_OPTION, type AnswerChannel, type Ask, type AskAnswer, type AskOption } from "./asks.ts";
 
 /**
  * Every migration after seen_blocks, in order: the plugin's one migration
@@ -92,9 +92,33 @@ export const STORE_MIGRATIONS: readonly string[] = [
   // Where the answer came from. Null for an answer stored before, so a check
   // that needs a known channel refuses it rather than guessing.
   `ALTER TABLE asks ADD COLUMN answer_channel TEXT`,
+  // When an unanswered question expires, and when it did. A question from
+  // before has no expires_at until its first poll gives it a clock.
+  `ALTER TABLE asks ADD COLUMN expires_at INTEGER`,
+  `ALTER TABLE asks ADD COLUMN expired_at INTEGER`,
+  // What a Resume of a paused issue means to write to Linear, and the message
+  // it sends once it finishes, kept before it writes so a retry finishes it.
+  `CREATE TABLE IF NOT EXISTS resume_actions (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    note TEXT,
+    label_id TEXT NOT NULL,
+    state_id TEXT NOT NULL,
+    recipient TEXT,
+    message TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    finished_at INTEGER
+  )`,
+  // At most one unfinished Resume per issue.
+  `CREATE UNIQUE INDEX IF NOT EXISTS resume_actions_pending ON resume_actions (issue_id) WHERE state = 'pending'`,
 ];
 
-export type AskState = "open" | "answered" | "withdrawn";
+export type AskState = "open" | "answered" | "withdrawn" | "expired";
 
 export interface AskRow extends Ask {
   state: AskState;
@@ -106,9 +130,13 @@ export interface AskRow extends Ask {
   withdrawnBy: string | null;
   withdrawReason: string | null;
   withdrawnAt: number | null;
+  /** When an open question expires; null for one stored before expiry, until a poll starts its clock. */
+  expiresAt: number | null;
+  /** When it expired; null unless expired. */
+  expiredAt: number | null;
 }
 
-export type DeliverySource = "ask" | "linear" | "withdrawal" | "todo";
+export type DeliverySource = "ask" | "linear" | "withdrawal" | "expiry" | "resume" | "todo";
 
 /**
  * One message to send to a thread: the answer to its bb question or to its
@@ -175,6 +203,8 @@ export type Outcome = { ok: true } | { ok: false; error: string };
 
 export type WithdrawOutcome = "withdrawn" | "not_found" | "not_yours" | "not_open";
 
+export type ExpireOutcome = "expired" | "not_found" | "not_open" | "not_due";
+
 /** A withdrawal: who acts, and what goes out with it. */
 export interface Withdrawal {
   /** The thread the caller acts for: the calling thread, or `--thread` from the owner's terminal. */
@@ -192,6 +222,11 @@ export interface Withdrawal {
 
 /** What happened to an asked question: stored, already open, or refused at a cap. */
 export type Admission = { kind: "asked" | "existing"; id: string } | { kind: "full"; scope: "thread" | "total"; open: number };
+
+/** The options the asker offered: all but a last Pause option. */
+function withoutPause(options: readonly AskOption[]): AskOption[] {
+  return options.at(-1)?.text === PAUSE_OPTION ? options.slice(0, -1) : [...options];
+}
 
 function token(bytes: number): string {
   return [...randomBytes(bytes)].map((byte) => (byte % 36).toString(36)).join("");
@@ -217,6 +252,8 @@ interface AskRecord {
   withdrawn_by: string | null;
   withdraw_reason: string | null;
   withdrawn_at: number | null;
+  expires_at: number | null;
+  expired_at: number | null;
 }
 
 interface DeliveryRecord {
@@ -261,6 +298,8 @@ function toAsk(row: AskRecord): AskRow {
     withdrawnBy: row.withdrawn_by,
     withdrawReason: row.withdraw_reason,
     withdrawnAt: row.withdrawn_at,
+    expiresAt: row.expires_at,
+    expiredAt: row.expired_at,
   };
 }
 
@@ -319,13 +358,17 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
      * asks at once cannot both pass them. Labels do not make a question
      * another one: a repeat keeps the labels it was first asked with. A repeat at a cap still gets its
      * id. `notified` stores the question as already announced, when
-     * notifications are off.
+     * notifications are off. `expiresAt` is when it expires unanswered.
      */
-    admit(ask: Ask, notified: boolean): Admission {
+    admit(ask: Ask, notified: boolean, expiresAt: number | null = null): Admission {
       return db.transaction((): Admission => {
-        const same = db
-          .prepare("SELECT id FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND options = ? AND issue IS ?")
-          .get(ask.threadId, ask.question, JSON.stringify(ask.options), ask.issue) as { id: string } | undefined;
+        // Options are compared without the Pause option, so an ask stored before it existed still matches its repeat.
+        const asked = JSON.stringify(withoutPause(ask.options));
+        const same = (
+          db
+            .prepare("SELECT id, options FROM asks WHERE state = 'open' AND thread_id = ? AND question = ? AND issue IS ? ORDER BY asked_at, id")
+            .all(ask.threadId, ask.question, ask.issue) as Array<{ id: string; options: string }>
+        ).find((row) => JSON.stringify(withoutPause(JSON.parse(row.options) as AskOption[])) === asked);
         if (same !== undefined) return { kind: "existing", id: same.id };
         const open = db
           .prepare("SELECT COUNT(*) AS total, COALESCE(SUM(thread_id = ?), 0) AS thread FROM asks WHERE state = 'open'")
@@ -333,9 +376,9 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
         if (open.thread >= ASK_LIMITS.openPerThread) return { kind: "full", scope: "thread", open: open.thread };
         if (open.total >= ASK_LIMITS.openTotal) return { kind: "full", scope: "total", open: open.total };
         db.prepare(
-          `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, labels, asked_at, state, notified_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
-        ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, JSON.stringify(ask.labels), ask.askedAt, notified ? now() : null);
+          `INSERT INTO asks (id, thread_id, thread_title, question, options, issue, labels, asked_at, state, notified_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+        ).run(ask.id, ask.threadId, ask.threadTitle, ask.question, JSON.stringify(ask.options), ask.issue, JSON.stringify(ask.labels), ask.askedAt, notified ? now() : null, expiresAt);
         return { kind: "asked", id: ask.id };
       })();
     },
@@ -347,6 +390,45 @@ export function createAskStore(db: Database.Database, now: () => number = Date.n
 
     listOpen(): AskRow[] {
       return (db.prepare("SELECT * FROM asks WHERE state = 'open' ORDER BY asked_at, id").all() as AskRecord[]).map(toAsk);
+    },
+
+    /** Open questions whose time is up at `at`, oldest first. */
+    due(at: number): AskRow[] {
+      const rows = db.prepare("SELECT * FROM asks WHERE state = 'open' AND expires_at <= ? ORDER BY expires_at, id").all(at) as AskRecord[];
+      return rows.map(toAsk);
+    },
+
+    /**
+     * Give each open question with no clock a fresh one of `ttlMs`, so a
+     * question asked before expiry existed does not expire at once.
+     */
+    startExpiryClocks(ttlMs: number): number {
+      return db.prepare("UPDATE asks SET expires_at = ? WHERE state = 'open' AND expires_at IS NULL").run(now() + ttlMs).changes;
+    },
+
+    /**
+     * Expire one question whose time is up. The notice for the asker and the
+     * record for the issue are saved in the same transaction. Only an open
+     * question expires, so an expiry and an answer or a withdrawal that race
+     * have one winner, and the loser saves nothing.
+     */
+    expire(id: string, followUps: { notice: string | null; record: { issue: string; body: string } | null }): ExpireOutcome {
+      return db.transaction((): ExpireOutcome => {
+        const row = getAsk.get(id) as AskRecord | undefined;
+        if (row === undefined) return "not_found";
+        if (row.state !== "open") return "not_open";
+        const at = now();
+        const changed = db.prepare("UPDATE asks SET state = 'expired', expired_at = ? WHERE id = ? AND state = 'open' AND expires_at <= ?").run(at, id, at).changes;
+        if (changed !== 1) return "not_due";
+        if (followUps.notice !== null) insertDelivery.run(`dlv_${token(10)}`, "expiry", id, row.thread_id, `Expiry of ${id}`, followUps.notice, "pending", null, at);
+        if (followUps.record !== null) insertRecord.run(id, followUps.record.issue, followUps.record.body, at);
+        return "expired";
+      })();
+    },
+
+    /** Questions that expired at or after `since`, newest first. */
+    listExpired(since: number): AskRow[] {
+      return (db.prepare("SELECT * FROM asks WHERE state = 'expired' AND expired_at >= ? ORDER BY expired_at DESC, id").all(since) as AskRecord[]).map(toAsk);
     },
 
     /**

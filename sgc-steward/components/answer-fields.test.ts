@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { installMarkdownRuntime } from "../test-support-tsx.ts";
-import { askOptions, checkQuestion } from "../lib/asks.ts";
+import { askOptions, checkQuestion, PAUSE_OPTION } from "../lib/asks.ts";
 import { parseQuestionBlock } from "../lib/questions.ts";
 
 const { AnswerFields } = await import("./answer-fields.tsx");
@@ -70,7 +70,7 @@ test("a bb question keeps its Markdown on the way in", () => {
   const options = askOptions(OPTIONS, "B");
   assert.deepEqual(
     options.map((option) => [option.letter, option.text, option.recommended]),
-    [["A", OPTIONS[0], false], ["B", OPTIONS[1], true], ["C", OPTIONS[2], false]],
+    [["A", OPTIONS[0], false], ["B", OPTIONS[1], true], ["C", OPTIONS[2], false], ["D", PAUSE_OPTION, false]],
   );
 });
 

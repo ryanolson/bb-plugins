@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Panel } from "./lib/contract.ts";
-import { DELIVERY_PREFIX, askDelivery, askRecord, type Ask } from "./lib/asks.ts";
+import { DELIVERY_PREFIX, PAUSE_OPTION, askDelivery, askRecord, type Ask } from "./lib/asks.ts";
 import { setup } from "./test-support.ts";
 
 type Harness = Awaited<ReturnType<typeof setup>>["harness"];
@@ -12,7 +12,7 @@ const QUESTION = "Merge !42 at head abc123 onto def456?";
 const OPTIONS = ["--option", "Approve", "--option", "Reject"];
 
 async function askId(harness: Harness, args: string[]): Promise<string> {
-  const result = await harness.behavior.runCli(["ask", ...args, "--json"], { threadId: "thr_asker", cwd: "/work" });
+  const result = await harness.behavior.runCli(["ask", "--label", "Test project", ...args, "--json"], { threadId: "thr_asker", cwd: "/work" });
   assert.equal(result.exitCode, 0, result.stderr);
   return (JSON.parse(result.stdout) as { id: string }).id;
 }
@@ -42,6 +42,7 @@ test("an answer from the page reports the chosen letter and text, with channel b
     options: [
       { letter: "A", text: "Approve" },
       { letter: "B", text: "Reject" },
+      { letter: "C", text: PAUSE_OPTION },
     ],
     status: "answered",
     answeredAt: result.answeredAt,

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { STORE_MIGRATIONS, createAskId, createAskStore } from "./ask-store.ts";
-import type { Ask } from "./asks.ts";
+import { PAUSE_OPTION, type Ask } from "./asks.ts";
 
 let clock = Date.parse("2026-01-05T10:00:00Z");
 const now = () => (clock += 1000);
@@ -291,4 +291,15 @@ test("a database with the nine shipped steps upgrades: a question from before ha
   const store = createAskStore(db, now);
   assert.deepEqual(store.get("bbq_old")!.labels, []);
   assert.equal(store.answer("bbq_old", { option: null, text: "Yes." }, "bb", { message: "m", label: "bbq_old" }, null), "answered");
+});
+
+
+test("a repeat of an open question stored before the Pause option returns its id", () => {
+  const { store } = open();
+  const legacy = ask("bbq_legacy");
+  store.admit(legacy, false);
+  const withPause = { ...ask("bbq_new"), question: legacy.question, options: [...legacy.options, { letter: "C", text: PAUSE_OPTION, recommended: false }] };
+  assert.deepEqual(store.admit(withPause, false), { kind: "existing", id: "bbq_legacy" });
+  const other = { ...withPause, id: "bbq_other", options: [{ letter: "A", text: "Different.", recommended: true }, { letter: "B", text: PAUSE_OPTION, recommended: false }] };
+  assert.equal(store.admit(other, false).kind, "asked", "other options are another question");
 });
