@@ -404,7 +404,7 @@ export function expiryRecord(ask: Ask, deadline: number, told = true): string {
     ask.question,
     ...options,
     "",
-    `No answer came by ${formatUtc(deadline)}. ${told ? "The asking thread was told to save its work and pause." : "The asking thread could not be told: it is archived or gone."}`,
+    `No answer came by ${formatUtc(deadline)}. ${told ? "A notice to save its work and pause was queued for the asking thread; if it did not arrive, it is listed on the SGC page for a retry." : "The asking thread could not be told: it is archived or gone."}`,
   ].join("\n");
 }
 

@@ -190,3 +190,12 @@ test("bb sgc paused reports a failed Linear refresh instead of returning stale r
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr ?? "", /Linear is unavailable/);
 });
+
+test("a pending Resume's issue that moved to another team is not listed", async () => {
+  const { harness, linear } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["paused"], "TEAM", { state: BACKLOG });
+  linear.setStateFaults = ["dropped"];
+  await rejection(harness.behavior.callRpc("paused.resume", { issue: "TEAM-1", note: "" }));
+  issue.teamKey = "OTHER";
+  assert.deepEqual((await refresh(harness)).paused, []);
+});

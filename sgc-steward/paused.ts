@@ -177,7 +177,7 @@ export function createPaused(deps: PausedDeps) {
       for (const action of store.unfinished()) {
         if (listed.some((issue) => issue.id === action.issueId)) continue;
         const issue = await linear.getPausedIssue(action.issueId, signal);
-        if (issue !== null && issue.state?.type !== "completed" && issue.state?.type !== "canceled") extra.push(toView(issue));
+        if (issue !== null && issue.teamKey === teamKey && issue.state?.type !== "completed" && issue.state?.type !== "canceled") extra.push(toView(issue));
       }
       if (signal.aborted) return null;
       paused = [...listed.map(toView), ...extra].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

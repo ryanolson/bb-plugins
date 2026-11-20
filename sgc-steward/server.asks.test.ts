@@ -1056,3 +1056,17 @@ test("expiry does not record that it told an archived thread to pause", async ()
   assert.equal(issue.comments.length, 1);
   assert.doesNotMatch(issue.comments[0]!.body, /thread was told to save its work and pause/);
 });
+
+test("the expiry record never says the asker was told, only that a notice was queued", async () => {
+  const { harness, linear, refresh, clock } = await clocked();
+  const issue = linear.addIssue("TEAM-12", []);
+  await askId(harness, ["--question", "Ship?", "--issue", issue.identifier]);
+  harness.inspection.sdk.stub("threads.send", async () => {
+    throw new Error("send failed");
+  });
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.doesNotMatch(issue.comments[0]!.body, /was told/);
+  assert.match(issue.comments[0]!.body, /notice to save its work and pause was queued/);
+  assert.equal(((await harness.behavior.callRpc("questions.list", null)) as Panel).undelivered.length, 1);
+});
