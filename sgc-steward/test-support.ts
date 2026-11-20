@@ -259,6 +259,7 @@ export interface Notice {
  * `sends` and succeed; a test re-stubs `threads.send` to make them fail.
  */
 export async function setup(options: { key?: string | null; postWindowMs?: number; now?: () => number; settings?: Record<string, string> } = {}) {
+  const passWaiters: Array<() => void> = [];
   const linear = new FakeLinear();
   const factory = createSgcStewardPlugin({
     createClient: (apiKey) => {
@@ -268,6 +269,7 @@ export async function setup(options: { key?: string | null; postWindowMs?: numbe
     retryDelayMs: 0,
     ...(options.postWindowMs === undefined ? {} : { postWindowMs: options.postWindowMs }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    afterThreadsPass: () => passWaiters.splice(0).forEach((resolve) => resolve()),
   });
   const settings: Record<string, string> = {
     ...(options.key === null ? { teamKey: "TEAM" } : { linearApiKey: options.key ?? KEY, teamKey: "TEAM" }),
@@ -287,7 +289,15 @@ export async function setup(options: { key?: string | null; postWindowMs?: numbe
   await factory(host.bb);
   const refresh = async () => (await harness.behavior.callRpc("questions.refresh", null)) as Snapshot;
   const claim = async () => (await harness.behavior.callRpc("notifications.claim", null)) as { notifications: Notice[] };
-  return { linear, harness, refresh, claim, sends, factory };
+  /** One background pass of the thread lifecycle, the only one that acts in act mode. */
+  const pass = async () => {
+    const next = new Promise<void>((resolve) => passWaiters.push(resolve));
+    const { controller, done } = harness.runService("threads");
+    await next;
+    controller.abort();
+    await done;
+  };
+  return { linear, harness, refresh, claim, sends, factory, pass };
 }
 
 export function revisionOf(snapshot: Snapshot, blockId: string): string {

@@ -24,7 +24,7 @@ interface FakeThread {
   queuedAt?: number;
 }
 
-const EVERY_READ = new Set(["hosts.list", "threads.list", "threads.context", "threads.defaultExecutionOptions", "threads.queuedMessages.list", "environments.status"]);
+const EVERY_READ = new Set(["hosts.list", "threads.list", "threads.context", "threads.defaultExecutionOptions", "threads.queuedMessages.list", "environments.status", "environments.diffBranches"]);
 const CLEAN_ENV = { outcome: "available", workspace: { checkout: { kind: "branch", branchName: "f", headSha: "abc" }, mergeBase: { aheadCount: 0 }, workingTree: { state: "clean", hasUncommittedChanges: false } } };
 
 /** The plugin on a fake bb with a clock the test moves, a few threads, and a Linear with issues. */
@@ -32,7 +32,7 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
   const clock = { now: START };
   const kit = await setup({ now: () => clock.now, ...options });
   const sdk = kit.harness.inspection.sdk;
-  const state = { threads, env: new Map<string, unknown>(), listFails: false, archived: new Set<string>() };
+  const state = { threads, env: new Map<string, unknown>(), remote: new Map<string, string[]>(), listFails: false, archived: new Set<string>() };
   const row = (thread: FakeThread) => ({
     id: thread.id,
     title: thread.title,
@@ -78,6 +78,13 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
     return thread.queuedMessageCount ? [{ id: "q1", threadId: thread.id, createdAt: thread.queuedAt ?? clock.now, state: "queued" }] : [];
   });
   sdk.stub("environments.status", async (args: unknown) => structuredClone(state.env.get((args as { environmentId: string }).environmentId) ?? CLEAN_ENV));
+  sdk.stub("environments.diffBranches", async (args: unknown) => ({
+    branches: [],
+    branchesTruncated: false,
+    remoteBranches: state.remote.get((args as { environmentId: string }).environmentId) ?? [],
+    remoteBranchesTruncated: false,
+    selectedBranch: null,
+  }));
   const issue = (identifier: string, stateId: string, labels: string[] = []): FakeIssue => {
     const made = kit.linear.addIssue(identifier, labels, "TEAM");
     const found = kit.linear.states.find((candidate) => candidate.id === stateId)!;
@@ -162,9 +169,10 @@ test("a signed claim finds the issue; the title prefix is the fallback; no match
 test("each decision is logged once per cache life, with its inputs and reason; before the window nothing is logged", async () => {
   const t = await lifecycleSetup([
     { id: "thr_done", title: "1: finished", updatedAt: START - 50 * MINUTE },
-    { id: "thr_fresh", title: "1: fresh", updatedAt: START - 5 * MINUTE },
+    { id: "thr_fresh", title: "2: fresh", updatedAt: START - 5 * MINUTE },
   ]);
   t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
   await t.list();
   t.clock.now += 2 * MINUTE;
   await t.list();
@@ -437,6 +445,7 @@ test("act mode archives a safe done thread, after a signed comment on its issue,
     t.state.archived.add(threadId);
     return { archived: [threadId] };
   });
+  await t.pass();
   const view = await t.list();
   assert.equal(view.mode, "act");
   assert.deepEqual(t.acted, ["archive thr_done"]);
@@ -457,7 +466,7 @@ test("a thread that turned unsafe between the decision and the action is refused
     const tree = reads === 1 ? "clean" : "dirty_uncommitted";
     return { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: tree, hasUncommittedChanges: tree !== "clean" } } };
   });
-  await t.list();
+  await t.pass();
   assert.ok(reads >= 2, "the checkout is read again before the action");
   assert.deepEqual(t.acted, []);
   assert.equal(issue.comments.length, 0, "no comment for an archive that did not happen");
@@ -477,7 +486,7 @@ test("a thread that began a turn between the decision and the action is refused"
     // The first list is the decision; later lists see a running turn.
     return original.map((thread) => t.row({ ...thread, status: lists === 1 ? "idle" : "active" }));
   });
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, []);
   assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["compact", "refused"]]);
 });
@@ -485,11 +494,11 @@ test("a thread that began a turn between the decision and the action is refused"
 test("compact runs once per cache life", async () => {
   const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000 }], { settings: ACT });
   t.issue("TEAM-1", "state-started");
-  await t.list();
+  await t.pass();
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, ["compact thr_a"]);
   assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["compact", "done"]]);
 });
@@ -498,10 +507,10 @@ test("a failed compact is logged with its error and tried again in the next pass
   const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 300_000 }], { settings: ACT });
   t.issue("TEAM-1", "state-started");
   t.actFails.add("compact");
-  await t.list();
+  await t.pass();
   t.actFails.delete("compact");
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, ["compact thr_a"]);
   const rows = await t.log();
   assert.deepEqual(rows.map((row) => [row.result, row.error]), [["done", undefined], ["failed", "compact boom"]]);
@@ -511,10 +520,10 @@ test("the issue comment goes out once, even when the archive fails and is tried 
   const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
   const issue = t.issue("TEAM-1", "state-done");
   t.actFails.add("archive");
-  await t.list();
+  await t.pass();
   t.actFails.delete("archive");
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, ["archive thr_done"]);
   assert.equal(issue.comments.length, 1);
 });
@@ -523,7 +532,7 @@ test("an archive stops when the issue comment cannot be posted", async () => {
   const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
   t.issue("TEAM-1", "state-done");
   t.linear.createFaults.push("dropped", "dropped");
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, []);
   const entry = (await t.log())[0]!;
   assert.equal(entry.result, "failed");
@@ -533,16 +542,16 @@ test("an archive stops when the issue comment cannot be posted", async () => {
 test("a stuck thread is flagged to the steward once a day", async () => {
   const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: ACT });
   t.issue("TEAM-2", "state-started");
-  await t.list();
+  await t.pass();
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   const flags = t.sends.filter((send) => send.threadId === "thr_steward");
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.input[0]!.text, "[sgc-steward] Thread thr_err stuck: the thread is in error");
   t.clock.now += 25 * HOUR;
-  await t.list();
+  await t.pass();
   assert.equal(t.sends.filter((send) => send.threadId === "thr_steward").length, 2, "a day later, it says so again");
 });
 
@@ -550,7 +559,7 @@ test("an unsafe archive candidate is flagged to the steward with the reason", as
   const t = await lifecycleSetup([{ id: "thr_dirty", title: "1: a" }], { settings: ACT });
   t.issue("TEAM-1", "state-done");
   t.state.env.set("env_thr_dirty", { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: "dirty_uncommitted", hasUncommittedChanges: true } } });
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, []);
   assert.match(t.sends[0]!.input[0]!.text, /^\[sgc-steward\] Thread thr_dirty stuck: done but not safe to archive: the environment has uncommitted changes$/);
 });
@@ -564,19 +573,19 @@ test("a failed steward message is tried again in the next pass, and not logged a
     t.sends.push(args as (typeof t.sends)[number]);
     return {};
   });
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.sends, []);
   assert.equal((await t.log())[0]!.result, "failed");
   fail = false;
   t.clock.now += 5 * MINUTE;
-  await t.list();
+  await t.pass();
   assert.equal(t.sends.length, 1);
 });
 
 test("without a steward thread, a flag is logged and nothing is sent", async () => {
   const t = await lifecycleSetup([{ id: "thr_err", title: "2: broken", status: "error" }], { settings: { threadLifecycleMode: "act" } });
   t.issue("TEAM-2", "state-started");
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.sends, []);
   assert.deepEqual((await t.log()).map((row) => [row.decision, row.result]), [["flag", "observed"]]);
 });
@@ -592,6 +601,7 @@ test("observe mode never acts, flags, or comments, even with every other setting
   );
   t.issue("TEAM-1", "state-done");
   t.issue("TEAM-2", "state-started");
+  await t.pass();
   const view = await t.list();
   assert.equal(view.mode, "observe");
   assert.deepEqual(t.acted, []);
@@ -610,7 +620,7 @@ test("a thread that is protected, or whose child is working, is never acted on",
     { settings: ACT },
   );
   t.issue("TEAM-1", "state-done");
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, []);
 });
 
@@ -624,7 +634,7 @@ test("lifecycleActions turns each kind of action on or off", async () => {
   );
   t.issue("TEAM-1", "state-done");
   t.issue("TEAM-2", "state-started");
-  await t.list();
+  await t.pass();
   assert.deepEqual(t.acted, ["compact thr_big"]);
   assert.deepEqual((await t.log()).find((row) => row.threadId === "thr_done")?.result, "observed");
 });
@@ -691,4 +701,61 @@ test("a clean idle child does not stop an archive of its parent, and a deeper de
   ]);
   u.state.env.set("env_thr_grandkid", DIRTY);
   assert.match((await rejection(u.act("thr_parent", "archive"))).message, /child thr_grandkid.*uncommitted/);
+});
+
+// --- cold threads, who acts, and a pushed branch ----------------------------
+
+test("act mode archives a done thread whose cache went cold hours ago", async () => {
+  const t = await lifecycleSetup([{ id: "thr_cold", title: "1: finished", updatedAt: START - 5 * HOUR }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  assert.deepEqual([byId(await t.list(), "thr_cold").expiresIn, byId(await t.list(), "thr_cold").decision], ["cold", "archive"]);
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_cold"]);
+});
+
+test("in act mode only the background service acts: the CLI and the page's Refresh read and log as observed", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_done", title: "1: finished" },
+      { id: "thr_big", title: "2: big", tokens: 300_000 },
+      { id: "thr_err", title: "2: broken", status: "error" },
+    ],
+    { settings: ACT },
+  );
+  const issue = t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  await t.list();
+  await t.page(true);
+  assert.deepEqual(t.acted, []);
+  assert.deepEqual(t.sends, []);
+  assert.equal(issue.comments.length, 0);
+  assert.ok((await t.log()).every((row) => row.result === "observed"));
+  await t.pass();
+  assert.deepEqual(t.acted.sort(), ["archive thr_done", "compact thr_big"]);
+  assert.equal(t.sends.length, 1);
+  assert.ok((await t.log()).some((row) => row.result === "done"));
+});
+
+const AHEAD = (branch: string) => ({ ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, checkout: { kind: "branch", branchName: branch, headSha: "abc" }, mergeBase: { aheadCount: 3 } } });
+
+test("a branch with commits ahead of its base is safe to archive when a remote has it, and not otherwise", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_pushed", title: "1: a" },
+    { id: "thr_local", title: "1: b" },
+    { id: "thr_dirty", title: "1: c" },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  t.state.env.set("env_thr_pushed", AHEAD("feature-a"));
+  t.state.env.set("env_thr_local", AHEAD("feature-b"));
+  t.state.env.set("env_thr_dirty", { ...AHEAD("feature-c"), workspace: { ...AHEAD("feature-c").workspace, workingTree: { state: "dirty_uncommitted", hasUncommittedChanges: true } } });
+  t.state.remote.set("env_thr_pushed", ["origin/feature-a"]);
+  t.state.remote.set("env_thr_local", ["origin/other"]);
+  t.state.remote.set("env_thr_dirty", ["origin/feature-c"]);
+  const view = await t.list();
+  assert.deepEqual(
+    Object.fromEntries(view.threads.map((thread) => [thread.id, thread.decision])),
+    { thr_pushed: "archive", thr_local: "flag", thr_dirty: "flag" },
+  );
+  assert.match(byId(view, "thr_local").reason, /commits not on its base/);
+  assert.match(byId(view, "thr_dirty").reason, /uncommitted/);
 });

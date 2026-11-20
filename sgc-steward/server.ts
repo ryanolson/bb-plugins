@@ -102,6 +102,8 @@ export interface SgcStewardOptions {
   postWindowMs?: number;
   /** Stand-in for the clock the Hosts view measures waits with. */
   now?: () => number;
+  /** Called after each background pass of the thread lifecycle, so a test can wait for one. */
+  afterThreadsPass?: () => void;
 }
 
 function message(error: unknown): string {
@@ -1133,10 +1135,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       async start(signal) {
         while (!signal.aborted) {
           try {
-            await threads.refresh();
+            // Only this pass acts: the CLI and the page's Refresh read and log.
+            await threads.refresh(true);
           } catch (error) {
             bb.log.warn(`thread lifecycle read failed: ${message(error)}`);
           }
+          options.afterThreadsPass?.();
           if (signal.aborted) break;
           await new Promise<void>((resolve) => {
             const done = () => {

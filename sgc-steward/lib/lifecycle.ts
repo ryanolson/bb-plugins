@@ -66,7 +66,14 @@ export interface EnvFacts {
   known: boolean;
   /** No uncommitted or untracked changes. */
   clean: boolean;
-  /** Commits that the base branch lacks: work that may exist nowhere else. */
+  /**
+   * Commits that neither the base branch nor a remote has: work that may exist
+   * nowhere else. A branch that is on a remote does not count, even when it
+   * has commits the base lacks: when bb tears down an archived worktree it
+   * keeps the branch while any commit is not on a remote, so a later local
+   * commit on a pushed branch stays in the repo, and the archive comment
+   * names the branch and commit.
+   */
   ahead: boolean;
   branch: string | null;
   head: string | null;
@@ -229,9 +236,10 @@ export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): strin
 }
 
 /**
- * What to do with a thread. Archive and compact are made in the last minutes
- * before the cache expires; a flag is made whenever the thread is stuck or an
- * orphan, since a thread can stay stuck long after its cache is cold.
+ * What to do with a thread. A compact is decided in the last minutes before
+ * the cache expires. An archive of a done or parked thread, and a flag of a
+ * stuck or orphan one, are decided whenever the thread is seen: neither has a
+ * cache left to save, and a thread can stay stuck long after it is cold.
  */
 export function decide(facts: ThreadFacts, classification: Classification, ctx: LifecycleContext, overrides: Readonly<Record<string, number>> = {}): Verdict {
   const { state } = classification;
@@ -244,14 +252,18 @@ export function decide(facts: ThreadFacts, classification: Classification, ctx: 
   if (state === "protected") return { decision: "none", reason: classification.reason, inWindow };
   if (state === "stuck" || state === "orphan") return { decision: "flag", reason: classification.reason, inWindow };
   if (state === "working" || state === "waiting") return { decision: "none", reason: classification.reason, inWindow };
-  if (left < 0) return { decision: "none", reason: "the cache is already cold", inWindow };
-  if (!inWindow) return { decision: "none", reason: `decides in the last ${window / MINUTE} minutes of the cache`, inWindow };
 
+  // A finished or parked thread is archived whenever it is seen and safe: once its cache is cold there is nothing left to save, and a thread whose issue closes late is no different.
   if (state === "done" || state === "parked") {
     const blockers = safetyBlockers(facts, ctx);
     if (blockers.length > 0) return { decision: "flag", reason: `${classification.state} but not safe to archive: ${blockers.join("; ")}`, inWindow };
     return { decision: "archive", reason: classification.reason, inWindow };
   }
+
+  // Only a compact depends on the cache: it is worth doing just before the cache expires.
+  if (left < 0) return { decision: "none", reason: "the cache is already cold", inWindow };
+  if (!inWindow) return { decision: "none", reason: `decides in the last ${window / MINUTE} minutes of the cache`, inWindow };
+
   // idle-active
   const tokens = facts.usedTokens ?? 0;
   if (tokens < COMPACT_MIN_TOKENS) return { decision: "let-cool", reason: `${tokens} tokens, under ${COMPACT_MIN_TOKENS}`, inWindow };

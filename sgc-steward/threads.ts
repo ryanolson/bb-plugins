@@ -126,6 +126,16 @@ function withComments(issue: LifecycleIssue): IssueWithComments {
 
 const asFacts = ({ comments: _comments, ...facts }: IssueWithComments): IssueFacts => facts;
 
+/** Whether a remote has a branch of this name. A failed or cut-off read says no. */
+async function onRemote(sdk: Sdk, environmentId: string, branch: string): Promise<boolean> {
+  try {
+    const { remoteBranches } = await sdk.environments.diffBranches({ environmentId, query: branch, limit: "100" });
+    return remoteBranches.some((name) => name === branch || name.endsWith(`/${branch}`));
+  } catch {
+    return false;
+  }
+}
+
 /** What `environments.status` says about a checkout, as the safety rules read it. */
 export async function readEnv(sdk: Sdk, environmentId: string): Promise<EnvFacts> {
   try {
@@ -136,11 +146,16 @@ export async function readEnv(sdk: Sdk, environmentId: string): Promise<EnvFacts
     const tree = workspace.workingTree.state;
     const merge = workspace.mergeBase;
     const checkout = workspace.checkout;
+    const branch = checkout.kind === "branch" ? checkout.branchName : (workspace.branch?.currentBranch ?? null);
+    // bb gives commits ahead of the base branch, not ahead of the upstream. A branch on a remote is safe: its commits are kept
+    // either way, because bb keeps the branch of a torn-down worktree while any commit is not on a remote.
+    let ahead = merge !== null && ((merge.aheadCount ?? 0) > 0 || merge.hasCommittedUnmergedChanges === true);
+    if (ahead && branch !== null && (await onRemote(sdk, environmentId, branch))) ahead = false;
     return {
       known: true,
       clean: tree === "clean" || tree === "committed_unmerged",
-      ahead: merge !== null && ((merge.aheadCount ?? 0) > 0 || merge.hasCommittedUnmergedChanges === true),
-      branch: checkout.kind === "branch" ? checkout.branchName : (workspace.branch?.currentBranch ?? null),
+      ahead,
+      branch,
       head: checkout.kind === "branch" || checkout.kind === "detached" ? checkout.headSha : null,
       detail: null,
     };
@@ -415,7 +430,7 @@ export function createThreads(deps: ThreadsDeps) {
       const expiry = cacheExpiry(facts, settings.cacheLifeOverrides);
       let verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
       // An archive needs the checkout's state: read it only for a thread that could be archived now.
-      if ((classification.state === "done" || classification.state === "parked") && verdict.inWindow) {
+      if (classification.state === "done" || classification.state === "parked") {
         await readArchiveEnvs(facts);
         verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
       }
@@ -523,13 +538,14 @@ export function createThreads(deps: ThreadsDeps) {
     record(entry, "done");
   }
 
-  async function gather(): Promise<ThreadsView> {
+  /** `acting` is true only for the background service: the CLI and the page read and log, as observed. */
+  async function gather(acting: boolean): Promise<ThreadsView> {
     const settings = await deps.settings();
     const { at, linearError, entries } = await collect();
     const archived = new Set<string>();
     for (const entry of entries) {
       const kind = actionFor(entry);
-      if (settings.mode !== "act") record(entry, "observed");
+      if (settings.mode !== "act" || !acting) record(entry, "observed");
       else if (kind !== null && settings.actions.has(kind)) {
         if (await carryOut(entry, settings)) archived.add(entry.row.id);
       } else if (entry.row.decision === "flag") await flagSteward(entry);
@@ -582,10 +598,10 @@ export function createThreads(deps: ThreadsDeps) {
     });
   }
 
-  /** Read every thread now, log the decisions, and keep the snapshot. */
-  function refresh(): Promise<ThreadsView> {
+  /** Read every thread now, log the decisions, and keep the snapshot. In act mode only a pass with `acting` carries them out. */
+  function refresh(acting = false): Promise<ThreadsView> {
     return locked(async () => {
-      const view = await gather();
+      const view = await gather(acting);
       saveSnapshot.run(view.checkedAt, JSON.stringify(view));
       return view;
     });

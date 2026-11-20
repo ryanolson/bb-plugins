@@ -147,7 +147,7 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 
 **Cache expiry.** bb's `compactionOfferAt`, else the thread's last activity plus its provider's cache life: 1 hour for `claude-code` and `codex`, 6 hours for `pi` and `acp-opencode`, and 1 hour for a provider not in the table (`DEFAULT_CACHE_LIFE_MS` in `lib/lifecycle.ts`).
 
-**Decision.** Made in the last 15 minutes before the cache expires (the last 5 for a cache that lives under 15 minutes):
+**Decision.** A compact is decided in the last 15 minutes before the cache expires (the last 5 for a cache that lives under 15 minutes). An archive of a `done` or `parked` thread, and a flag, are decided whenever the thread is seen: a cold cache has nothing left to save, and an issue can close long after the thread went quiet.
 
 | State | Decision |
 | --- | --- |
@@ -158,13 +158,13 @@ Threads go cold. Each provider keeps a prompt cache for a fixed time after a thr
 | `stuck`, `orphan` | `flag`, whenever seen: a thread can stay stuck long after its cache is cold |
 | `working`, `waiting`, `protected` | none |
 
-Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An archive also archives the thread's children, so every thread below it must be unprotected, with a clean checkout and no commits ahead of its base. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
+Safe means the environment has no uncommitted changes, no commits that neither its base nor a remote has, no child is working, and the thread is not protected. bb reports commits ahead of the base branch, not ahead of the upstream, so a branch that a remote has (by name) counts as pushed. A local commit on a pushed branch is not lost: when bb tears down an archived worktree it keeps the branch while any commit is not on a remote, and the archive comment names the branch and commit. An archive also archives the thread's children, so every thread below it must be unprotected, with a safe checkout, as above. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no compact decision.
 
 ### Act mode
 
-Set `threadLifecycleMode` to `act` and the plugin carries out its decisions. Only the owner changes this setting. For each thread with an `archive` or `compact` decision, in the same pass that decided it:
+Set `threadLifecycleMode` to `act` and the plugin carries out its decisions. Only the owner changes this setting. Only the background service, in its five-minute pass, acts. `bb sgc threads`, the page, and its Refresh read and log, as `observed`, whatever the mode. For each thread with an `archive` or `compact` decision, in the same pass that decided it:
 
-1. It reads the thread again, since it may have changed, and checks it is still safe: the same decision, no running turn or queued message, no working child, not protected, and for an archive a checkout that is clean with no commits ahead of its base. If anything changed it does nothing, and logs `refused` with what changed.
+1. It reads the thread again, since it may have changed, and checks it is still safe: the same decision, no running turn or queued message, no working child, not protected, and for an archive a checkout with no uncommitted changes and no commits ahead of its base that no remote has. If anything changed it does nothing, and logs `refused` with what changed.
 2. A compact goes only to an idle thread, and not twice in one cache life: it is skipped when a compact of the thread was logged `done` within the provider's cache life.
 3. Before an archive of a thread that has an issue, it posts a signed comment on the issue: `[agent:sgc-steward] archived <thread>: <reason>; branch <name> at <commit>`. The comment's id comes from its text, so a retry posts no second comment. If the comment cannot be posted, the thread is not archived, and the next pass tries again within the window.
 4. It archives or compacts, and logs `done`, or `failed` with the error. bb removes an archived worktree 5 minutes later, and keeps any branch whose commits are not on a remote.
@@ -179,7 +179,7 @@ Each row has three buttons. They act whatever the mode, because the owner presse
 
 - **Keep** protects the thread for 24 hours: it is `protected` until then, so no decision touches it. The plugin keeps the time in its own SQLite table, not in bb's thread metadata. The keep is logged as `keep`.
 - **Compact now** compacts the thread. It refuses a thread that is protected, running a turn, in error, or holding a queued message or a child at work.
-- **Archive now** archives the thread. It refuses for the same reasons, and also when its checkout is dirty, has commits not on its base, or could not be read. It asks to confirm first.
+- **Archive now** archives the thread. It refuses for the same reasons, and also when its checkout is dirty, has commits that neither its base nor a remote has, could not be read, or has a child thread that is protected or has such a checkout. It asks to confirm first.
 
 A refusal says why (`Cannot archive <id>: ...`) and changes nothing and logs nothing. A compact or archive that bb itself refuses is logged as `failed` with bb's error. A success is logged as `done`. The page disables a button for a protected, running, or waiting thread, with the reason on hover; the server checks again.
 

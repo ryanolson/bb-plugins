@@ -133,37 +133,42 @@ test("without an offer the cache expires after the provider's life", () => {
 /** A thread whose cache (claude-code, 1 h) expires `left` ms from now. */
 const expiringIn = (left: number, extra: Partial<ThreadFacts> = {}) => thread({ lastActivityAt: NOW + left - HOUR, ...extra });
 
-test("the decision is made only in the last 15 minutes of the cache", () => {
-  const done = context({ issue: issue("Done", "completed") });
+test("a compact is decided only in the last 15 minutes of the cache", () => {
+  const ctx = context();
   const verdict = (left: number) => {
-    const facts = expiringIn(left);
-    return decide(facts, classify(facts, done), done);
+    const facts = expiringIn(left, { usedTokens: COMPACT_MIN_TOKENS });
+    return decide(facts, classify(facts, ctx), ctx);
   };
   assert.equal(verdict(16 * MINUTE).decision, "none");
   assert.equal(verdict(16 * MINUTE).inWindow, false);
-  assert.equal(verdict(15 * MINUTE).decision, "archive");
-  assert.equal(verdict(1 * MINUTE).decision, "archive");
+  assert.equal(verdict(15 * MINUTE).decision, "compact");
+  assert.equal(verdict(1 * MINUTE).decision, "compact");
   assert.equal(verdict(-1).decision, "none");
   assert.match(verdict(-1).reason, /cold/);
 });
 
-test("a thread parked after 48 quiet hours in review has a cold cache, so the window gives it no decision", () => {
-  const ctx = context({ issue: issue("In Review", "started", { updatedAt: NOW - 49 * HOUR }) });
-  const facts = thread({ lastActivityAt: NOW - 49 * HOUR });
-  const classification = classify(facts, ctx);
-  assert.equal(classification.state, "parked");
-  const verdict = decide(facts, classification, ctx);
-  assert.deepEqual([verdict.decision, verdict.reason], ["none", "the cache is already cold"]);
+test("a done or parked thread is archived whenever it is seen and safe, cold or not", () => {
+  const done = context({ issue: issue("Done", "completed") });
+  const parked = context({ issue: issue("Backlog", "backlog", { labels: ["paused"] }) });
+  for (const ctx of [done, parked]) {
+    for (const left of [3 * HOUR, 16 * MINUTE, 5 * MINUTE, -1, -30 * HOUR]) {
+      const facts = expiringIn(left);
+      assert.equal(decide(facts, classify(facts, ctx), ctx).decision, "archive", `${left}`);
+    }
+  }
+  // Unsafe, it is flagged, cold or not.
+  const dirty = expiringIn(-HOUR, { env: { ...CLEAN, clean: false } });
+  assert.equal(decide(dirty, classify(dirty, done), done).decision, "flag");
 });
 
-test("a cache that lives under 15 minutes decides in its last 5 minutes", () => {
-  const done = context({ issue: issue("Done", "completed") });
+test("a cache that lives under 15 minutes decides a compact in its last 5 minutes", () => {
+  const ctx = context();
   const short = (left: number) => {
     const facts = thread({ providerId: "quick", lastActivityAt: NOW + left - 10 * MINUTE });
-    return decide(facts, classify(facts, done), done, { quick: 10 * MINUTE }).decision;
+    return decide(facts, classify(facts, ctx), ctx, { quick: 10 * MINUTE }).decision;
   };
   assert.equal(short(6 * MINUTE), "none");
-  assert.equal(short(5 * MINUTE), "archive");
+  assert.equal(short(5 * MINUTE), "compact");
 });
 
 test("archive: a done or parked thread that is safe", () => {
