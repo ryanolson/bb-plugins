@@ -12,7 +12,7 @@ Never ask the owner in a bb question dialog. It stops your thread until the owne
 ## Asking from a bb thread
 
 ```
-bb sgc ask --question "<question>" --option "<your recommendation>" --option "<another answer>" [--issue TEAM-12] --label "<project name>"
+bb sgc ask --question "<question>" --option "<your recommendation>" --option "<another answer>" [--issue TEAM-12] [--urgent] --label "<project name>"
 ```
 
 - The command stores the question, prints its id, and returns at once. Then move on to other work.
@@ -22,6 +22,7 @@ bb sgc ask --question "<question>" --option "<your recommendation>" --option "<a
 - The question and its options may use Markdown: lists, tables, inline code, code blocks, bold, and links all render on the page. Raw HTML never runs. A table needs a delimiter row, such as `| --- | --- |`, right under its header row. Without it, the table shows as plain text, and `bb sgc ask` prints a line that starts with `Warning:` (with `--json`, a `warnings` list). The question is still stored: withdraw it with `bb sgc withdraw <id>` and ask again with the fixed table.
 - Keep it short. The question is at most 80 words, with at most 3 options of at most 25 words each. `bb sgc ask` refuses more, with code `invalid` and the limit in the message. Put detail on the issue and link it with `--issue`.
 - Give the question exactly one label: `--label "<project name>"`, the name of the issue's Linear project, in any case. Zero labels, two labels, or a name that is not an open project of the team are refused. Until the plugin has read the project names from Linear, any label is taken and the command prints a `Warning:` line. Asking the same open question again keeps its first label.
+- A question expires if nobody answers: after 3 days, or after 1 day with `--urgent` (use it only when the work cannot wait). Then you get a message that starts with `[sgc-steward] Expired <id>`. It means pause the work: commit, push, and check that the remote branch matches HEAD; comment `paused: no answer by <date>` on the issue with the branch and commit; release your claim; move the issue to Backlog with the `paused` label; and archive your thread after the save. The steward thread does not archive. An expired question takes no answer. If the question named an issue, the plugin records the expiry there.
 - Every question gets a last option you did not write: "Pause it: stop this work for now, and resume it later." It is never recommended and counts against no limit. If the owner picks it, the answer reaches you like any other: save your work, and stop.
 - Name an issue with `--issue` when the answer is a ruling that belongs in Linear. The plugin then posts a comment there that records the question and the answer.
 - Asking the same open question again returns the same id. Withdraw a question you no longer need with `bb sgc withdraw <id>`, from the thread that asked it.
@@ -104,7 +105,7 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 ## Commands
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] --label <project name> [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]

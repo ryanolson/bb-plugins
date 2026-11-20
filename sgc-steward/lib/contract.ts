@@ -56,9 +56,20 @@ const askViewSchema = z.object({
   labels: z.array(z.string()),
   askedAt: z.number(),
 });
+/** A question that expired with no answer. */
+const expiredViewSchema = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  threadTitle: z.string(),
+  question: z.string(),
+  issue: z.string().nullable(),
+  labels: z.array(z.string()),
+  askedAt: z.number(),
+  expiredAt: z.number(),
+});
 const deliveryViewSchema = z.object({
   id: z.string(),
-  source: z.enum(["ask", "linear", "withdrawal", "todo"]),
+  source: z.enum(["ask", "linear", "withdrawal", "expiry", "todo"]),
   ref: z.string(),
   threadId: z.string(),
   label: z.string(),
@@ -88,6 +99,8 @@ const todoViewSchema = z.object({
 /** What the page shows: the last Linear poll, the open bb questions, the owner's todos, and the answers that did not go out. */
 const panelSchema = snapshotSchema.extend({
   asks: z.array(askViewSchema),
+  /** Questions that expired in the last 14 days, newest first. */
+  expired: z.array(expiredViewSchema),
   undelivered: z.array(deliveryViewSchema),
   unposted: z.array(recordViewSchema),
   todos: z.array(todoViewSchema),
@@ -96,6 +109,7 @@ const panelSchema = snapshotSchema.extend({
 });
 export type Panel = z.infer<typeof panelSchema>;
 export type AskView = z.infer<typeof askViewSchema>;
+export type ExpiredView = z.infer<typeof expiredViewSchema>;
 export type DeliveryView = z.infer<typeof deliveryViewSchema>;
 export type RecordView = z.infer<typeof recordViewSchema>;
 export type TodoView = z.infer<typeof todoViewSchema>;

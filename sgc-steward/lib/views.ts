@@ -2,7 +2,7 @@
 // stored shapes mapped to the views in the RPC contract.
 
 import type { AskRow, Undelivered, Unposted } from "./ask-store.ts";
-import type { AskView, DeliveryView, RecordView } from "./contract.ts";
+import type { AskView, DeliveryView, ExpiredView, RecordView } from "./contract.ts";
 
 export function askView(row: AskRow): AskView {
   return {
@@ -14,6 +14,19 @@ export function askView(row: AskRow): AskView {
     issue: row.issue,
     labels: row.labels,
     askedAt: row.askedAt,
+  };
+}
+
+export function expiredView(row: AskRow): ExpiredView {
+  return {
+    id: row.id,
+    threadId: row.threadId,
+    threadTitle: row.threadTitle,
+    question: row.question,
+    issue: row.issue,
+    labels: row.labels,
+    askedAt: row.askedAt,
+    expiredAt: row.expiredAt ?? row.askedAt,
   };
 }
 

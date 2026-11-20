@@ -100,6 +100,14 @@ A send or a record that fails is kept and listed on the page, with a retry. A se
 
 The sends for an answer to a Linear block are kept before the answer posts. When a restart stops the post, a later poll sends them once the answer is on Linear. When the answer is still not on Linear ten minutes after its latest post began, the post failed, and the poll drops them.
 
+## Expiry
+
+A bb question that nobody answers expires after 3 days, or 1 day when asked with `--urgent`. Each poll, and so every `pollMinutes`, expires the open questions whose time is up, whether or not a Linear key is set. An expired question leaves the Questions list and takes no answer: the answer RPC refuses it with code `conflict`. Only an open question expires, in one transaction with its notice, so an answer, a withdrawal, and an expiry that race have one winner, and the others save nothing.
+
+The asking thread gets a queued message that starts with `[sgc-steward] Expired <id>`. It says no answer came by the deadline and tells the thread to save its work (commit, push, and check that the remote branch matches HEAD), comment `paused: no answer by <date>` on the issue with the branch and commit, release its claim, move the issue to Backlog with the `paused` label, and archive itself after the save, unless it is the steward thread. A thread that bb reports gone is not told. When the question names an issue, the plugin also posts a record comment there. The notice and the record are kept before they send, once each, and a failed send or post is listed with a retry, as for a withdrawal.
+
+A question stored before expiry existed has no clock. Its first poll after the upgrade gives it 3 days from then, so it does not expire at once. `bb sgc questions --json` lists the questions that expired in the last 14 days in `expired`, newest first.
+
 ## Todos
 
 Your todos are on the page's Todos tab. An issue is on your todo list when it is open and has the `waiting:ryan-action` label, or when it has the `human` label and is assigned to you, the user of the API key. An issue that waits on your decision, with `waiting:ryan-decision`, becomes a question instead. Each todo shows its link and the task lines of its description, the `- [ ]` lines, so you see the steps. `bb sgc todos` lists them too.
@@ -135,7 +143,7 @@ bb plugins cannot send a mobile push. The push-notifications plugin sends pushes
 ## CLI
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] --label <project name> [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
@@ -146,7 +154,7 @@ bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
 ```
 
-- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with at most 3 options of at most 25 words each; `ask` refuses more with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
+- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with at most 3 options of at most 25 words each; `ask` refuses more with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. An unanswered question expires 3 days after it was asked, or 1 day with `--urgent`; see "Expiry". The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
 - `ask` also warns, in one more line that starts with `Warning:` (with `--json`, in a `warnings` list), when the question or an option holds a table the page will show as plain text. It parses the text as the page does (GFM and math blocks) and looks for two or more lines in one paragraph that start and end with `|`. A table the page draws, and pipes inside code, HTML or math, never count. The usual cause is a missing delimiter row, or one with the wrong number of cells. It still stores the question as written. Withdraw it and ask again to fix the table.
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
@@ -171,6 +179,11 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - `pollMinutes` (default 5): how often to read Linear. A change starts a poll at once.
 - `notify` (default true): announce new question blocks.
 - `stewardThread` (no default): the bb thread id of the steward. Only that thread can withdraw the questions of other threads, with the `sgc_withdraw_question` agent tool, and it gets a message when you mark a todo done or reopen one. The tool reaches a thread when its agent session next starts. `bb plugin config sgc-steward unset stewardThread` turns both off. A known limit: any agent can change this setting, because every agent runs as you and bb has no setting that only you can change, so an agent can name itself the steward and then get your todo messages too. Only you change plugin settings. The steward checks on each run that `stewardThread` names itself, and flags any change in its digest.
+
+## Coding gotchas
+
+- **A state change that two paths can make must be one conditional write.** An answer, a withdrawal, and an expiry each move an open question on. Each does `UPDATE ... WHERE state = 'open'` inside the transaction that keeps its notice, and checks `changes`; a read of the state first is not enough. The loser saves nothing. The first expiry design read the question, awaited a thread lookup, and then wrote; the write still must not trust that read. Tests: `an answer that lands first wins, and an expired question takes no answer or withdrawal` in `lib/expiry.test.ts`.
+- **Test time with the injected clock, never with a sleep.** `createAskStore(db, now)` and `setup({ now })` take the clock; expiry tests move it by whole days and poll.
 
 ## Develop
 

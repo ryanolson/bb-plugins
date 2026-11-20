@@ -962,3 +962,71 @@ test("every ask ends with the Pause option, which is not recommended, and an ans
   await harness.behavior.callRpc("asks.answer", { id, option: "B", text: "" });
   assert.match(sends.at(-1)!.input[0]!.text, /B: Pause it: stop this work for now/);
 });
+
+const DAY = 86_400_000;
+const T0 = Date.parse("2026-11-20T10:00:00Z");
+
+async function clocked() {
+  const clock = { at: T0 };
+  const made = await setup({ now: () => clock.at });
+  return { ...made, clock };
+}
+
+const expiryMessages = (sends: Array<{ input: Array<{ text: string }> }>) => sends.map((send) => send.input[0]!.text).filter((text) => text.startsWith("[sgc-steward] Expired"));
+
+test("an unanswered ask expires after 3 days, and 1 day when urgent, and the asker is told once", async () => {
+  const { harness, sends, refresh, clock } = await clocked();
+  const normal = await askId(harness, ["--question", "Slow?"]);
+  const urgent = await askId(harness, ["--question", "Fast?", "--urgent"]);
+  clock.at = T0 + DAY - 1;
+  await refresh();
+  assert.equal((await list(harness)).asks.length, 2, "nothing expires before its boundary");
+  clock.at = T0 + DAY;
+  await refresh();
+  assert.deepEqual((await list(harness)).asks.map((row) => row.id), [normal]);
+  assert.equal(expiryMessages(sends).length, 1);
+  assert.match(expiryMessages(sends)[0]!, new RegExp(`^\\[sgc-steward\\] Expired ${urgent}\\n`));
+  await refresh();
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 1, "later polls tell nobody again");
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  assert.equal(expiryMessages(sends).length, 2);
+  assert.deepEqual((await list(harness)).asks, []);
+});
+
+test("an expired ask refuses an answer with a clear error, and an ask on an issue gets its record once", async () => {
+  const { harness, linear, refresh, clock } = await clocked();
+  linear.addIssue("TEAM-12", []);
+  const id = await askId(harness, ["--question", "Ship?", "--issue", "TEAM-12"]);
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  await refresh();
+  const refused = await rejection(harness.behavior.callRpc("asks.answer", { id, option: "A", text: "" }));
+  assert.equal(refused.code, "conflict");
+  assert.match(refused.message, /expired/);
+  assert.equal(linear.calls.filter((call) => call.startsWith("createComment")).length, 1, "one record, not one per poll");
+  assert.match(linear.find("TEAM-12")!.comments[0]!.body, /expired/);
+});
+
+test("bb sgc questions --json lists the asks that expired in the last 14 days", async () => {
+  const { harness, refresh, clock } = await clocked();
+  const id = await askId(harness, ["--question", "Ship?"]);
+  clock.at = T0 + 3 * DAY;
+  await refresh();
+  const shown = JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json"])).stdout) as Panel & { expired: Array<{ id: string; expiredAt: number }> };
+  assert.deepEqual(shown.expired.map((row) => [row.id, row.expiredAt]), [[id, T0 + 3 * DAY]]);
+  clock.at = T0 + 3 * DAY + 15 * DAY;
+  await refresh();
+  const later = JSON.parse((await harness.behavior.runCli(["questions", "--cached", "--json"])).stdout) as { expired: unknown[] };
+  assert.deepEqual(later.expired, [], "an expiry older than 14 days drops out");
+});
+
+test("an ask expires without a Linear key too", async () => {
+  const clock = { at: T0 };
+  const { harness, sends } = await setup({ key: null, now: () => clock.at });
+  await askId(harness, ["--question", "Ship?"]);
+  clock.at = T0 + 3 * DAY;
+  await harness.behavior.callRpc("questions.refresh", null);
+  assert.equal(expiryMessages(sends).length, 1);
+});

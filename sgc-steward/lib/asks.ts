@@ -32,6 +32,10 @@ export const ASK_LIMITS = {
   labelChars: 80,
 } as const;
 
+/** How long a question waits for an answer: 3 days, or 1 day when asked as urgent. */
+export const ASK_TTL_MS = 3 * 86_400_000;
+export const URGENT_TTL_MS = 86_400_000;
+
 /** The first words of every message the plugin sends to a thread. */
 export const DELIVERY_PREFIX = "[sgc-steward]";
 
@@ -367,5 +371,47 @@ export function withdrawalFollowUps(ask: Ask, steward: string, reason: string, t
   return {
     notice: tell ? withdrawalNotice(ask, steward, reason) : null,
     record: ask.issue === null ? null : { issue: ask.issue, body: withdrawalRecord(ask, steward, reason, at) },
+  };
+}
+
+/**
+ * The message that tells the asking thread its question expired, so it saves
+ * its work and pauses. `deadline` is when the question expired.
+ */
+export function expiryNotice(ask: Ask, deadline: number): string {
+  const day = new Date(deadline).toISOString().slice(0, 10);
+  return [
+    `${DELIVERY_PREFIX} Expired ${ask.id}`,
+    "",
+    `No answer came by ${formatUtc(deadline)} to your question asked ${formatUtc(ask.askedAt)}. It will get no answer now, so stop waiting. Pause this work:`,
+    "1. Save your work: commit, push, and check that the remote branch matches HEAD.",
+    `2. Comment \`paused: no answer by ${day}\` on the issue, with the branch and commit.`,
+    "3. Release your claim, and move the issue to Backlog with the `paused` label.",
+    "4. Archive this thread after the save. If you are the steward thread, do not archive.",
+    "",
+    "Your question:",
+    ask.question,
+  ].join("\n");
+}
+
+/** The comment that records an expiry on the question's issue. It starts with the record header, so it closes no block. */
+export function expiryRecord(ask: Ask, deadline: number): string {
+  const options = ask.options.length === 0 ? [] : ["", "Options:", ...optionLines(ask)];
+  return [
+    `${RECORD_HEADER} ${ask.id} from thread ${ask.threadId} (asked ${formatUtc(ask.askedAt)}): expired`,
+    "",
+    "Question:",
+    ask.question,
+    ...options,
+    "",
+    `No answer came by ${formatUtc(deadline)}. The asking thread was told to save its work and pause.`,
+  ].join("\n");
+}
+
+/** What goes out when a question expires: the notice for the asker, when it can still take one, and the record for the question's issue, when it names one. */
+export function expiryFollowUps(ask: Ask, deadline: number, tell: boolean) {
+  return {
+    notice: tell ? expiryNotice(ask, deadline) : null,
+    record: ask.issue === null ? null : { issue: ask.issue, body: expiryRecord(ask, deadline) },
   };
 }

@@ -35,7 +35,9 @@ import {
 } from "./lib/questions.ts";
 import {
   ASK_LIMITS,
+  ASK_TTL_MS,
   DELIVERY_PREFIX,
+  URGENT_TTL_MS,
   askDelivery,
   askOptions,
   askRecord,
@@ -44,6 +46,7 @@ import {
   checkLabels,
   checkQuestion,
   checkReason,
+  expiryFollowUps,
   isThreadId,
   labelWarning,
   tableWarning,
@@ -51,7 +54,7 @@ import {
   type AskAnswer,
 } from "./lib/asks.ts";
 import { STORE_MIGRATIONS, createAskId, createAskStore, type Delivery, type RecordRow } from "./lib/ask-store.ts";
-import { askView, deliveryView, recordView } from "./lib/views.ts";
+import { askView, deliveryView, expiredView, recordView } from "./lib/views.ts";
 import { answerOfCommand } from "./lib/answer-of.ts";
 import { filterPanel } from "./lib/panel.ts";
 import {
@@ -73,6 +76,8 @@ import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawal
 /** Realtime channel: the questions changed; `newBlocks` > 0 means notify. */
 const CHANNEL = "questions";
 const MAX_ANSWER_BYTES = 64 * 1024;
+/** How long an expired question stays in `bb sgc questions --json`, and on the Paused tab. */
+const EXPIRED_SHOWN_MS = 14 * 86_400_000;
 /** Re-read every issue's comments at least this often, cache or not. */
 const FULL_REFRESH_MS = 60 * 60 * 1000;
 const LABEL_ATTEMPTS = 3;
@@ -131,7 +136,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       )`,
       ...STORE_MIGRATIONS,
     ]);
-    const asks = createAskStore(db);
+    const asks = createAskStore(db, now);
     const todos = createTodos({
       db,
       postWindowMs,
@@ -296,11 +301,40 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
     let answerEpoch = 0;
     /** Deliveries a poll released from held, sent once the poll has left the lock. */
     const releasedByPoll: Delivery[] = [];
+    /** Questions a poll expired, whose notice and record go out once the poll has left the lock. */
+    const expiredByPoll: Array<{ id: string; threadId: string; issue: string | null }> = [];
+
+    /**
+     * Expire every open question whose time is up, under the poll's lock, with
+     * or without a Linear key. A question stored before expiry gets its
+     * clock first. The asker's notice and the issue's record are saved with
+     * the expiry, and sent after the poll.
+     */
+    async function expireAsks(): Promise<void> {
+      asks.startExpiryClocks(ASK_TTL_MS);
+      let expired = 0;
+      for (const row of asks.due(now())) {
+        const tell = !(await threadGone(row.threadId));
+        if (asks.expire(row.id, expiryFollowUps(row, row.expiresAt ?? row.askedAt, tell)) !== "expired") continue;
+        expiredByPoll.push({ id: row.id, threadId: row.threadId, issue: row.issue });
+        expired += 1;
+      }
+      if (expired > 0) publish(0);
+    }
+
     const poll = async (force: boolean, signal?: AbortSignal) => {
       const epoch = answerEpoch;
-      const polled = await locked(() => (answerEpoch === epoch ? pollNow(force, signal) : Promise.resolve(null)));
+      const polled = await locked(async () => {
+        await expireAsks();
+        return answerEpoch === epoch ? pollNow(force, signal) : null;
+      });
       // Outside the lock, so a slow thread send never holds up an answer.
       for (const row of releasedByPoll.splice(0)) await deliver(row.id);
+      for (const expired of expiredByPoll.splice(0)) {
+        const kept = asks.deliveryFor("expiry", expired.id, expired.threadId);
+        if (kept !== null) await deliver(kept.id);
+        if (expired.issue !== null) await postRecord(expired.id);
+      }
       await todos.sent();
       return polled;
     };
@@ -319,6 +353,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return {
         ...snapshot,
         asks: asks.listOpen().map(askView),
+        expired: asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
         undelivered: asks.undelivered().map(deliveryView),
         unposted: asks.unposted().map(recordView),
         ...todos.list(),
@@ -684,6 +719,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       "asks.answer": async ({ id, option, text }) => {
         const row = asks.get(id);
         if (row === null) throw new experimental_PluginRpcRefusal({ code: "not_found", message: `No bb question ${id}.` });
+        if (row.state === "expired") {
+          throw new experimental_PluginRpcRefusal({ code: "conflict", message: `${id} expired with no answer, and its thread was told to pause its work.` });
+        }
         if (row.state !== "open") throw new experimental_PluginRpcRefusal({ code: "conflict", message: `${id} is ${row.state}.` });
         const answer: AskAnswer = { option, text };
         let delivery: string;
@@ -794,7 +832,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           }),
           ask: cliCommand({
             summary: "Ask the owner a question without waiting: store it and print its id",
-            description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
+            description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". An unanswered question expires after 3 days (1 day with --urgent); the plugin then tells the asking thread to save its work and pause. The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
             options: {
               question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionWords} words and ${ASK_LIMITS.questionChars} characters` },
               "question-file": { type: "string", description: "File with the question, on the calling thread's machine" },
@@ -812,6 +850,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               issue: { type: "string", description: "A Linear issue, like TEAM-12, that gets a comment recording the question and its answer" },
               thread: { type: "string", description: "The asking thread, which gets the answer; default the calling thread" },
               machine: { type: "string", description: "Machine that holds --question-file, when not called from a thread" },
+              urgent: { type: "boolean", description: `The question expires after 1 day, not ${ASK_TTL_MS / 86_400_000}` },
               json,
             },
             constraints: [{ kind: "exactly-one", options: ["question", "question-file"] }],
@@ -861,7 +900,12 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               };
               // Read everything first: no other ask may run between the checks and the insert.
               const { notify } = await settings.get();
-              const admitted = asks.admit({ id: createAskId(), threadId, threadTitle, question, options, issue, labels, askedAt: Date.now() }, !notify);
+              const askedAt = now();
+              const admitted = asks.admit(
+                { id: createAskId(), threadId, threadTitle, question, options, issue, labels, askedAt },
+                !notify,
+                askedAt + (input.options.urgent === true ? URGENT_TTL_MS : ASK_TTL_MS),
+              );
               if (admitted.kind === "full") {
                 const thread = admitted.scope === "thread";
                 throw new PluginCliError(thread ? `${threadId} already has ${admitted.open} open questions.` : `${admitted.open} questions are already open.`, {

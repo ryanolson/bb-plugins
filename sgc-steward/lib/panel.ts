@@ -155,7 +155,7 @@ export function noticeTab(notes: ReadonlyArray<Pick<Notice, "source">>): PanelTa
 }
 
 /** The tab that lists each kind of send that did not go out. A new kind of send must pick one. */
-const SEND_TAB: Record<DeliveryView["source"], PanelTab> = { ask: "questions", linear: "questions", withdrawal: "questions", todo: "todos" };
+const SEND_TAB: Record<DeliveryView["source"], PanelTab> = { ask: "questions", linear: "questions", withdrawal: "questions", expiry: "questions", todo: "todos" };
 
 /** The sends that did not go out which a tab lists: the steward's todo messages on Todos, answers and notices on Questions. */
 export function sendsFor<R extends Pick<DeliveryView, "source">>(tab: PanelTab, rows: readonly R[]): R[] {
@@ -253,5 +253,6 @@ export function filterPanel(view: Panel, wanted: readonly string[], match: Label
         ...view,
         issues: view.issues.filter((issue) => hasLabels(issue.labels, wanted, match)),
         asks: view.asks.filter((ask) => hasLabels(ask.labels, wanted, match)),
+        expired: view.expired.filter((ask) => hasLabels(ask.labels, wanted, match)),
       };
 }
