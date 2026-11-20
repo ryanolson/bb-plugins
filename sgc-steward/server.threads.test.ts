@@ -1,0 +1,287 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { ThreadsView } from "./threads.ts";
+import { HOUR, MINUTE } from "./lib/lifecycle.ts";
+import { setup, type FakeIssue } from "./test-support.ts";
+
+const START = Date.parse("2026-11-20T12:00:00Z");
+
+interface FakeThread {
+  id: string;
+  title: string;
+  status?: string;
+  providerId?: string;
+  parentThreadId?: string | null;
+  updatedAt?: number;
+  pinnedAt?: number | null;
+  queuedMessageCount?: number;
+  environmentId?: string | null;
+  environmentHostId?: string | null;
+  tokens?: number;
+  offerAt?: string;
+  model?: string;
+  queuedAt?: number;
+}
+
+const EVERY_READ = new Set(["threads.list", "threads.context", "threads.defaultExecutionOptions", "threads.queuedMessages.list", "environments.status"]);
+const CLEAN_ENV = { outcome: "available", workspace: { checkout: { kind: "branch", branchName: "f", headSha: "abc" }, mergeBase: { aheadCount: 0 }, workingTree: { state: "clean", hasUncommittedChanges: false } } };
+
+/** The plugin on a fake bb with a clock the test moves, a few threads, and a Linear with issues. */
+async function lifecycleSetup(threads: FakeThread[], options: { key?: string | null; settings?: Record<string, string> } = {}) {
+  const clock = { now: START };
+  const kit = await setup({ now: () => clock.now, ...options });
+  const sdk = kit.harness.inspection.sdk;
+  const state = { threads, env: new Map<string, unknown>(), listFails: false };
+  const row = (thread: FakeThread) => ({
+    id: thread.id,
+    title: thread.title,
+    titleFallback: null,
+    status: thread.status ?? "idle",
+    providerId: thread.providerId ?? "claude-code",
+    parentThreadId: thread.parentThreadId ?? null,
+    updatedAt: thread.updatedAt ?? START - 50 * MINUTE,
+    pinnedAt: thread.pinnedAt ?? null,
+    queuedWork: thread.queuedMessageCount ? "waiting" : "none",
+    activity: { activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 },
+    environmentId: thread.environmentId === undefined ? `env_${thread.id}` : thread.environmentId,
+    environmentHostId: thread.environmentHostId === undefined ? "host_a" : thread.environmentHostId,
+    archivedAt: null,
+    deletedAt: null,
+  });
+  sdk.stub("threads.list", async () => {
+    if (state.listFails) throw new Error("bb is down");
+    return state.threads.map(row);
+  });
+  const find = (args: unknown) => state.threads.find((thread) => thread.id === (args as { threadId: string }).threadId)!;
+  sdk.stub("threads.context", async (args: unknown) => {
+    const thread = find(args);
+    return {
+      usage: { estimated: false, modelContextWindow: 1_000_000, usedTokens: thread.tokens ?? 150_000, ...(thread.offerAt === undefined ? {} : { compactionOfferAt: thread.offerAt }) },
+    };
+  });
+  sdk.stub("threads.defaultExecutionOptions", async (args: unknown) => ({ model: find(args).model ?? "opus" }));
+  sdk.stub("threads.queuedMessages.list", async (args: unknown) => {
+    const thread = find(args);
+    return thread.queuedMessageCount ? [{ id: "q1", threadId: thread.id, createdAt: thread.queuedAt ?? clock.now, state: "queued" }] : [];
+  });
+  sdk.stub("environments.status", async (args: unknown) => structuredClone(state.env.get((args as { environmentId: string }).environmentId) ?? CLEAN_ENV));
+  const issue = (identifier: string, stateId: string, labels: string[] = []): FakeIssue => {
+    const made = kit.linear.addIssue(identifier, labels, "TEAM");
+    const found = kit.linear.states.find((candidate) => candidate.id === stateId)!;
+    made.state = { id: found.id, type: found.type };
+    return made;
+  };
+  const list = async (...args: string[]) => {
+    const result = await kit.harness.behavior.runCli(["threads", "--json", ...args], { threadId: "thr_steward" });
+    assert.equal(result.exitCode, 0, result.stderr);
+    return JSON.parse(result.stdout) as ThreadsView;
+  };
+  const log = async (...args: string[]) => {
+    const result = await kit.harness.behavior.runCli(["threads", "log", "--json", ...args], { threadId: "thr_steward" });
+    assert.equal(result.exitCode, 0, result.stderr);
+    return JSON.parse(result.stdout) as Array<{ threadId: string; decision: string; reason: string; state: string; inputs: Record<string, unknown>; result: string; at: number }>;
+  };
+  return { ...kit, clock, state, sdk, issue, list, log, row };
+}
+
+const byId = (view: ThreadsView, id: string) => view.threads.find((thread) => thread.id === id)!;
+
+test("bb sgc threads lists each thread with state, issue, provider, tokens, cache expiry, decision, and reason", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_done", title: "1: finished work", updatedAt: START - 50 * MINUTE },
+    { id: "thr_big", title: "2: ongoing", tokens: 250_000, updatedAt: START - 50 * MINUTE },
+    { id: "thr_small", title: "2: ongoing too", tokens: 20_000, updatedAt: START - 50 * MINUTE },
+    { id: "thr_fresh", title: "2: just ran", updatedAt: START - 5 * MINUTE },
+    { id: "thr_busy", title: "2: busy", status: "active" },
+    { id: "thr_err", title: "2: broken", status: "error" },
+    { id: "thr_pi", title: "2: local model", providerId: "pi", model: "kimi", updatedAt: START - 50 * MINUTE },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  const view = await t.list();
+  assert.equal(view.mode, "observe");
+  assert.equal(view.checkedAt, START);
+  const done = byId(view, "thr_done");
+  assert.deepEqual(
+    [done.state, done.issue?.identifier, done.provider, done.model, done.usedTokens, done.contextWindow, done.expiresAt, done.decision],
+    ["done", "TEAM-1", "claude-code", "opus", 150_000, 1_000_000, START + 10 * MINUTE, "archive"],
+  );
+  assert.match(done.reason, /TEAM-1 is Done/);
+  assert.equal(done.expiresIn, "10m");
+  assert.deepEqual([byId(view, "thr_big").state, byId(view, "thr_big").decision], ["idle-active", "compact"]);
+  assert.deepEqual([byId(view, "thr_small").state, byId(view, "thr_small").decision], ["idle-active", "let-cool"]);
+  // 55 minutes of cache left: not yet in the window.
+  assert.deepEqual([byId(view, "thr_fresh").decision, byId(view, "thr_fresh").expiresIn], ["none", "55m"]);
+  assert.equal(byId(view, "thr_busy").state, "working");
+  assert.deepEqual([byId(view, "thr_err").state, byId(view, "thr_err").decision], ["stuck", "flag"]);
+  // Pi keeps its cache 6 hours: 5 h 10 m left, so no decision yet.
+  assert.deepEqual([byId(view, "thr_pi").expiresIn, byId(view, "thr_pi").decision, byId(view, "thr_pi").model], ["5h 10m", "none", "kimi"]);
+});
+
+test("bb's own cache expiry wins over the provider table", async () => {
+  const offer = new Date(START + 4 * MINUTE).toISOString();
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", offerAt: offer, updatedAt: START - 5 * MINUTE }]);
+  t.issue("TEAM-1", "state-done");
+  const thread = byId(await t.list(), "thr_a");
+  assert.deepEqual([thread.expiresAt, thread.decision], [START + 4 * MINUTE, "archive"]);
+});
+
+test("a signed claim finds the issue; the title prefix is the fallback; no match is an orphan after a day", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_claimed", title: "no number in this title", updatedAt: START - 50 * MINUTE },
+    { id: "thr_titled", title: "STRGT-9 wrongly keyed", updatedAt: START - 50 * MINUTE },
+    { id: "thr_lost", title: "wandering", updatedAt: START - 30 * HOUR },
+  ]);
+  const claimed = t.issue("TEAM-5", "state-started");
+  t.linear.post(claimed, "c1", "[agent:claude-code thr_claimed] claim: taking it");
+  t.issue("TEAM-3", "state-done");
+  const view = await t.list();
+  assert.equal(byId(view, "thr_claimed").issue?.identifier, "TEAM-5");
+  assert.equal(byId(view, "thr_lost").state, "orphan");
+  assert.equal(byId(view, "thr_lost").decision, "flag");
+  // STRGT is not this fake team's key, so the title names nothing here.
+  assert.equal(byId(view, "thr_titled").issue, null);
+});
+
+test("each decision is logged once per cache life, with its inputs and reason; before the window nothing is logged", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_done", title: "1: finished", updatedAt: START - 50 * MINUTE },
+    { id: "thr_fresh", title: "1: fresh", updatedAt: START - 5 * MINUTE },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  await t.list();
+  t.clock.now += 2 * MINUTE;
+  await t.list();
+  t.clock.now += 2 * MINUTE;
+  await t.list();
+  const rows = await t.log();
+  assert.equal(rows.length, 1, "the same decision in the same cache life is logged once");
+  assert.deepEqual([rows[0]!.threadId, rows[0]!.decision, rows[0]!.state, rows[0]!.result], ["thr_done", "archive", "done", "observed"]);
+  assert.match(rows[0]!.reason, /TEAM-1 is Done/);
+  assert.equal(rows[0]!.inputs.issue, "TEAM-1");
+  assert.equal(rows[0]!.inputs.providerId, "claude-code");
+  assert.equal(rows[0]!.inputs.usedTokens, 150_000);
+  assert.equal(typeof rows[0]!.inputs.expiresAt, "number");
+});
+
+test("a changed decision in the same window is logged again; --limit bounds the log, newest first", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", tokens: 250_000, updatedAt: START - 50 * MINUTE }]);
+  t.issue("TEAM-1", "state-started");
+  await t.list();
+  t.state.threads[0]!.status = "active";
+  t.clock.now += MINUTE;
+  await t.list();
+  t.state.threads[0]!.status = "idle";
+  t.clock.now += MINUTE;
+  await t.list();
+  const all = await t.log();
+  // compact, then none while working (not logged), then compact again.
+  assert.deepEqual(all.map((entry) => entry.decision), ["compact"]);
+  t.issue("TEAM-2", "state-done");
+  t.state.threads[0]!.title = "2: x";
+  t.clock.now += MINUTE;
+  await t.list();
+  const after = await t.log();
+  assert.deepEqual(after.map((entry) => entry.decision), ["archive", "compact"]);
+  assert.equal((await t.log("--limit", "1")).length, 1);
+  assert.equal((await t.log("--limit", "1"))[0]!.decision, "archive");
+});
+
+test("observe mode takes no action: bb is only read, and no message goes out", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_done", title: "1: finished" },
+    { id: "thr_big", title: "2: big", tokens: 300_000 },
+    { id: "thr_err", title: "2: broken", status: "error" },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  t.issue("TEAM-2", "state-started");
+  const from = t.sdk.calls.length;
+  const view = await t.list();
+  assert.deepEqual(view.threads.map((thread) => thread.decision).sort(), ["archive", "compact", "flag"]);
+  const paths = t.sdk.calls.slice(from).map((call) => call.path);
+  assert.deepEqual(paths.filter((path) => !EVERY_READ.has(path)), []);
+  assert.deepEqual(t.sends, []);
+  assert.ok(t.linear.calls.every((call) => !call.startsWith("createComment")));
+});
+
+test("every safety rule turns an archive into a flag with the reason, in the log", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_dirty", title: "1: a" },
+    { id: "thr_ahead", title: "1: b" },
+    { id: "thr_unread", title: "1: c" },
+    { id: "thr_clean", title: "1: d" },
+    { id: "thr_bare", title: "1: e", environmentId: null },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  const status = (workingTree: string, ahead: number) => ({ ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, mergeBase: { aheadCount: ahead }, workingTree: { state: workingTree, hasUncommittedChanges: workingTree !== "clean" } } });
+  t.state.env.set("env_thr_dirty", status("dirty_uncommitted", 0));
+  t.state.env.set("env_thr_ahead", status("clean", 3));
+  t.state.env.set("env_thr_unread", { outcome: "unavailable", failure: { code: "path_not_found", message: "gone", workspacePath: "/x" } });
+  const view = await t.list();
+  const verdicts = Object.fromEntries(view.threads.map((thread) => [thread.id, thread.decision]));
+  assert.deepEqual(verdicts, { thr_dirty: "flag", thr_ahead: "flag", thr_unread: "flag", thr_clean: "archive", thr_bare: "archive" });
+  assert.match(byId(view, "thr_dirty").reason, /uncommitted/);
+  assert.match(byId(view, "thr_ahead").reason, /commits not on its base/);
+  assert.match(byId(view, "thr_unread").reason, /could not be read: gone/);
+});
+
+test("a child thread that is working blocks the parent, and shows the parent as waiting", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_parent", title: "1: parent" },
+    { id: "thr_child", title: "x: child", parentThreadId: "thr_parent", status: "active" },
+  ]);
+  t.issue("TEAM-1", "state-done");
+  const view = await t.list();
+  assert.deepEqual([byId(view, "thr_parent").state, byId(view, "thr_parent").decision], ["waiting", "none"]);
+});
+
+test("Mission Control, the steward, and a pinned thread are protected and never get a decision", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_zrybxd2ijw", title: "Mission Control", status: "error" },
+    { id: "thr_steward", title: "1: steward" },
+    { id: "thr_pinned", title: "1: pinned", pinnedAt: 1 },
+  ], { settings: { stewardThread: "thr_steward" } });
+  t.issue("TEAM-1", "state-done");
+  const view = await t.list();
+  for (const id of ["thr_zrybxd2ijw", "thr_steward", "thr_pinned"]) {
+    assert.deepEqual([byId(view, id).state, byId(view, id).decision], ["protected", "none"], id);
+  }
+  assert.deepEqual(await t.log(), []);
+});
+
+test("a queued turn older than 30 minutes is stuck", async () => {
+  const t = await lifecycleSetup([{ id: "thr_q", title: "1: q", queuedMessageCount: 1, queuedAt: START - 40 * MINUTE }]);
+  t.issue("TEAM-1", "state-started");
+  assert.deepEqual([byId(await t.list(), "thr_q").state, byId(await t.list(), "thr_q").decision], ["stuck", "flag"]);
+});
+
+test("without a Linear key the threads still list, and none is an orphan or archived", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x", updatedAt: START - 30 * HOUR }], { key: null });
+  const view = await t.list();
+  assert.match(view.linearError ?? "", /Linear/);
+  assert.deepEqual([byId(view, "thr_a").state, byId(view, "thr_a").issue], ["idle-active", null]);
+});
+
+test("a failed read of bb is an error, and --cached shows the last good list without reading bb", async () => {
+  const t = await lifecycleSetup([{ id: "thr_a", title: "1: x" }]);
+  t.issue("TEAM-1", "state-started");
+  await t.list();
+  t.state.listFails = true;
+  const failed = await t.harness.behavior.runCli(["threads", "--json", "--cached"], { threadId: "thr_steward" });
+  assert.equal(failed.exitCode, 0, failed.stderr);
+  assert.equal((JSON.parse(failed.stdout) as ThreadsView).threads.length, 1);
+  t.clock.now += 10 * MINUTE;
+  const fresh = await t.harness.behavior.runCli(["threads", "--json"], { threadId: "thr_steward" });
+  assert.equal(fresh.exitCode, 1);
+  assert.match(fresh.stderr, /bb is down/);
+});
+
+test("the plain table names each column", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished work" }]);
+  t.issue("TEAM-1", "state-done");
+  const result = await t.harness.behavior.runCli(["threads"], { threadId: "thr_steward" });
+  assert.equal(result.exitCode, 0, result.stderr);
+  for (const text of ["THREAD", "STATE", "ISSUE", "PROVIDER/MODEL", "TOKENS", "EXPIRES", "DECISION", "thr_done", "done", "TEAM-1", "claude-code/opus", "150k", "10m", "archive"]) {
+    assert.ok(result.stdout.includes(text), `${text} in:\n${result.stdout}`);
+  }
+});

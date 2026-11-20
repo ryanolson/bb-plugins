@@ -137,6 +137,31 @@ The page's Hosts tab and `bb sgc hosts` show, for each host: its name and id, co
 - The tab reads bb when the page opens, and every 30 seconds while the tab is open. Its count is the waiting turns, and its dot means the limits could not be read.
 - `bb sgc hosts --digest` prints only the flags for the steward: the global limit when it is reached, the hosts at their limit, and the hosts with waiting turns and the oldest wait.
 
+## Thread lifecycle
+
+Threads go cold. Each provider keeps a prompt cache for a fixed time after a thread's last turn, and a thread that resumes after that pays to read its whole context again. The plugin reads every bb thread every 5 minutes, works out each one's state and when its cache expires, and decides what should happen to it before then. So far it only observes: it logs each decision with its inputs and reason, and takes no action.
+
+**State.** `working` (a turn is running), `waiting` (idle with a queued message, or while a child thread, background agent, or workflow runs), `idle-active` (idle, and its issue is In Progress or Todo, or it has no issue yet, or Linear could not be read), `parked` (its issue is Backlog with `paused`, or has a `waiting:*` label, or has been In Review with no change for 48 hours), `done` (its issue is Done or Canceled), `orphan` (no issue and idle for 24 hours), `stuck` (error status, or a queued turn older than 30 minutes). Mission Control (`thr_zrybxd2ijw`), the `stewardThread`, and any thread pinned in bb are `protected`, and never anything else.
+
+**Issue.** A thread's issue is the one named by its latest signed `claim:` comment (`[agent:<tool> <thread id>] claim: ...`), else by a `STRGT-NNNN` or `NNNN:` prefix in its title (with the team key setting in place of `STRGT`). Each pass reads the team's issues changed in the last 30 days, with their first 30 comments, and asks for a titled issue that is older by name.
+
+**Cache expiry.** bb's `compactionOfferAt`, else the thread's last activity plus its provider's cache life: 1 hour for `claude-code` and `codex`, 6 hours for `pi` and `acp-opencode`, and 1 hour for a provider not in the table (`DEFAULT_CACHE_LIFE_MS` in `lib/lifecycle.ts`).
+
+**Decision.** Made in the last 15 minutes before the cache expires (the last 5 for a cache that lives under 15 minutes):
+
+| State | Decision |
+| --- | --- |
+| `done`, `parked`, and safe | `archive` |
+| `done` or `parked`, not safe | `flag`, with the reason |
+| `idle-active`, 100k tokens or more, with an open issue | `compact` |
+| `idle-active`, under 100k tokens or no issue | `let-cool` |
+| `stuck`, `orphan` | `flag`, whenever seen: a thread can stay stuck long after its cache is cold |
+| `working`, `waiting`, `protected` | none |
+
+Safe means the environment is clean, its branch has no commits that its base lacks, no child is working, and the thread is not protected. An environment bb cannot read is not safe. A thread with no environment, or one that is not a git checkout, has nothing to lose. A thread whose cache is already cold gets no archive or compact decision.
+
+The service keeps its last snapshot and the decision log in the plugin's SQLite database. A decision is logged once per cache life, and again only when the decision or its reason changes.
+
 ## How it works
 
 A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
@@ -162,6 +187,8 @@ bb sgc paused [--json] [--cached]
 bb sgc resume <issue> [--note <text>] [--json]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc hosts [--digest] [--json]
+bb sgc threads [--json] [--cached]
+bb sgc threads log [--limit <n>] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -177,6 +204,7 @@ bb sgc key --api-key-stdin
 - `resume` resumes a paused issue, as the Resume button does. `--note` adds a note to the comment and to the steward's message.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
+- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. It exits 1 when bb could not be read.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -232,8 +260,10 @@ bb plugin logs sgc-steward
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
+- `lib/lifecycle.ts`: thread states, cache expiry, and the decision, as pure functions with no bb or Node imports.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
+- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, and `bb sgc threads`.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.

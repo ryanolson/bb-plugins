@@ -113,6 +113,12 @@ On a needs-decision issue, the latest signed comment is the question. Use the sa
 - An answer from before this format can hold the typed text on the number's line, an unquoted note, or `Q3. No answer.` for a question the owner skipped.
 - Ask again in a new block for every question marked `No answer.` that still matters.
 
+## Thread lifecycle
+
+The plugin watches every thread and decides, before each thread's prompt cache expires, whether to keep it, compact it, or archive it. It only observes for now. `bb sgc threads` lists each thread with its state, issue, provider and model, tokens, cache expiry, decision, and reason. `bb sgc threads log` shows what it decided. Mission Control, the steward, and pinned threads are `protected`. To keep a thread out of an archive, pin it in bb.
+
+To make a thread findable, claim its issue with a signed `claim:` comment, or start its title with `STRGT-NNNN` or `NNNN:`. A thread with no issue for 24 hours is an `orphan`, and the steward gets flagged.
+
 ## Commands
 
 ```
@@ -126,6 +132,8 @@ bb sgc resume <issue> [--note <text>] [--json]
 bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc answer <issue> --block <id>@<revision> --text-file <file> [--machine <name-or-id>] [--json]
 bb sgc hosts [--digest] [--json]
+bb sgc threads [--json] [--cached]
+bb sgc threads log [--limit <n>] [--json]
 ```
 
 - `bb sgc questions` lists the open questions, both kinds, with the recommended option first, and each Linear block as `<comment id>@<revision>`. `--label <name>` lists only the questions with that label. Give it again for more: a question then needs any one of them, or every one with `--match all`. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`.

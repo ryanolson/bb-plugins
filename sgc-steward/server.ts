@@ -71,6 +71,7 @@ import { readHosts } from "./lib/hosts-read.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
+import { THREADS_MIGRATIONS, THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -136,6 +137,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         notified_at INTEGER
       )`,
       ...STORE_MIGRATIONS,
+      ...THREADS_MIGRATIONS,
     ]);
     const asks = createAskStore(db, now);
     const todos = createTodos({
@@ -166,6 +168,23 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       linearError: () => snapshot.error,
       expired: () => asks.listExpired(now() - EXPIRED_SHOWN_MS).map(expiredView),
       now,
+      log: (text) => bb.log.warn(text),
+    });
+
+    const threads = createThreads({
+      db,
+      sdk: bb.sdk,
+      now,
+      settings: async () => {
+        const { stewardThread, teamKey } = await settings.get();
+        return { stewardThread, teamKey, cacheLifeOverrides: {} };
+      },
+      // Reads only: it never takes the plugin's Linear lock, and errors say nothing of the key.
+      linear: async () => {
+        const { linearApiKey, teamKey } = await settings.get();
+        if (!linearApiKey) return null;
+        return { client: clientFor(linearApiKey), teamKey };
+      },
       log: (text) => bb.log.warn(text),
     });
 
@@ -824,6 +843,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         commands: {
           ...todos.commands,
           ...pausedWork.commands,
+          threads: threadsCommand(threads, now),
           questions: cliCommand({
             summary: "List open questions: Linear question blocks, bb questions, and answers that did not go out",
             description: "Polls Linear first, unless --cached. Exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read; the questions shown then miss what could not be read.",
@@ -1082,6 +1102,28 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       client = null;
       commentCache.clear();
       wake?.();
+    });
+
+    bb.background.service("threads", {
+      async start(signal) {
+        while (!signal.aborted) {
+          try {
+            await threads.refresh();
+          } catch (error) {
+            bb.log.warn(`thread lifecycle read failed: ${message(error)}`);
+          }
+          if (signal.aborted) break;
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              signal.removeEventListener("abort", done);
+              resolve();
+            };
+            const timer = setTimeout(done, THREADS_POLL_MS);
+            signal.addEventListener("abort", done, { once: true });
+          });
+        }
+      },
     });
 
     bb.background.service("poller", {
