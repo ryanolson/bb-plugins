@@ -63,6 +63,15 @@ test("a question with no options still offers choices: the note, then Pause", ()
   assert.match(picked.html, /placeholder="Type your answer"/, "the note is the answer, so it says so");
 });
 
+test("a block not in the question format draws the same two radios", () => {
+  // Its card calls AnswerFields with no options, so it offers the note and
+  // Pause exactly as a question with none does.
+  const { calls, html } = render([], { option: "B", text: "" });
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.deepEqual(calls.map((call) => call.content), [NOTE_OPTION, PAUSE_OPTION]);
+  assert.match(html, /placeholder="Add a note \(optional\)"/, "Pause takes an optional note");
+});
+
 test("a question with options never offers to answer in the note", () => {
   const { calls } = render(askOptions(OPTIONS, "A"), { option: "A", text: "" });
   assert.ok(!calls.some((call) => call.content === NOTE_OPTION));

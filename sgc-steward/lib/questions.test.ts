@@ -430,6 +430,18 @@ test("the Pause choice the page adds to a question with options is answered like
   assert.equal(body, [`Answer to the questions of 2026-01-05 (block q1 rev ${block.revision}), Q1`, "", `Q1. C: ${PAUSE_OPTION}`].join("\n"));
 });
 
+test("a block not in the question format answers by the note, or pauses, by the letters its card shows", () => {
+  const block = raw(parseQuestionBlock(comment("q2", "[agent:codex thr_x] Questions 2026-01-07\nfree form"), "checkin"));
+  const answer = (option: string | null, text: string) => composeAnswer([block], [{ blockId: "q2", revision: block.revision, answers: [], text, ...(option === null ? {} : { option }) }]);
+  const header = `Answer to the question of 2026-01-07 (block q2 rev ${block.revision})`;
+  assert.equal(answer("A", "Ship Friday."), [header, "", "> Ship Friday."].join("\n"), "the note choice posts the note, as before");
+  assert.equal(answer("B", ""), [header, "", `B: ${PAUSE_OPTION}`].join("\n"), "Pause posts the Pause text");
+  assert.equal(answer("B", "  Stop before the migration.  "), [header, "", `B: ${PAUSE_OPTION}`, "> Stop before the migration."].join("\n"), "and the note under it");
+  assert.equal(answer(null, "Yes."), [header, "", "> Yes."].join("\n"), "typed text alone still answers");
+  assert.throws(() => answer("A", "  "), /"Answer in the note below" takes an answer in the note/);
+  assert.throws(() => answer("C", "x"), /block q2 has no option C/);
+});
+
 test("an answer to some questions of a block names each one, and says nothing of the rest", () => {
   const block = parsed(parseQuestionBlock(comment("q1", QUESTIONS), "checkin"));
   const one = composeAnswer([block], [{ blockId: "q1", revision: block.revision, answers: [{ number: 2, option: "B", text: "Start with the cells project." }] }]);

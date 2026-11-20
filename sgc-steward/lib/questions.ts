@@ -311,6 +311,11 @@ export interface BlockAnswer {
   answers: QuestionAnswer[];
   /** The answer to a raw block. */
   text?: string;
+  /**
+   * The choice picked for a raw block, by the letter its card showed. A raw
+   * block has no options of its own, so the card offers the note, and Pause.
+   */
+  option?: string | null;
 }
 
 function blockDay(block: QuestionBlock): string {
@@ -492,10 +497,21 @@ export function composeAnswer(blocks: readonly QuestionBlock[], answers: readonl
     const answer = byBlock.get(block.commentId)!;
     if (block.format === "raw") {
       if (answer.answers.length > 0) throw new Error(`block ${block.commentId} is not in the question format; answer it with text`);
-      const text = answer.text?.trim() ?? "";
-      if (text === "") throw new Error(`nothing to post for block ${block.commentId}: the answer is empty`);
+      const note = answer.text?.trim() ?? "";
+      // A raw block has no options of its own, so its card shows the choices
+      // of a question with none: the note, then Pause.
+      const choices = cardChoices([]);
+      const choice = answer.option === null || answer.option === undefined ? undefined : choices.find((candidate) => candidate.letter === answer.option);
+      if (answer.option !== null && answer.option !== undefined && choice === undefined) throw new Error(`block ${block.commentId} has no option ${answer.option}`);
+      if (isNoteChoice([], choice)) {
+        if (note === "") throw new Error(`block ${block.commentId}: "Answer in the note below" takes an answer in the note`);
+        meant.push({ blockId: block.commentId, revision: block.revision, question: null });
+        return `${answerHeader(block, posted)}\n\n${ownWords(note)}`;
+      }
+      const picked = choice === undefined ? null : `${choice.letter}: ${choice.text}`;
+      if (picked === null && note === "") throw new Error(`nothing to post for block ${block.commentId}: the answer is empty`);
       meant.push({ blockId: block.commentId, revision: block.revision, question: null });
-      return `${answerHeader(block, posted)}\n\n${ownWords(text)}`;
+      return [answerHeader(block, posted), "", ...[picked, note === "" ? null : ownWords(note)].filter((line): line is string => line !== null)].join("\n");
     }
     const byNumber = new Map<number, QuestionAnswer>();
     for (const item of answer.answers) {

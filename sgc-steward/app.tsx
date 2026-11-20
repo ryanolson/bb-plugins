@@ -195,14 +195,9 @@ function LinearCard({ card, onAnswered }: { card: Extract<Card<IssueView, AskVie
           <div className="rounded-md bg-secondary/40 px-3 py-2">
             <Markdown content={card.block.body} className="text-sm" />
           </div>
-          {/* A block not in the question format has no choices: it takes a typed answer. */}
-          <textarea
-            className={textareaClass()}
-            value={draft.text}
-            aria-label="Answer"
-            placeholder="Type your answer"
-            onChange={(event) => setDraft({ option: null, text: event.target.value })}
-          />
+          {/* A block not in the question format has no options of its own, so its
+              card offers the note and Pause, as a question with none does. */}
+          <AnswerFields name={block.commentId} label="Answer" options={[]} draft={draft} onChange={setDraft} />
         </>
       ) : (
         <>

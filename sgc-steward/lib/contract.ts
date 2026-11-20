@@ -149,6 +149,8 @@ const answerInputSchema = z.object({
           )
           .max(99),
         text: z.string().max(20_000).optional(),
+        // The choice picked on a raw block's card: it has no options of its own.
+        option: z.string().regex(/^[A-Z]$/).nullable().optional(),
       }),
     )
     .min(1)

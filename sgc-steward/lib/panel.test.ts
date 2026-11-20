@@ -46,14 +46,18 @@ test("one card's answer names its block, its revision, and its one question", ()
     issueId: "uuid-1",
     blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes." }],
   });
-  // A block not in the question format takes typed text only, and its card
-  // offers no choices, so a picked letter never rides along and never stands
-  // in for the answer.
-  assert.equal(questionAnswerInput("uuid-1", raw, null, { option: "B", text: "  " }), null);
-  assert.deepEqual(questionAnswerInput("uuid-1", raw, null, { option: "B", text: "Yes." }), {
+  // A block not in the question format has no options of its own, so its card
+  // offers the note and Pause, and the picked letter goes with the answer.
+  assert.equal(questionAnswerInput("uuid-1", raw, null, { option: "A", text: "  " }), null, "the note choice waits for the note");
+  assert.deepEqual(questionAnswerInput("uuid-1", raw, null, { option: "A", text: "Yes." }), {
     issueId: "uuid-1",
-    blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes." }],
+    blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "Yes.", option: "A" }],
   });
+  assert.deepEqual(questionAnswerInput("uuid-1", raw, null, { option: "B", text: "" }), {
+    issueId: "uuid-1",
+    blocks: [{ blockId: "q2", revision: raw.revision, answers: [], text: "", option: "B" }],
+    }, "Pause needs no note");
+  assert.equal(questionAnswerInput("uuid-1", raw, null, { option: null, text: "  " }), null);
   const typed = questionAnswerInput("uuid-1", parsed, 2, { option: null, text: "Ship Friday." });
   assert.ok(typed);
   assert.equal(

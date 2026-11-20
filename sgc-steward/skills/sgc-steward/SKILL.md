@@ -88,7 +88,7 @@ Q2. <question>
 - Put your bb thread id in the signature. The answer is then also sent to your thread, as a message that starts with `[sgc-steward] Answer to your questions on <issue>`. A block with several questions gets one such message per answer, each with only the questions it answers.
 - Do not edit a block after you post it. Post a new block instead. An edit changes the block's revision, so an answer to the old text no longer closes it, and the owner is notified again.
 
-A comment that breaks a rule is still shown, but as plain text without option buttons.
+A comment that breaks a rule is still shown, as written, and answered by the note or by Pause; it has no options of its own.
 
 On a needs-decision issue, the latest signed comment is the question. Use the same format there when the question has options.
 

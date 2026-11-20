@@ -727,6 +727,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           revision: block.revision,
           answers: block.answers,
           ...(block.text === undefined ? {} : { text: block.text }),
+          ...(block.option === undefined ? {} : { option: block.option }),
         }));
         try {
           return await postAnswer(

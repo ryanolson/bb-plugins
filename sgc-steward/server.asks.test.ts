@@ -478,6 +478,29 @@ test("the page's letters answer a Linear question that has no options: A is the 
   assert.ok(pauseIssue.comments.at(-1)!.body.includes(`Q1. C: ${PAUSE_OPTION}`), pauseIssue.comments.at(-1)!.body);
 });
 
+test("a block not in the question format takes the page's letters too: A the note, B Pause", async () => {
+  const { harness, linear, refresh } = await setup();
+  const issue = linear.addIssue("TEAM-1", ["checkin"]);
+  linear.post(issue, "r1", "[agent:codex thr_test1] Questions\nfree form, no Q1 line");
+  const shown = await refresh();
+  const answer = (option: string, text: string) => ({ issueId: issue.id, blocks: [{ blockId: "r1", revision: revisionOf(shown, "r1"), answers: [], text, option }] });
+
+  const empty = await rejection(harness.behavior.callRpc("questions.answer", answer("A", " ")));
+  assert.equal(empty.code, "invalid");
+  assert.match(empty.message, /"Answer in the note below" takes an answer in the note/);
+  assert.equal(issue.comments.length, 1, "an empty note posts nothing");
+
+  await harness.behavior.callRpc("questions.answer", answer("A", "Ship Friday."));
+  assert.match(issue.comments.at(-1)!.body, /\n\n> Ship Friday\.$/);
+
+  const second = linear.addIssue("TEAM-2", ["checkin"]);
+  linear.post(second, "r2", "[agent:codex thr_test1] Questions\nfree form, no Q1 line");
+  const again = await refresh();
+  await harness.behavior.callRpc("questions.answer", { issueId: second.id, blocks: [{ blockId: "r2", revision: revisionOf(again, "r2"), answers: [], text: "Stop before the migration.", option: "B" }] });
+  const body = second.comments.at(-1)!.body;
+  assert.ok(body.endsWith(`\n\nB: ${PAUSE_OPTION}\n> Stop before the migration.`), body);
+});
+
 /** The comment id the server asked Linear to create. */
 function createdId(calls: readonly string[]): string {
   const call = calls.find((entry) => entry.startsWith("createComment "));

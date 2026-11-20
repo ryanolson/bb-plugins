@@ -70,8 +70,9 @@ export interface AskDraft {
 
 /**
  * The `questions.answer` input for one card: one question of a block, or a
- * block not in the question format (`question` null). Null when the draft
- * says nothing yet. The revision is the one the card shows.
+ * block not in the question format (`question` null), which carries the choice
+ * the card showed instead of a question's answers. Null when the draft says
+ * nothing yet. The revision is the one the card shows.
  */
 export function questionAnswerInput(
   issueId: string,
@@ -79,13 +80,15 @@ export function questionAnswerInput(
   question: number | null,
   draft: AskDraft,
 ): { issueId: string; blocks: BlockAnswer[] } | null {
-  // A block not in the question format takes a typed answer and nothing else:
-  // its card's choices are not sent, so the box must say something.
-  if (question === null) return draft.text.trim() === "" ? null : { issueId, blocks: [{ blockId: block.commentId, revision: block.revision, answers: [], text: draft.text }] };
+  // A block not in the question format has no options of its own: its card
+  // offers the note, then Pause, and the picked letter goes with the answer.
+  const asked = question === null || block.format !== "parsed" ? undefined : block.questions.find((candidate) => candidate.number === question);
   if (draft.option === null && draft.text.trim() === "") return null;
-  const asked = block.format === "parsed" ? block.questions.find((candidate) => candidate.number === question) : undefined;
   if (noteRequired(asked?.options ?? [], draft.option) && draft.text.trim() === "") return null;
-  const answer: BlockAnswer = { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
+  const answer: BlockAnswer =
+    question === null
+      ? { blockId: block.commentId, revision: block.revision, answers: [], text: draft.text, ...(draft.option === null ? {} : { option: draft.option }) }
+      : { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
   return { issueId, blocks: [answer] };
 }
 

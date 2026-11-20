@@ -42,7 +42,7 @@ Q3. Anything else before the next run?
 - A question with no options takes a typed answer. Its card offers "Answer in the note below" and then Pause, and the note is the answer: Send waits for it.
 - Any other line continues the question above it. An indented line continues the option above it.
 
-The page shows a comment that breaks these rules as written, with the reason, and takes a typed answer for it.
+The page shows a comment that breaks these rules as written, with the reason, and takes an answer for it: the note choice, or Pause, with or without a note.
 
 ## Markdown in questions
 
