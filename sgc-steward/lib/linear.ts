@@ -115,6 +115,13 @@ export const ISSUE_QUERY = `query SgcIssue($id: String!) {
   issue(id: $id) { ${ISSUE_FIELDS} }
 }`;
 
+export const PROJECTS_QUERY = `query SgcProjects($teamKey: String!, $after: String) {
+  projects(first: 50, after: $after, filter: { accessibleTeams: { key: { eq: $teamKey } } }) {
+    nodes { name status { type } }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
 const COMMENT_PAGE = 50;
 const REPLY_PAGE = 20;
 const COMMENT_FIELDS = `id body createdAt parentId user { id } botActor { type }`;
@@ -225,6 +232,8 @@ interface GraphQLError {
 export interface LinearClient {
   /** Open issues of one team that carry the check-in or needs-decision label. */
   listQuestionIssues(teamKey: string, signal?: AbortSignal): Promise<LinearIssue[]>;
+  /** Names of the team's projects that are not completed or canceled. */
+  listProjectNames(teamKey: string, signal?: AbortSignal): Promise<string[]>;
   /** One issue by UUID or identifier; null when Linear has no such issue. */
   getIssue(id: string, signal?: AbortSignal): Promise<LinearIssue | null>;
   /**
@@ -385,6 +394,23 @@ export function createLinearClient(options: LinearClientOptions): LinearClient {
         issues.push(...data.issues.nodes.map(toIssue));
         if (!data.issues.pageInfo.hasNextPage || data.issues.pageInfo.endCursor === null) return issues;
         after = data.issues.pageInfo.endCursor;
+      }
+    },
+
+    async listProjectNames(teamKey, signal) {
+      const names: string[] = [];
+      let after: string | null = null;
+      for (;;) {
+        const data: { projects: { nodes: Array<{ name: string; status: { type: string } | null }>; pageInfo: PageInfo } } = await query(
+          PROJECTS_QUERY,
+          { teamKey, after },
+          signal,
+        );
+        for (const project of data.projects.nodes) {
+          if (project.status?.type !== "completed" && project.status?.type !== "canceled") names.push(project.name);
+        }
+        if (!data.projects.pageInfo.hasNextPage || data.projects.pageInfo.endCursor === null) return names;
+        after = data.projects.pageInfo.endCursor;
       }
     },
 

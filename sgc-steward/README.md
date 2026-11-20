@@ -135,7 +135,7 @@ bb plugins cannot send a mobile push. The push-notifications plugin sends pushes
 ## CLI
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--label <name>]... [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] --label <project name> [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
@@ -146,7 +146,7 @@ bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
 ```
 
-- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. `--label` gives the question a label to sort and filter by; give it again for more, up to 10, of at most 40 characters each. The same open question from the same thread returns its id again, and keeps the labels it was first asked with. A thread can have 10 open questions, and all threads 50.
+- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with at most 3 options of at most 25 words each; `ask` refuses more with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
 - `ask` also warns, in one more line that starts with `Warning:` (with `--json`, in a `warnings` list), when the question or an option holds a table the page will show as plain text. It parses the text as the page does (GFM and math blocks) and looks for two or more lines in one paragraph that start and end with `|`. A table the page draws, and pipes inside code, HTML or math, never count. The usual cause is a missing delimiter row, or one with the wrong number of cells. It still stores the question as written. Withdraw it and ask again to fix the table.
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 

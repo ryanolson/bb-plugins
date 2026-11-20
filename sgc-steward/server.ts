@@ -45,6 +45,7 @@ import {
   checkQuestion,
   checkReason,
   isThreadId,
+  labelWarning,
   tableWarning,
   withdrawalFollowUps,
   type AskAnswer,
@@ -203,6 +204,9 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       return fresh;
     }
 
+    /** Names of the team's open Linear projects from the last poll that read them; null before the first. */
+    let projectNames: string[] | null = null;
+
     /** The poll in progress, so an answer can stop it instead of waiting. */
     let runningPoll: AbortController | null = null;
     /** Set when the poller should poll again at once: settings changed, or an answer stopped a poll. */
@@ -236,6 +240,14 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
         await settleHeld(linear, signal, linearApiKey);
         if (signal.aborted) return null;
         const listed = await linear.listQuestionIssues(teamKey, signal);
+        if (signal.aborted) return null;
+        // The names an ask's label is checked against. A failed read keeps the last good list.
+        try {
+          projectNames = await linear.listProjectNames(teamKey, signal);
+        } catch (error) {
+          if (signal.aborted || (error instanceof LinearError && (error.kind === "auth" || error.kind === "rate-limit"))) throw error;
+          bb.log.warn(`could not read Linear projects: ${redact(message(error), [linearApiKey])}`);
+        }
         if (signal.aborted) return null;
         const issues: IssueView[] = [];
         const issueErrors: Snapshot["issueErrors"] = [];
@@ -784,18 +796,18 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
             summary: "Ask the owner a question without waiting: store it and print its id",
             description: `Returns at once; keep working. The answer arrives in the asking thread as a queued message that starts with "${DELIVERY_PREFIX} Answer to <id>". The same open question from the same thread returns its existing id. A thread can have ${ASK_LIMITS.openPerThread} open questions, and all threads ${ASK_LIMITS.openTotal}.`,
             options: {
-              question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionChars} characters` },
+              question: { type: "string", description: `The question, at most ${ASK_LIMITS.questionWords} words and ${ASK_LIMITS.questionChars} characters` },
               "question-file": { type: "string", description: "File with the question, on the calling thread's machine" },
               option: {
                 type: "string",
                 repeatable: true,
-                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionChars} characters each; they get letters A, B, and so on`,
+                description: `An answer to offer, at most ${ASK_LIMITS.options}, ${ASK_LIMITS.optionWords} words each; they get letters A, B, and so on, and a last option, Pause, is added`,
               },
               recommend: { type: "string", description: "The letter of the recommended option, or none; default A when there are options" },
               label: {
                 type: "string",
                 repeatable: true,
-                description: `A label to sort and filter questions by, at most ${ASK_LIMITS.labels}, ${ASK_LIMITS.labelChars} characters each; kept from the first ask`,
+                description: `Exactly ${ASK_LIMITS.labels} label: the name of the issue's Linear project, at most ${ASK_LIMITS.labelChars} characters; kept from the first ask`,
               },
               issue: { type: "string", description: "A Linear issue, like TEAM-12, that gets a comment recording the question and its answer" },
               thread: { type: "string", description: "The asking thread, which gets the answer; default the calling thread" },
@@ -819,7 +831,7 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               let labels: string[];
               try {
                 question = checkQuestion(raw);
-                labels = checkLabels(input.options.label ?? []);
+                labels = checkLabels(input.options.label ?? [], projectNames);
                 const texts = input.options.option ?? [];
                 const recommend = input.options.recommend === undefined ? (texts.length > 0 ? "A" : null) : input.options.recommend === "none" ? null : input.options.recommend;
                 options = askOptions(texts, recommend);
@@ -836,17 +848,15 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
               }
               // A table the page cannot draw gets a warning, not a refusal: the
               // question still reads, and the asker can withdraw and ask again.
-              const warning = tableWarning(question, options.map((option) => option.text));
+              const warnings = [tableWarning(question, options.map((option) => option.text)), labelWarning(projectNames)].filter((line): line is string => line !== null);
               const reply = (id: string, existing: boolean) => {
                 const where = threadId === ctx.threadId ? "this thread" : `thread ${threadId}`;
                 const asked = `${existing ? "Already asked" : "Asked"} ${id}. Keep working: the answer arrives in ${where} as a message that starts with "${DELIVERY_PREFIX} Answer to ${id}".`;
                 return {
                   exitCode: 0,
                   stdout: input.options.json
-                    ? JSON.stringify(warning === null ? { id, existing } : { id, existing, warnings: [warning] })
-                    : warning === null
-                      ? asked
-                      : `${asked}\n${warning}`,
+                    ? JSON.stringify(warnings.length === 0 ? { id, existing } : { id, existing, warnings })
+                    : [asked, ...warnings].join("\n"),
                 };
               };
               // Read everything first: no other ask may run between the checks and the insert.

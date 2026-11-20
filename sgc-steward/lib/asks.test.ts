@@ -38,15 +38,15 @@ test("a question is trimmed and must say something, within the limit", () => {
   assert.throws(() => checkQuestion("x".repeat(ASK_LIMITS.questionChars + 1)), /over 4000 characters/);
 });
 
-test("options get letters in order, and the recommendation is the one named", () => {
-  assert.deepEqual(askOptions([" Yes. ", "No."], "A"), [
+test("options get letters in order, then the Pause option, and the recommendation is the one named", () => {
+  const letters = (options: ReturnType<typeof askOptions>) => options.map((option) => [option.letter, option.recommended]);
+  assert.deepEqual(askOptions([" Yes. ", "No."], "A").slice(0, 2), [
     { letter: "A", text: "Yes.", recommended: true },
     { letter: "B", text: "No.", recommended: false },
   ]);
-  assert.deepEqual(askOptions(["Yes.", "No."], "B").map((option) => option.recommended), [false, true]);
-  assert.deepEqual(askOptions(["Yes.", "No."], null).map((option) => option.recommended), [false, false]);
-  assert.deepEqual(askOptions([], null), []);
-  assert.throws(() => askOptions(Array.from({ length: ASK_LIMITS.options + 1 }, (_, n) => `o${n}`), "A"), /at most 10 options/);
+  assert.deepEqual(letters(askOptions(["Yes.", "No."], "B")), [["A", false], ["B", true], ["C", false]]);
+  assert.deepEqual(letters(askOptions(["Yes.", "No."], null)), [["A", false], ["B", false], ["C", false]]);
+  assert.throws(() => askOptions(Array.from({ length: ASK_LIMITS.options + 1 }, (_, n) => `o${n}`), "A"), /at most 3 options/);
   assert.throws(() => askOptions(["Yes.", " "], "A"), /option B is empty/);
   assert.throws(() => askOptions(["x".repeat(ASK_LIMITS.optionChars + 1)], "A"), /option A is over 500 characters/);
   assert.throws(() => askOptions(["Yes.", "No."], "C"), /there is no option C to recommend/);
@@ -156,12 +156,11 @@ test("a withdrawal record starts with the record header, so it closes no block",
   assert.match(record, /- A \(recommended\): Yes, today\./);
 });
 
-test("labels are trimmed and kept once each, in their first spelling, within the limits", () => {
-  assert.deepEqual(checkLabels([]), []);
-  assert.deepEqual(checkLabels([" infra ", "Docs", "INFRA", "docs", "agent: auto"]), ["infra", "Docs", "agent: auto"]);
-  assert.throws(() => checkLabels(["  "]), /a label is empty/);
-  assert.throws(() => checkLabels(["x".repeat(ASK_LIMITS.labelChars + 1)]), new RegExp(`over ${ASK_LIMITS.labelChars} characters`));
-  assert.throws(() => checkLabels(["two\nlines"]), /control character/);
-  assert.throws(() => checkLabels(["tab\there"]), /control character/);
-  assert.throws(() => checkLabels(Array.from({ length: ASK_LIMITS.labels + 1 }, (_, index) => `l${index}`)), new RegExp(`at most ${ASK_LIMITS.labels} labels`));
+test("a label is trimmed and kept in its spelling, within the limits", () => {
+  assert.deepEqual(checkLabels([" infra "], null), ["infra"]);
+  assert.throws(() => checkLabels(["  "], null), /the label is empty/);
+  assert.throws(() => checkLabels(["x".repeat(ASK_LIMITS.labelChars + 1)], null), new RegExp(`over ${ASK_LIMITS.labelChars} characters`));
+  assert.throws(() => checkLabels(["two\nlines"], null), /control character/);
+  assert.throws(() => checkLabels(["tab\there"], null), /control character/);
+  assert.throws(() => checkLabels(["a", "b"], null), /exactly 1 label/);
 });

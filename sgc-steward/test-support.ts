@@ -98,6 +98,14 @@ export class FakeLinear implements LinearClient {
       .map((issue) => this.strip(issue));
   }
 
+  /** The open project names a poll reads; null, the default, makes the read fail, so no list is known. Not recorded in `calls`. */
+  projects: string[] | null = null;
+
+  async listProjectNames() {
+    if (this.projects === null) throw new LinearError("network", "could not reach Linear: socket hang up");
+    return [...this.projects];
+  }
+
   async getIssue(id: string) {
     this.calls.push(`getIssue ${id}`);
     const issue = this.find(id);

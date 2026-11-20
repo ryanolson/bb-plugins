@@ -15,17 +15,21 @@ import { RECORD_HEADER } from "./questions.ts";
 
 export const ASK_LIMITS = {
   questionChars: 4000,
+  /** The Charter's limits: a question is short, and so is each option. */
+  questionWords: 80,
   optionChars: 500,
-  options: 10,
+  optionWords: 25,
+  /** Options the asker offers; the Pause option is added to them. */
+  options: 3,
   /** Open questions one thread may have waiting. */
   openPerThread: 10,
   /** Open questions in all, which bounds `bb sgc questions` output. */
   openTotal: 50,
   /** A withdrawal reason, which goes to the asker and the issue record. */
   reasonChars: 2000,
-  /** Labels on one question, and the length of each. */
-  labels: 10,
-  labelChars: 40,
+  /** Labels on one question, and the length of each. A label names the issue's Linear project. */
+  labels: 1,
+  labelChars: 80,
 } as const;
 
 /** The first words of every message the plugin sends to a thread. */
@@ -73,10 +77,22 @@ export function checkQuestion(text: string): string {
   const question = text.trim();
   if (question === "") throw new Error("the question is empty");
   if (question.length > ASK_LIMITS.questionChars) throw new Error(`the question is over ${ASK_LIMITS.questionChars} characters`);
+  const count = wordCount(question);
+  if (count > ASK_LIMITS.questionWords) throw new Error(`the question is ${count} words; it takes at most ${ASK_LIMITS.questionWords} words`);
   return question;
 }
 
-/** Options lettered A, B, and so on, in order; `recommend` names one letter or none. */
+function wordCount(text: string): number {
+  return text.split(/\s+/).filter((word) => word !== "").length;
+}
+
+/** The last option of every question. It is never recommended and counts against no limit. */
+export const PAUSE_OPTION = "Pause it: stop this work for now, and resume it later.";
+
+/**
+ * Options lettered A, B, and so on, in order, then the Pause option; `recommend`
+ * names one of the asker's letters or none.
+ */
 export function askOptions(texts: readonly string[], recommend: string | null): AskOption[] {
   if (texts.length > ASK_LIMITS.options) throw new Error(`a question takes at most ${ASK_LIMITS.options} options`);
   const options = texts.map((raw, index) => {
@@ -84,12 +100,13 @@ export function askOptions(texts: readonly string[], recommend: string | null): 
     const text = raw.trim();
     if (text === "") throw new Error(`option ${letter} is empty`);
     if (text.length > ASK_LIMITS.optionChars) throw new Error(`option ${letter} is over ${ASK_LIMITS.optionChars} characters`);
+    if (wordCount(text) > ASK_LIMITS.optionWords) throw new Error(`option ${letter} is over ${ASK_LIMITS.optionWords} words`);
     return { letter, text, recommended: letter === recommend };
   });
   if (recommend !== null && !options.some((option) => option.letter === recommend)) {
     throw new Error(`there is no option ${recommend} to recommend`);
   }
-  return options;
+  return [...options, { letter: String.fromCharCode(65 + options.length), text: PAUSE_OPTION, recommended: false }];
 }
 
 // The question's Markdown is parsed as bb's page parses it: GFM (remark-gfm
@@ -212,21 +229,30 @@ export function tableWarning(question: string, options: readonly string[]): stri
 }
 
 /**
- * The labels for a question: each trimmed, and kept once, in its first
- * spelling, since labels match in any case. A label prints on its own in the
- * CLI, so it must hold no line break or other control character.
+ * The one label of a question: the name of one of the team's open Linear
+ * projects, in any case, kept as the asker spelled it. `projects` is the last
+ * good list of those names, or null before any poll has read it; then any
+ * label is taken (see `labelWarning`). A label prints on its own in the CLI,
+ * so it must hold no line break or other control character.
  */
-export function checkLabels(raw: readonly string[]): string[] {
-  const labels: string[] = [];
-  for (const text of raw) {
-    const label = text.trim();
-    if (label === "") throw new Error("a label is empty");
-    if (label.length > ASK_LIMITS.labelChars) throw new Error(`label ${label.slice(0, ASK_LIMITS.labelChars)}… is over ${ASK_LIMITS.labelChars} characters`);
-    if (/\p{Cc}/u.test(label)) throw new Error(`label ${JSON.stringify(label)} holds a control character`);
-    if (!labels.some((kept) => kept.toLowerCase() === label.toLowerCase())) labels.push(label);
+export function checkLabels(raw: readonly string[], projects: readonly string[] | null): string[] {
+  if (raw.length !== ASK_LIMITS.labels) throw new Error(`a question takes exactly ${ASK_LIMITS.labels} label, the name of its Linear project; got ${raw.length}`);
+  const label = raw[0]!.trim();
+  if (label === "") throw new Error("the label is empty");
+  if (label.length > ASK_LIMITS.labelChars) throw new Error(`label ${label.slice(0, ASK_LIMITS.labelChars)}… is over ${ASK_LIMITS.labelChars} characters`);
+  if (/\p{Cc}/u.test(label)) throw new Error(`label ${JSON.stringify(label)} holds a control character`);
+  if (projects !== null && !projects.some((name) => name.toLowerCase() === label.toLowerCase())) {
+    const shown = projects.slice(0, 15).join("; ");
+    throw new Error(`label ${label} is not the name of an open Linear project${projects.length === 0 ? "" : `; the open projects are: ${shown}${projects.length > 15 ? "; …" : ""}`}`);
   }
-  if (labels.length > ASK_LIMITS.labels) throw new Error(`a question takes at most ${ASK_LIMITS.labels} labels`);
-  return labels;
+  return [label];
+}
+
+/** A warning for `bb sgc ask` when the label could not be checked against Linear's projects yet, else null. */
+export function labelWarning(projects: readonly string[] | null): string | null {
+  return projects === null
+    ? "Warning: the label was not checked against the open Linear projects, because the plugin has not read them yet. Use the short name of the issue's project."
+    : null;
 }
 
 export function checkReason(text: string): string {
