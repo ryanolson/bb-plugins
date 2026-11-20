@@ -965,3 +965,14 @@ test("archive-done turned off after the decision stops the archive", async () =>
   await t.pass();
   assert.deepEqual(t.acted, []);
 });
+
+test("archive-done turned off during the final checkout read stops the archive", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  const issue = t.issue("TEAM-1", "state-done");
+  t.sdk.stub("environments.status", async () => {
+    if (issue.comments.length > 0) await t.harness.behavior.setSettings({ lifecycleActions: "compact" });
+    return structuredClone(CLEAN_ENV);
+  });
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+});

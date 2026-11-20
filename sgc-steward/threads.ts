@@ -533,10 +533,12 @@ export function createThreads(deps: ThreadsDeps) {
     action: "compact" | "archive",
     how: { lookup: true } | { issue: IssueFacts | null | undefined },
   ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string }> {
-    const settings = await deps.settings();
     const fresh = (await collect(entry.row.id, "lookup" in how ? { lookup: true } : { issue: how.issue })).entries[0];
     const changed = (why: string) => ({ refusal: `changed since the decision: ${why}` });
     if (fresh === undefined) return changed("the thread is gone");
+    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
+    // The settings are read last, after every await that reads bb, so a change during those reads counts.
+    const settings = await deps.settings();
     if (settings.mode !== "act") return changed("act mode was turned off");
     if (entry.issue?.identifier !== fresh.issue?.identifier) return changed(`its issue is now ${fresh.issue?.identifier ?? "none"}, not ${entry.issue?.identifier ?? "none"}`);
     if (fresh.row.decision !== entry.row.decision) return changed(`now ${fresh.row.state}, ${fresh.row.decision} (${fresh.row.reason})`);
@@ -544,7 +546,6 @@ export function createThreads(deps: ThreadsDeps) {
     if (kind !== actionFor(entry) || kind === null || !settings.actions.has(kind)) {
       return changed(`its category is now ${fresh.row.state}, which is not the action that was decided or is turned off`);
     }
-    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
     const blockers = actionBlockers(fresh, action);
     if (blockers.length > 0) return changed(blockers.join("; "));
     if (action === "compact" && now() > fresh.row.expiresAt) return changed("the cache expired");
