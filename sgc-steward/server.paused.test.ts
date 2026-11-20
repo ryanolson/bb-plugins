@@ -177,3 +177,16 @@ test("the Paused list keeps the Resume button available after a failed Todo move
   const panel = await refresh(harness);
   assert.deepEqual(panel.paused.map((row) => row.identifier), [issue.identifier]);
 });
+
+test("bb sgc paused reports a failed Linear refresh instead of returning stale rows as success", async () => {
+  const { harness, linear } = await setup();
+  linear.addIssue("TEAM-1", ["paused"], "TEAM", { state: BACKLOG });
+  assert.deepEqual((await refresh(harness)).paused.map((row) => row.identifier), ["TEAM-1"]);
+  linear.listQuestionIssues = async () => {
+    throw new Error("Linear is unavailable");
+  };
+
+  const result = await harness.behavior.runCli(["paused", "--json"]);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr ?? "", /Linear is unavailable/);
+});
