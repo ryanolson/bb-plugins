@@ -4,6 +4,7 @@
 
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import type { AskRow, AskState, AskStore } from "./ask-store.ts";
+import { cardChoices, isNoteChoice } from "./choices.ts";
 import type { AnswerChannel } from "./asks.ts";
 
 /**
@@ -23,20 +24,28 @@ export interface AnswerOf {
   /** RFC 3339, UTC. */
   answeredAt: string | null;
   channel: AnswerChannel | null;
-  /** The picked option; null for a free-text answer. */
+  /**
+   * The picked choice, as the card showed it; null for a typed answer. The
+   * card adds Pause, and for a question with no options the note, so an
+   * answer may name a letter the stored row does not hold.
+   */
   option: { letter: string; text: string } | null;
   /** The typed answer, or the note under the picked option; null when there is none. */
   text: string | null;
 }
 
-/** Throws when a stored answer names an option the question does not have, so a check never reads it as free text. */
+/** Throws when a stored answer names a choice the question's card never showed, so a check never reads it as free text. */
 export function answerOf(row: AskRow): AnswerOf {
   const options = row.options.map(({ letter, text }) => ({ letter, text }));
   const answer = row.state === "answered" ? row.answer : null;
   let option: AnswerOf["option"] = null;
   if (answer !== null && answer.option !== null) {
-    option = options.find((candidate) => candidate.letter === answer.option) ?? null;
-    if (option === null) throw new Error(`${row.id} has an answer for option ${answer.option}, which it does not have`);
+    // The choices the card showed, not only the stored options: the card adds
+    // Pause, and a question with none offers the note, and either is a real
+    // answer. The note is the typed answer, so it is reported as one.
+    const choice = cardChoices(row.options).find((candidate) => candidate.letter === answer.option);
+    if (choice === undefined) throw new Error(`${row.id} has an answer for option ${answer.option}, which it does not have`);
+    if (!isNoteChoice(row.options, choice)) option = { letter: choice.letter, text: choice.text };
   }
   const note = answer === null ? "" : answer.text.trim();
   return {
@@ -67,7 +76,7 @@ export function answerOfCommand(asks: Pick<AskStore, "get">) {
   return cliCommand({
     summary: "Show how a bb question was answered, from the plugin's own record",
     description:
-      "Reads only the plugin's stored question, never Linear, so a Linear comment cannot change what it prints. Exits 0 for a known id, open, answered, or withdrawn, and 1 for an unknown one, or for a stored answer that names an option its question does not have. channel bb means the answer came through the plugin's answer RPC, which the page calls; bb cannot tell the owner from an agent calling that RPC.",
+      "Reads only the plugin's stored question, never Linear, so a Linear comment cannot change what it prints. Exits 0 for a known id, open, answered, or withdrawn, and 1 for an unknown one, or for a stored answer that names a choice the question's card never showed, which only an edit outside the plugin makes. channel bb means the answer came through the plugin's answer RPC, which the page calls; bb cannot tell the owner from an agent calling that RPC.",
     positionals: [{ name: "id", description: "Question id, like bbq_k3x9mz2p4q", required: true }],
     options: { json: { type: "boolean", description: "Print machine-readable JSON" } },
     async run(input) {

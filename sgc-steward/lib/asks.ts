@@ -11,6 +11,7 @@ import { gfmFromMarkdown } from "mdast-util-gfm";
 import { mathFromMarkdown } from "mdast-util-math";
 import { gfm } from "micromark-extension-gfm";
 import { math } from "micromark-extension-math";
+import { PAUSE_OPTION, choiceFor, isNoteChoice } from "./choices.ts";
 import { RECORD_HEADER } from "./questions.ts";
 
 export const ASK_LIMITS = {
@@ -91,14 +92,16 @@ function wordCount(text: string): number {
 }
 
 /** The last option of every question. It is never recommended and counts against no limit. */
-export const PAUSE_OPTION = "Pause it: stop this work for now, and resume it later.";
+export { PAUSE_OPTION } from "./choices.ts";
 
 /**
  * Options lettered A, B, and so on, in order, then the Pause option; `recommend`
- * names one of the asker's letters or none.
+ * names one of the asker's letters or none. A question must offer at least one
+ * option: with none, the owner has only the note to answer in, so there is
+ * nothing to pick.
  */
 export function askOptions(texts: readonly string[], recommend: string | null): AskOption[] {
-  if (texts.length > ASK_LIMITS.options) throw new Error(`a question takes at most ${ASK_LIMITS.options} options`);
+  if (texts.length === 0 || texts.length > ASK_LIMITS.options) throw new Error(`a question takes 1 to ${ASK_LIMITS.options} options`);
   const options = texts.map((raw, index) => {
     const letter = String.fromCharCode(65 + index);
     const text = raw.trim();
@@ -284,15 +287,25 @@ function optionLines(ask: Ask): string[] {
   return ask.options.map((option) => `- ${option.letter}${option.recommended ? " (recommended)" : ""}: ${option.text}`);
 }
 
-/** The owner's answer as typed: the picked option, then the typed text. Throws when it says nothing or names no option. */
+/**
+ * The owner's answer as typed: the picked option, then the note. The letter
+ * names one of the card's choices, the same ones the page drew, so the Pause
+ * choice it adds is an answer like any other. The note choice answers with
+ * the note, which it requires. Throws when it says nothing or names no
+ * choice.
+ */
 export function answerText(ask: Ask, answer: AskAnswer): string {
   const note = answer.text.trim();
-  if (answer.option === null) {
+  const option = answer.option === null ? undefined : choiceFor(ask.options, answer.option);
+  if (answer.option !== null && option === undefined) throw new Error(`there is no option ${answer.option}`);
+  if (isNoteChoice(ask.options, option)) {
+    if (note === "") throw new Error('"Answer in the note below" takes an answer in the note');
+    return note;
+  }
+  if (option === undefined) {
     if (note === "") throw new Error("the answer is empty");
     return note;
   }
-  const option = ask.options.find((candidate) => candidate.letter === answer.option);
-  if (option === undefined) throw new Error(`there is no option ${answer.option}`);
   const picked = `${option.letter}: ${option.text}`;
   return note === "" ? picked : `${picked}\n${note}`;
 }

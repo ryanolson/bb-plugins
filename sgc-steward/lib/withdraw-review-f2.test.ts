@@ -8,7 +8,7 @@ test("withdraw review F2: a temporary thread lookup failure keeps the notice ret
   t.after(() => harness.lifecycle.dispose());
   await harness.behavior.setSettings({ stewardThread: "thr_steward" });
   const issue = linear.addIssue("TEAM-1", ["checkin"]);
-  const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Still waiting?", "--issue", issue.identifier, "--json"], { threadId: "thr_asker" });
+  const asked = await harness.behavior.runCli(["ask", "--label", "Test project", "--question", "Still waiting?", "--option", "Yes.", "--issue", issue.identifier, "--json"], { threadId: "thr_asker" });
   assert.equal(asked.exitCode, 0, asked.stderr);
   const { id } = JSON.parse(asked.stdout) as { id: string };
   let lookups = 0;

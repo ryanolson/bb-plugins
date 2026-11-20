@@ -195,6 +195,8 @@ function LinearCard({ card, onAnswered }: { card: Extract<Card<IssueView, AskVie
           <div className="rounded-md bg-secondary/40 px-3 py-2">
             <Markdown content={card.block.body} className="text-sm" />
           </div>
+          {/* A block not in the question format has no options of its own, so its
+              card offers the note and Pause, as a question with none does. */}
           <AnswerFields name={block.commentId} label="Answer" options={[]} draft={draft} onChange={setDraft} />
         </>
       ) : (
@@ -236,7 +238,7 @@ function AskCard({ ask, onAnswered }: { ask: AskView; onAnswered: () => void }) 
   const [draft, setDraft] = useState<AskDraft>({ option: null, text: "" });
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const input = askAnswerInput(ask.id, draft);
+  const input = askAnswerInput(ask.id, draft, ask.options);
   const who = ask.threadTitle || ask.threadId;
   const options = [...ask.options].sort((a, b) => Number(b.recommended) - Number(a.recommended));
 

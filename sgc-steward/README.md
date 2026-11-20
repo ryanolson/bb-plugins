@@ -39,10 +39,11 @@ Q3. Anything else before the next run?
 - Each question starts a line with `Q1.`, `Q2.`, and so on, in order.
 - Options follow their question as `- A:`, `- B:`, and so on, in order. `*` and `+` bullets also work.
 - At most one option per question is marked `(recommended)`. The page shows it first.
-- A question with no options takes a typed answer.
+- A question with no options takes a typed answer. Its card offers "Answer in the note below" and then Pause, and the note is the answer: Send waits for it. An ask stored before the note existed holds Pause alone, so its card puts the note first on the next free letter and leaves Pause its own, and an answer already given keeps its meaning.
+- The card adds Pause on the next free letter, so a question with 25 options gets Z for it; with all 26 letters in use, the card shows the asker's options and adds nothing, rather than letter a choice `[`.
 - Any other line continues the question above it. An indented line continues the option above it.
 
-The page shows a comment that breaks these rules as written, with the reason, and takes a typed answer for it.
+The page shows a comment that breaks these rules as written, with the reason, and takes an answer for it: the note choice, or Pause, with or without a note.
 
 ## Markdown in questions
 
@@ -151,7 +152,7 @@ bb plugins cannot send a mobile push. The push-notifications plugin sends pushes
 ## CLI
 
 ```
-bb sgc ask --question <text> | --question-file <file> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
+bb sgc ask --question <text> | --question-file <file> --option <text> [--option <text>]... [--recommend <letter|none>] [--issue <TEAM-12>] [--urgent] --label <project name> [--thread <id>] [--json]
 bb sgc withdraw <id> [--reason <text>] [--thread <id>] [--json]
 bb sgc questions [--json] [--cached] [--label <name>]... [--match any|all]
 bb sgc answer-of <id> [--json]
@@ -164,12 +165,12 @@ bb sgc hosts [--digest] [--json]
 bb sgc key --api-key-stdin
 ```
 
-- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with at most 3 options of at most 25 words each; `ask` refuses more with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. An unanswered question expires 3 days after it was asked, or 1 day with `--urgent`; see "Expiry". The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
+- `ask` stores a question from the calling thread, or the `--thread` you name, and prints its id. Options get letters A, B, and so on, and A is recommended unless `--recommend` says otherwise. A question is at most 80 words (and 4000 characters), with 1 to 3 options of at most 25 words each; `ask` refuses any other number with code `invalid`. Every question also gets a last option, "Pause it: stop this work for now, and resume it later.", which is never recommended and counts against no limit. `--label` is required, exactly once, at most 80 characters: the name of one of the team's Linear projects that is not completed or canceled, in any case. Each poll reads the project names and the plugin keeps the last good list in memory; a failed read keeps the old list. With no list yet, because Linear is not set up or no poll has finished, any label is taken and `ask` prints a `Warning:` line (`warnings` with `--json`). Stored questions from before these limits keep their data and are not checked again. An unanswered question expires 3 days after it was asked, or 1 day with `--urgent`; see "Expiry". The same open question from the same thread returns its id again, and keeps the label it was first asked with. A thread can have 10 open questions, and all threads 50.
 - `ask` also warns, in one more line that starts with `Warning:` (with `--json`, in a `warnings` list), when the question or an option holds a table the page will show as plain text. It parses the text as the page does (GFM and math blocks) and looks for two or more lines in one paragraph that start and end with `|`. A table the page draws, and pipes inside code, HTML or math, never count. The usual cause is a missing delimiter row, or one with the wrong number of cells. It still stores the question as written. Withdraw it and ask again to fix the table.
 - `withdraw` closes a question that the calling thread asked. `--thread` names that thread when you run the command outside a thread. `--reason` is stored with the question. The CLI cannot withdraw another thread's question, not even for the steward, which uses its agent tool instead.
 
 - `questions` polls Linear and prints each open question, both kinds, with the recommended option first, and each block as `<comment id>@<revision>`. It also lists the answers that did not go out. `--cached` prints the last poll and reads nothing. `--label` lists only the questions that have that label, in any case. Give it again for more: a question then needs any one of them, or, with `--match all`, every one; any is the default, as Linear's label filter starts. A Linear question carries its issue's labels, a label in a label group as `group/name`, such as `area/gdl`, so one filter covers both kinds. `--json` shows the labels of each issue and each bb question. It exits 1 when Linear is not set up or could not be read, or an issue's comments could not be read.
-- `answer-of` prints a bb question as the plugin stored it: the asking thread, its issue, the question and options as asked, its status (`open`, `answered`, or `withdrawn`), and, once answered, the time in RFC 3339, the `channel`, the picked `option` as its letter and text or `null` for a typed answer, and the typed `text` or note. It reads nothing from Linear. It exits 0 for a known id, and 1 for an unknown one, or for a stored answer that names an option its question does not have, which only an edit outside the plugin makes.
+- `answer-of` prints a bb question as the plugin stored it: the asking thread, its issue, the question and options as asked, its status (`open`, `answered`, or `withdrawn`), and, once answered, the time in RFC 3339, the `channel`, the picked `option` as its letter and text or `null` for a typed answer, and the typed `text` or note. It reads nothing from Linear. The picked choice is the one the card showed, so it may be the Pause every card adds, or the note a question with no options offers; the note comes back as a typed answer, with no `option`. It exits 0 for a known id, and 1 for an unknown one, or for a stored answer that names a choice the card never showed, which only an edit outside the plugin makes.
 - `answer` posts one comment: a header line that names each `--block`, then the file's text, quoted line by line. Number the answers to match: `Q1. A`. Name each block the text answers, as `questions` prints it; it answers each one whole. It refuses when a named block changed or closed, when the text starts with `[agent:`, and when the issue has no open questions. It reads the file on the machine of the thread that runs it. Outside a thread, it reads the file on the `--machine` you name, or else on the bb server's machine.
 - `todos` polls Linear and prints your todos, each with its link and its task lines. `--cached` prints the last poll and reads nothing. It exits 1 when Linear is not set up or the todos could not be read.
 - `paused` lists the paused issues and the questions that expired in the last 14 days, as the Paused tab does. `--json` prints `paused`, `pausedError`, and `expired`. It exits 1 when Linear is not set up or the paused issues could not be read.
@@ -196,6 +197,7 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 
 - **A state change that two paths can make must be one conditional write.** An answer, a withdrawal, and an expiry each move an open question on. Each does `UPDATE ... WHERE state = 'open'` inside the transaction that keeps its notice, and checks `changes`; a read of the state first is not enough. The loser saves nothing. The first expiry design read the question, awaited a thread lookup, and then wrote; the write still must not trust that read. Tests: `an answer that lands first wins, and an expired question takes no answer or withdrawal` in `lib/expiry.test.ts`.
 - **Page code must never import a module that reaches a `node:` builtin.** The page is bundled for the browser. `app.tsx` once imported `appLink` from `lib/paused.ts`, which reaches `lib/questions.ts` and `node:crypto`; every server test passed, and `bb plugin update` failed at the page build. Keep what the page needs in browser-safe modules such as `lib/links.ts`, and use `import type` for types. Test: `lib/page-imports.test.ts` walks the page's import graph.
+- **A card's added choice never takes a letter past Z.** `cardChoices` letters Pause, or the note, on the next free letter, and a question with all 26 letters in use gets no added Pause, so a letter always fits the answer schema's A–Z and no option already answered is renamed. Test: `no added choice takes a letter past Z` in `lib/choices.test.ts`.
 - **Test time with the injected clock, never with a sleep.** `createAskStore(db, now)` and `setup({ now })` take the clock; expiry tests move it by whole days and poll.
 
 ## Develop
@@ -216,6 +218,7 @@ bb plugin logs sgc-steward
 - `lib/asks.ts`: checks for `bb sgc ask` and the text of what goes back: the message to the thread and the Linear record.
 - `lib/ask-store.ts`: the SQLite tables for bb questions, deliveries, and records.
 - `lib/linear.ts`: the Linear GraphQL client, and posting a comment under the id its answer derives.
+- `lib/choices.ts`: the choices a question card offers: the asker's options, then Pause, and for a question with none, the note to answer in. The page and the server both use it, so a letter names the same text on both.
 - `lib/panel.ts`: the page's tabs, answer drafts, card order, badges, and notification text.
 - `lib/contract.ts`: the RPC contract between the server and the page, and the shapes the page shows.
 - `lib/views.ts`: the stored rows mapped to the shapes the page and `bb sgc questions --json` show.
@@ -234,6 +237,6 @@ bb plugin logs sgc-steward
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
 - `app.tsx`: the SGC questions page with its Questions, Todos, and Hosts tabs, its sidebar badge, and the notifier.
-- `components/answer-fields.tsx`: a question card's options, rendered as Markdown, and its answer box.
+- `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

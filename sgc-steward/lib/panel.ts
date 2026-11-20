@@ -1,6 +1,7 @@
 // The pure logic behind the Questions page and the notifier, kept out of the
 // React code so it can be tested without a DOM.
 
+import { noteRequired, type Choice } from "./choices.ts";
 import type { DeliveryView, Panel } from "./contract.ts";
 import type { HostsView } from "./hosts.ts";
 import type { BlockAnswer, Question, QuestionBlock } from "./questions.ts";
@@ -69,8 +70,9 @@ export interface AskDraft {
 
 /**
  * The `questions.answer` input for one card: one question of a block, or a
- * block not in the question format (`question` null). Null when the draft
- * says nothing yet. The revision is the one the card shows.
+ * block not in the question format (`question` null), which carries the choice
+ * the card showed instead of a question's answers. Null when the draft says
+ * nothing yet. The revision is the one the card shows.
  */
 export function questionAnswerInput(
   issueId: string,
@@ -78,17 +80,22 @@ export function questionAnswerInput(
   question: number | null,
   draft: AskDraft,
 ): { issueId: string; blocks: BlockAnswer[] } | null {
+  // A block not in the question format has no options of its own: its card
+  // offers the note, then Pause, and the picked letter goes with the answer.
+  const asked = question === null || block.format !== "parsed" ? undefined : block.questions.find((candidate) => candidate.number === question);
   if (draft.option === null && draft.text.trim() === "") return null;
+  if (noteRequired(asked?.options ?? [], draft.option) && draft.text.trim() === "") return null;
   const answer: BlockAnswer =
     question === null
-      ? { blockId: block.commentId, revision: block.revision, answers: [], text: draft.text }
+      ? { blockId: block.commentId, revision: block.revision, answers: [], text: draft.text, ...(draft.option === null ? {} : { option: draft.option }) }
       : { blockId: block.commentId, revision: block.revision, answers: [{ number: question, option: draft.option, text: draft.text }] };
   return { issueId, blocks: [answer] };
 }
 
-/** The `asks.answer` input, or null when the draft says nothing yet. */
-export function askAnswerInput(id: string, draft: AskDraft): { id: string; option: string | null; text: string } | null {
+/** The `asks.answer` input, or null when the draft says nothing yet, or picked the note and typed none. */
+export function askAnswerInput(id: string, draft: AskDraft, options: readonly Choice[]): { id: string; option: string | null; text: string } | null {
   if (draft.option === null && draft.text.trim() === "") return null;
+  if (noteRequired(options, draft.option) && draft.text.trim() === "") return null;
   return { id, option: draft.option, text: draft.text };
 }
 
