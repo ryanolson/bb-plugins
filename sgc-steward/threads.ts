@@ -29,9 +29,12 @@ import {
   protectionOf,
   safetyBlockers,
   cacheExpiry,
+  claimThread,
   classify,
   cacheLifeMs,
+  closureAt,
   decide,
+  briefIdentifier,
   formatExpiresIn,
   issueFor,
   titleIdentifier,
@@ -40,6 +43,7 @@ import {
   type EnvFacts,
   type LifecycleAction,
   type IssueFacts,
+  type IssueLink,
   type IssueWithComments,
   type LifecycleContext,
   type ThreadFacts,
@@ -124,7 +128,15 @@ function withComments(issue: LifecycleIssue): IssueWithComments {
   };
 }
 
-const asFacts = ({ comments: _comments, ...facts }: IssueWithComments): IssueFacts => facts;
+const asFacts = (issue: IssueWithComments, threadId: string, link: IssueLink): IssueFacts => {
+  const { comments, ...facts } = issue;
+  return { ...facts, link, closureAt: closureAt(comments, threadId) };
+};
+
+/** A strong link: the thread claimed the issue in a comment, or its title names it. */
+function linkOf(issue: IssueWithComments, threadId: string): IssueLink {
+  return issue.comments.some((comment) => claimThread(comment.body) === threadId.toLowerCase()) ? "claim" : "title";
+}
 
 
 /** Whether a remote has a branch of this name. A failed or cut-off read says no. */
@@ -169,6 +181,7 @@ export function createThreads(deps: ThreadsDeps) {
   const { db, sdk, now } = deps;
   const usage = new Map<string, { key: string; used: number | null; window: number | null; offer: number | null; cost: ThreadFacts["cost"] }>();
   const models = new Map<string, string>();
+  const briefs = new Map<string, string | null>();
 
   const loadSnapshot = db.prepare("SELECT body FROM thread_snapshot WHERE id = 1");
   const saveSnapshot = db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET taken_at = excluded.taken_at, body = excluded.body");
@@ -238,6 +251,34 @@ export function createThreads(deps: ThreadsDeps) {
     }
   }
 
+  /**
+   * A thread's brief: its first user turn, where its issue id usually is. Read
+   * only when the title and the claims name no issue, and kept for good: the
+   * first turn never changes. A failed read is not kept, so the next pass asks
+   * again.
+   */
+  async function readBrief(threadId: string): Promise<string | null> {
+    const known = briefs.get(threadId);
+    if (known !== undefined) return known;
+    try {
+      const [first] = await sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "asc", limit: "1" });
+      const text =
+        first === undefined || first.type !== "client/turn/requested"
+          ? ""
+          : first.data.input
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n")
+              .trim();
+      const brief = text === "" ? null : text;
+      briefs.set(threadId, brief);
+      return brief;
+    } catch (error) {
+      deps.log(`could not read the brief of ${threadId}: ${message(error)}`);
+      return null;
+    }
+  }
+
   /** The count of queued turns and the creation time of the oldest; read only for a thread bb says has queued work. */
   async function readQueue(thread: { id: string; queuedWork: string }): Promise<{ count: number; oldest: number | null }> {
     if (thread.queuedWork === "none") return { count: 0, oldest: null };
@@ -272,6 +313,9 @@ export function createThreads(deps: ThreadsDeps) {
     return {
       issue: issue?.identifier ?? null,
       issueState: issue?.stateName ?? null,
+      issueLink: issue?.link ?? null,
+      closedByComment: issue?.closureAt ?? null,
+      children: (facts.descendants ?? []).map((child) => child.id),
       status: facts.status,
       providerId: facts.providerId,
       model: facts.model,
@@ -346,14 +390,15 @@ export function createThreads(deps: ThreadsDeps) {
     const at = now();
     const listed = await listThreads();
     const childrenOf = new Map<string, string[]>();
-    // An archive follows the parent and the lifecycle owner alike, so both edges are walked.
+    // An archive follows the parent and the lifecycle owner alike, and a thread that spawned another answers for it too.
     for (const row of listed) {
-      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId])) {
+      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId, row.sourceThreadId])) {
         if (owner !== null) childrenOf.set(owner, [...(childrenOf.get(owner) ?? []), row.id]);
       }
     }
     const byId = new Map(listed.map((row) => [row.id, row]));
-    const below = (id: string, seen: Set<string> = new Set()): string[] => {
+    // The root is in `seen` from the start, so a fork edge back to it cannot make a thread its own descendant.
+    const below = (id: string, seen: Set<string> = new Set([id])): string[] => {
       const out: string[] = [];
       for (const child of childrenOf.get(id) ?? []) {
         if (seen.has(child)) continue;
@@ -380,9 +425,14 @@ export function createThreads(deps: ThreadsDeps) {
     const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
       if (only !== undefined && !options.lookup) return options.issue;
       if ("error" in linear) return undefined;
-      const found = issueFor(thread, linear.issues, linear.teamKey);
-      if (found !== null) return asFacts(found);
-      const identifier = titleIdentifier(thread.title, linear.teamKey);
+      const strong = issueFor(thread, linear.issues, linear.teamKey);
+      if (strong !== null) return asFacts(strong, thread.id, linkOf(strong, thread.id));
+      // The title and the claims named nothing: the brief may name the issue, and a weak link may label the thread but never finish it.
+      const brief = await readBrief(thread.id);
+      const weak = issueFor(thread, linear.issues, linear.teamKey, brief);
+      if (weak !== null) return asFacts(weak, thread.id, "brief");
+      const named = titleIdentifier(thread.title, linear.teamKey);
+      const identifier = named ?? briefIdentifier(brief ?? "", linear.teamKey);
       if (identifier === null) return null;
       // An issue older than the lookback: ask for it by name.
       if (!issueCache.has(identifier)) {
@@ -394,7 +444,8 @@ export function createThreads(deps: ThreadsDeps) {
         }
       }
       const older = issueCache.get(identifier);
-      return older === undefined || older === null ? null : asFacts(older);
+      if (older === undefined || older === null) return null;
+      return asFacts(older, thread.id, named === null ? "brief" : linkOf(older, thread.id));
     };
 
     const wanted = only === undefined ? listed : listed.filter((thread) => thread.id === only);
@@ -424,6 +475,7 @@ export function createThreads(deps: ThreadsDeps) {
           const child = byId.get(childId)!;
           return {
             id: childId,
+            title: child.title ?? child.titleFallback ?? childId,
             protectedBy: protectionOf({ id: childId, pinned: child.pinnedAt !== null }, { now: at, stewardThread: settings.stewardThread, keptUntil: kept.get(childId) ?? null }),
             environmentId: child.environmentId,
             busy:
@@ -565,7 +617,7 @@ export function createThreads(deps: ThreadsDeps) {
     // Kept before the send, so a crash after it does not send twice; a send that failed is forgotten, so the next pass tries again.
     setFlag.run(id, now());
     try {
-      await deps.send(steward, `[sgc-steward] Thread ${id} stuck: ${entry.row.reason}`);
+      await deps.send(steward, `[sgc-steward] Thread ${id} ${entry.row.state}: ${entry.row.reason}`);
     } catch (error) {
       // A reply that was lost may hide a message that landed, and the steward is told once a day at most, so the time stays: the next try is tomorrow.
       record(entry, "failed", { error: `could not tell the steward: ${message(error)}` });

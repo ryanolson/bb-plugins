@@ -47,7 +47,7 @@ export const SETTINGS = {
     type: "select",
     label: "Thread lifecycle mode",
     description:
-      "observe: the plugin decides what to do with each thread before its prompt cache expires, and only logs it. act: it also archives finished and parked threads, compacts large active ones, and tells the steward about stuck ones.",
+      "observe: the plugin decides what to do with each thread before its prompt cache expires, and only logs it. act: it also archives finished threads whose issue is Done or Canceled, compacts large active ones, and tells the steward about stuck, orphaned, or unfinished threads.",
     options: ["observe", "act"],
     default: "observe",
   },

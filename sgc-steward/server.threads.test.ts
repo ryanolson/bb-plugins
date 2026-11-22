@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ThreadsView } from "./threads.ts";
 import { HOUR, MINUTE } from "./lib/lifecycle.ts";
+import { LinearError } from "./lib/linear.ts";
 import type { DecisionRow } from "./lib/threads-view.ts";
 import { rejection, setup, type FakeIssue } from "./test-support.ts";
 
@@ -10,6 +11,10 @@ const START = Date.parse("2026-11-20T12:00:00Z");
 interface FakeThread {
   id: string;
   title: string;
+  titleFallback?: string | null;
+  /** The thread's first user turn, as `threads.events.list` returns it. */
+  brief?: string;
+  sourceThreadId?: string | null;
   status?: string;
   providerId?: string;
   parentThreadId?: string | null;
@@ -36,7 +41,8 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
   const row = (thread: FakeThread) => ({
     id: thread.id,
     title: thread.title,
-    titleFallback: null,
+    titleFallback: thread.titleFallback ?? null,
+    sourceThreadId: thread.sourceThreadId ?? null,
     status: thread.status ?? "idle",
     providerId: thread.providerId ?? "claude-code",
     parentThreadId: thread.parentThreadId ?? null,
@@ -76,6 +82,30 @@ async function lifecycleSetup(threads: FakeThread[], options: { key?: string | n
   sdk.stub("threads.queuedMessages.list", async (args: unknown) => {
     const thread = find(args);
     return thread.queuedMessageCount ? [{ id: "q1", threadId: thread.id, createdAt: thread.queuedAt ?? clock.now, state: "queued" }] : [];
+  });
+  sdk.stub("threads.events.list", async (args: unknown) => {
+    const thread = find(args);
+    if (thread.brief === undefined) return [];
+    return [
+      {
+        id: `evt_${thread.id}`,
+        scope: { kind: "thread" },
+        threadId: thread.id,
+        seq: 1,
+        createdAt: START,
+        type: "client/turn/requested",
+        data: {
+          direction: "outbound",
+          requestId: `req_${thread.id}`,
+          source: "spawn",
+          initiator: "user",
+          senderThreadId: null,
+          systemMessageKind: "unlabeled",
+          systemMessageSubject: null,
+          input: [{ type: "text", text: thread.brief }],
+        },
+      },
+    ];
   });
   sdk.stub("environments.status", async (args: unknown) => structuredClone(state.env.get((args as { environmentId: string }).environmentId) ?? CLEAN_ENV));
   sdk.stub("environments.diffBranches", async (args: unknown) => ({
@@ -561,7 +591,7 @@ test("an unsafe archive candidate is flagged to the steward with the reason", as
   t.state.env.set("env_thr_dirty", { ...CLEAN_ENV, workspace: { ...CLEAN_ENV.workspace, workingTree: { state: "dirty_uncommitted", hasUncommittedChanges: true } } });
   await t.pass();
   assert.deepEqual(t.acted, []);
-  assert.match(t.sends[0]!.input[0]!.text, /^\[sgc-steward\] Thread thr_dirty stuck: done but not safe to archive: the environment has uncommitted changes$/);
+  assert.match(t.sends[0]!.input[0]!.text, /^\[sgc-steward\] Thread thr_dirty done: done but not safe to archive: the environment has uncommitted changes$/);
 });
 
 test("a failed steward message is not sent again the same day, and is logged as failed", async () => {
@@ -690,21 +720,83 @@ test("Archive now refuses a parent whose child is pinned, dirty, or on a checkou
   assert.deepEqual(u.acted, ["compact thr_parent"]);
 });
 
-test("a clean idle child does not stop an archive of its parent, and a deeper descendant counts too", async () => {
+test("a live child stops an archive of its parent, and a deeper descendant counts too", async () => {
   const t = await lifecycleSetup([
     { id: "thr_parent", title: "p" },
     { id: "thr_kid", title: "k", parentThreadId: "thr_parent" },
     { id: "thr_grandkid", title: "g", parentThreadId: "thr_kid" },
   ]);
+  assert.match((await rejection(t.act("thr_parent", "archive"))).message, /child thr_kid is still live.*child thr_grandkid is still live/);
+  assert.deepEqual(t.acted, []);
+  // With the child archived first, the parent goes.
+  await t.act("thr_grandkid", "archive");
+  await t.act("thr_kid", "archive");
   await t.act("thr_parent", "archive");
-  assert.deepEqual(t.acted, ["archive thr_parent"]);
-  const u = await lifecycleSetup([
-    { id: "thr_parent", title: "p" },
-    { id: "thr_kid", title: "k", parentThreadId: "thr_parent" },
-    { id: "thr_grandkid", title: "g", parentThreadId: "thr_kid" },
+  assert.deepEqual(t.acted, ["archive thr_grandkid", "archive thr_kid", "archive thr_parent"]);
+});
+
+// --- a live child, the brief, and a failed Linear read ----------------------
+
+test("act mode leaves today's planner and the untitled thread that spawned it alone", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_parent", title: "", titleFallback: "Tell me about TEAM-1833", brief: "Tell me about TEAM-1833" },
+      { id: "thr_planner", title: "Planner: k8s-guard pre-made namespaces", parentThreadId: "thr_parent", brief: "## TEAM-1833: plan only\n\nPlanner: read only. No code." },
+    ],
+    { settings: ACT },
+  );
+  const issue = t.issue("TEAM-1833", "state-todo", ["approved"]);
+  for (const at of [START - 50 * MINUTE, START + 8 * HOUR, START + 25 * HOUR]) {
+    t.clock.now = at;
+    await t.pass();
+  }
+  assert.deepEqual(t.acted, []);
+  assert.equal(issue.comments.length, 0);
+  assert.ok((await t.log()).every((row) => row.decision !== "archive"));
+  const view = await t.list();
+  assert.equal(byId(view, "thr_planner").state, "idle-active");
+  assert.equal(byId(view, "thr_planner").issue?.identifier, "TEAM-1833", "the brief names the issue");
+  assert.equal(byId(view, "thr_parent").issue?.identifier, "TEAM-1833", "so does the untitled thread's failed title");
+  assert.equal(byId(view, "thr_parent").state, "idle-active", "an owned thread is not an orphan");
+});
+
+test("act mode archives a live child first, and its done parent in a later pass", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_parent", title: "1: finished" },
+      { id: "thr_kid", title: "1: the child", parentThreadId: "thr_parent" },
+    ],
+    { settings: ACT },
+  );
+  t.issue("TEAM-1", "state-done");
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_kid"]);
+  t.clock.now += 5 * MINUTE;
+  await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_kid", "archive thr_parent"]);
+});
+
+test("Archive now refuses a thread whose spawned thread is live", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_source", title: "1: finished" },
+    { id: "thr_fork", title: "1: the fork", sourceThreadId: "thr_source" },
   ]);
-  u.state.env.set("env_thr_grandkid", DIRTY);
-  assert.match((await rejection(u.act("thr_parent", "archive"))).message, /child thr_grandkid.*uncommitted/);
+  assert.match((await rejection(t.act("thr_source", "archive"))).message, /child thr_fork is still live/);
+  assert.deepEqual(t.acted, []);
+});
+
+test("a failed or rate-limited Linear read archives nothing and flags nothing", async () => {
+  const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
+  t.issue("TEAM-1", "state-done");
+  t.linear.listLifecycleIssues = async () => {
+    throw new LinearError("rate-limit", "Linear rate limit");
+  };
+  await t.pass();
+  assert.deepEqual(t.acted, []);
+  assert.deepEqual(t.sends, []);
+  const view = await t.list();
+  assert.match(view.linearError ?? "", /rate limit/i);
+  assert.ok(!["archive", "flag"].includes(byId(view, "thr_done").decision), byId(view, "thr_done").decision);
 });
 
 // --- cold threads, who acts, and a pushed branch ----------------------------
