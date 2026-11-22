@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { composeArchive, parentText, phaseOf, phaseTokensText, rollupText, whyText, type ArchiveChildView, type ArchiveRecord } from "./archive-view.ts";
+import { composeArchive, parentText, phaseOf, phaseTokensText, rollupText, startedText, whyText, type ArchiveChildView, type ArchiveRecord } from "./archive-view.ts";
 
 function record(id: string, extra: Partial<ArchiveRecord> = {}): ArchiveRecord {
   return {
@@ -91,4 +91,12 @@ test("compose survives a parent loop in recorded rows", () => {
   const records = [record("thr_a", { parentThreadId: "thr_b" }), record("thr_b", { parentThreadId: "thr_a" })];
   const view = composeArchive(["thr_a", "thr_b"], records, new Map(), 2, null);
   assert.deepEqual(view.rows.map((row) => row.children.map((entry) => entry.threadId)), [["thr_b"], ["thr_a"]]);
+});
+
+test("the start reads started, created, or created with a + when the start was not found", () => {
+  const at = (time: number) => `t${time}`;
+  assert.equal(startedText({ startedAt: 5, startedFrom: "first-turn" }, at), "started t5");
+  assert.equal(startedText({ startedAt: 5, startedFrom: "created" }, at), "created t5");
+  assert.equal(startedText({ startedAt: 5, startedFrom: "unknown" }, at), "created t5+ (start not found: more than 2,000 turns inherited from its source)");
+  assert.equal(startedText({ startedAt: null, startedFrom: "created" }, at), "started ?");
 });

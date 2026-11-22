@@ -252,7 +252,7 @@ const archiveViewSchema = z.object({
         provider: z.string().nullable(),
         model: z.string().nullable(),
         startedAt: z.number().nullable(),
-        startedFrom: z.enum(["first-turn", "created"]),
+        startedFrom: z.enum(["first-turn", "created", "unknown"]),
         archivedAt: z.number(),
         source: z.enum(["lifecycle", "page", "outside"]),
         state: z.string().nullable(),

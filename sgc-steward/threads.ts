@@ -15,7 +15,7 @@ import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk"
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import type { LifecycleIssue, LinearClient } from "./lib/linear.ts";
 import { Refusal } from "./lib/refusal.ts";
-import { composeArchive, parentText, type ArchiveRecord, type ArchiveSource, type ArchiveView } from "./lib/archive-view.ts";
+import { TURN_PAGE, TURN_PAGES, composeArchive, parentText, startedText, type ArchiveRecord, type ArchiveSource, type ArchiveView } from "./lib/archive-view.ts";
 import {
   type DecisionResult,
   type DecisionRow,
@@ -77,9 +77,6 @@ export const ARCHIVE_ROWS = 200;
 const MAX_ARCHIVE_ROWS = 500;
 /** How long a note of the plugin's own archive waits for bb's event before an event no longer counts as that archive. */
 const INTENT_MS = 10 * MINUTE;
-/** Started-turn events read per page, and the most pages read, when an archive looks for the first turn of its own. */
-const TURN_PAGE = 100;
-const TURN_PAGES = 20;
 /** Added to the reason when bb reported two archives during the plugin's request: one was the plugin's, and bb does not say which. */
 const TWO_ARCHIVES = "; another archive and an unarchive also happened while the plugin's request ran, and bb does not say which archive was the plugin's";
 /** Added to the reason when the plugin's archive call failed after an archive: it may have been someone else's. */
@@ -265,6 +262,7 @@ export function createThreads(deps: ThreadsDeps) {
   const fillUsage = db.prepare("UPDATE thread_archive SET used_tokens = @used_tokens WHERE thread_id = @thread_id AND archived_at = @archived_at AND used_tokens IS NULL");
   const startedFrom = db.prepare("SELECT started_from FROM thread_archive WHERE thread_id = ?");
   const fillStart = db.prepare("UPDATE thread_archive SET started_at = ?, started_from = 'first-turn' WHERE thread_id = ? AND started_from <> 'first-turn'");
+  const markStartUnknown = db.prepare("UPDATE thread_archive SET started_from = 'unknown' WHERE thread_id = ? AND started_from = 'created'");
   /** bb's reply says the plugin did not archive it after all: the archive its reason went to was someone else's. */
   const rewriteOutside = db.prepare(
     `UPDATE thread_archive SET source = 'outside', state = @state, reason = @reason, issue_identifier = @issue_identifier, issue_url = @issue_url,
@@ -590,7 +588,8 @@ export function createThreads(deps: ThreadsDeps) {
     let filled = false;
     if ((startedFrom.get(thread.id) as { started_from: string } | undefined)?.started_from !== "first-turn") {
       const first = await firstTurnAt(thread.id, thread.createdAt);
-      if (first !== null) filled = fillStart.run(first, thread.id).changes > 0 || filled;
+      if (first === "unknown") filled = markStartUnknown.run(thread.id).changes > 0 || filled;
+      else if (first !== null) filled = fillStart.run(first, thread.id).changes > 0 || filled;
     }
     if (facts === outside && seen === undefined) filled = (await fillUsageOf(thread.id, archivedAt)) || filled;
     if (filled) deps.archiveChanged();
@@ -613,9 +612,11 @@ export function createThreads(deps: ThreadsDeps) {
    * provisioning begins, and a request can be cancelled before any turn runs.
    * A turn older than the thread is no start either: bb copies a fork's
    * inherited turns into it with the source's times, so any turn event from
-   * before the thread was created is skipped.
+   * before the thread was created is skipped. It reads a bounded number of pages:
+   * when all of them are inherited history it returns "unknown", never a
+   * guess, and the row shows its creation time marked as a lower bound.
    */
-  async function firstTurnAt(threadId: string, createdAt: number): Promise<number | null> {
+  async function firstTurnAt(threadId: string, createdAt: number): Promise<number | null | "unknown"> {
     try {
       let afterSeq: string | undefined;
       for (let page = 0; page < TURN_PAGES; page += 1) {
@@ -625,7 +626,8 @@ export function createThreads(deps: ThreadsDeps) {
         if (batch.length < TURN_PAGE) return null;
         afterSeq = String(batch[batch.length - 1]!.seq);
       }
-      return null;
+      // Every page read was inherited history: the thread's own first turn, if any, is past the bound.
+      return "unknown";
     } catch (error) {
       deps.log(`could not read the first turn of archived ${threadId}: ${message(error)}`);
       return null;
@@ -1099,7 +1101,7 @@ interface ArchiveDbRow {
   provider: string | null;
   model: string | null;
   started_at: number | null;
-  started_from: "first-turn" | "created";
+  started_from: "first-turn" | "created" | "unknown";
   archived_at: number;
   source: ArchiveSource;
   state: string | null;
@@ -1136,7 +1138,7 @@ export function formatArchive(view: ArchiveView): string {
   for (const row of view.rows) {
     const { record } = row;
     lines.push(`${new Date(record.archivedAt).toISOString()}  ${record.threadId}  ${record.title}`);
-    const started = record.startedAt === null ? "started ?" : `${record.startedFrom === "first-turn" ? "started" : "created"} ${new Date(record.startedAt).toISOString()}`;
+    const started = startedText(record, (time) => new Date(time).toISOString());
     lines.push(`  ${started}; tokens ${row.tokens}${row.phaseTokens === null ? "" : `; children ${row.phaseTokens}`}`);
     lines.push(`  why: ${row.why}`);
     lines.push(`  ${row.summary}`);

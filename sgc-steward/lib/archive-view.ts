@@ -28,7 +28,8 @@ export interface ArchiveRecord {
   model: string | null;
   /** Epoch ms of the thread's first turn, or of its creation when bb had no turn for it; `startedFrom` says which. */
   startedAt: number | null;
-  startedFrom: "first-turn" | "created";
+  /** `unknown`: every turn read was inherited history, so the start is later than `startedAt`, the creation time, and not known. */
+  startedFrom: "first-turn" | "created" | "unknown";
   /** Epoch ms of the latest archive. */
   archivedAt: number;
   source: ArchiveSource;
@@ -284,8 +285,21 @@ export function coverageText(view: Pick<ArchiveView, "recordedSince">): string |
   return `Covers archives recorded since ${new Date(view.recordedSince).toLocaleString()}. Earlier archives, and any while the plugin was stopped, are not in these rows or roll-ups.`;
 }
 
-/** `started 10:02`, or `created 10:02` when bb had no first turn; `?` when neither is known. */
-export function startedText(record: Pick<ArchiveRecord, "startedAt" | "startedFrom">): string {
+/**
+ * `started 10:02`; `created 10:02` when the thread ran no turn of its own;
+ * `created 10:02+ (start not found ...)` when the lookup reached its bound in
+ * inherited history, so the start is some time after creation; `started ?`
+ * when nothing is known.
+ */
+export function startedText(record: Pick<ArchiveRecord, "startedAt" | "startedFrom">, at: (time: number) => string = (time) => new Date(time).toLocaleString()): string {
   if (record.startedAt === null) return "started ?";
-  return `${record.startedFrom === "first-turn" ? "started" : "created"} ${new Date(record.startedAt).toLocaleString()}`;
+  if (record.startedFrom === "first-turn") return `started ${at(record.startedAt)}`;
+  if (record.startedFrom === "unknown") return `created ${at(record.startedAt)}+ (${START_UNKNOWN})`;
+  return `created ${at(record.startedAt)}`;
 }
+
+/** Why a start is unknown: the bounded lookup read only inherited turns. */
+/** Started-turn events read per page, and the most pages read, when an archive looks for the first turn of its own. */
+export const TURN_PAGE = 100;
+export const TURN_PAGES = 20;
+export const START_UNKNOWN = `start not found: more than ${(TURN_PAGE * TURN_PAGES).toLocaleString("en-US")} turns inherited from its source`;

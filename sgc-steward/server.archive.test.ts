@@ -512,3 +512,17 @@ test("a fork that inherited more than a page of turns still finds the first turn
   const row = rowOf(await t.archive(), "thr_long_fork");
   assert.deepEqual([row.record.startedAt, row.record.startedFrom], [START - MINUTE, "first-turn"]);
 });
+
+test("at the turn lookup's bound a fork's start is marked unknown, never guessed: 1,999 inherited turns find it, 2,000 do not", async () => {
+  const fork = (id: string, inheritedTurns: number) => ({ id, title: id, createdAt: START - 3 * MINUTE, inheritedTurnAt: START - 10 * MINUTE, inheritedTurns, firstTurnAt: START - MINUTE });
+  const t = await lifecycleSetup([fork("thr_1999", 1_999), fork("thr_2000", 2_000)]);
+  await t.emitArchived("thr_1999", START);
+  await t.emitArchived("thr_2000", START);
+  const view = await t.archive();
+  // 1,999 inherited turns and its own make 20 full pages: its own turn is the last one read.
+  assert.deepEqual([rowOf(view, "thr_1999").record.startedAt, rowOf(view, "thr_1999").record.startedFrom], [START - MINUTE, "first-turn"]);
+  // 2,000 inherited turns fill every page the lookup reads, so the start is unknown: the row keeps the creation time as a lower bound.
+  assert.deepEqual([rowOf(view, "thr_2000").record.startedAt, rowOf(view, "thr_2000").record.startedFrom], [START - 3 * MINUTE, "unknown"]);
+  const text = await t.harness.behavior.runCli(["threads", "archive"], { threadId: "thr_steward" });
+  assert.match(text.stdout, /created 2026-11-20T11:57:00\.000Z\+ \(start not found: more than 2,000 turns inherited from its source\)/);
+});
