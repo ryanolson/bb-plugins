@@ -282,3 +282,27 @@ test("a stale completion replay frees zero GPUs", () => {
   assert.equal(store.completeClaimed(second.id, uid, fresh, []).freed, 0);
   assert.equal(store.used("gb300"), 0);
 });
+
+test("a completion while a write attempt is still open frees nothing", () => {
+  const db = new Database(":memory:");
+  for (const statement of MIGRATIONS) db.exec(statement);
+  const store = createStore(db, () => T0);
+  const cfg: Config = {
+    limits: { gb300: 4 }, maxLeaseMs: 4 * HOUR, maxRenewals: 1, graceMs: 60 * MIN, maxExtendMs: 24 * HOUR, clusters: {},
+    firstRuns: {}, multiNode: [], hosts: [HOST_ONE], profilesCommand: "k8s-check",
+    run: { command: "k8s-guard", serverUrl: "http://127.0.0.1:1", kubeconfig: null },
+  };
+  store.heartbeat(HOST_ONE, true, "ok");
+  const uid = "00000000-0000-4000-8000-0000000000bb";
+  const row = store.claim({ cluster: CLUSTER_A, context: CLUSTER_A, namespace: PREMADE, uid, gpuType: "gb300", gpus: 2, hours: 2, approvals: null, id: "lse_openatt0001", request: "req_openattempt1", thread: THREAD_A, replaces: null }, cfg, 10 * MIN, true).row;
+  const slot = store.opBegin(row.id, THREAD_A, "tok_openatt0001", 2 * MIN, cfg);
+  store.attemptBegin(row.id, THREAD_A, slot.token, { attempt: "att_stillopen001", verb: "create", kind: "DynamoGraphDeployment", name: "w", uid: null, rv: null }, cfg);
+  store.release(row.id, THREAD_A, cfg);
+  // The epoch is current, so only the open attempt stands in the way.
+  const epoch = store.find(row.id)!.attempt_epoch;
+  assert.equal(store.completeClaimed(row.id, uid, epoch, []).freed, 0);
+  assert.equal(store.find(row.id)!.state, "releasing");
+  assert.equal(store.used("gb300"), 2);
+  store.resolveAttempts(row.id, [{ attempt: "att_stillopen001", outcome: "committed" }]);
+  assert.equal(store.completeClaimed(row.id, uid, store.find(row.id)!.attempt_epoch, []).freed, 2);
+});
