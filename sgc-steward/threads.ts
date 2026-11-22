@@ -11,10 +11,11 @@
 // the question poll.
 
 import type Database from "better-sqlite3";
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { PluginCliError, cliCommand } from "@get-bb/plugin-sdk";
 import type { LifecycleIssue, LinearClient } from "./lib/linear.ts";
 import { Refusal } from "./lib/refusal.ts";
+import { TURN_PAGE, TURN_PAGES, composeArchive, parentText, startedText, type ArchiveRecord, type ArchiveSource, type ArchiveView } from "./lib/archive-view.ts";
 import {
   type DecisionResult,
   type DecisionRow,
@@ -71,6 +72,35 @@ export const FLAG_EVERY_MS = 24 * HOUR;
 /** How long Keep protects a thread. */
 export const KEEP_MS = 24 * HOUR;
 
+/** How many archived threads the Archive tab shows, newest first, and the most the CLI lists. */
+export const ARCHIVE_ROWS = 200;
+const MAX_ARCHIVE_ROWS = 500;
+/** How long a note of the plugin's own archive waits for bb's event before an event no longer counts as that archive. */
+const INTENT_MS = 10 * MINUTE;
+/** Added to the reason when bb reported two archives during the plugin's request: one was the plugin's, and bb does not say which. */
+const TWO_ARCHIVES = "; another archive and an unarchive also happened while the plugin's request ran, and bb does not say which archive was the plugin's";
+/** Added to the reason when the plugin's archive call failed after an archive: it may have been someone else's. */
+const LOST_REPLY = "; the plugin's archive call failed, so this archive may be someone else's";
+
+/** The facts of an archive row that say why it went: the plugin's own reason, or the last snapshot's. */
+interface ArchiveFacts {
+  source: ArchiveSource;
+  state: string | null;
+  reason: string;
+  issue_identifier: string | null;
+  issue_url: string | null;
+  issue_state: string | null;
+  model: string | null;
+  used_tokens: number | null;
+  parent_thread_id: string | null;
+}
+
+/** The fields of bb's thread DTO that an archive or unarchive event records. */
+export type ArchivedThread = Pick<
+  PluginThreadEventPayloads["thread.archived"]["thread"],
+  "id" | "title" | "titleFallback" | "parentThreadId" | "lifecycleOwnerThreadId" | "providerId" | "createdAt" | "archivedAt"
+>;
+
 export interface ThreadsSettings {
   /** observe: only log decisions. act: carry them out. */
   mode: "observe" | "act";
@@ -94,6 +124,8 @@ export interface ThreadsDeps {
   steward(): Promise<string | null>;
   /** Send a message to a thread, queued if it is running. */
   send(threadId: string, text: string): Promise<void>;
+  /** Tell open pages that an archive row was written, so the Archive tab reads it without a refresh. */
+  archiveChanged(): void;
   log(text: string): void;
 }
 
@@ -201,6 +233,60 @@ export function createThreads(deps: ThreadsDeps) {
   const clearFlag = db.prepare("DELETE FROM thread_flags WHERE thread_id = ?");
   const keepStmt = db.prepare("INSERT INTO thread_keeps (thread_id, until, at) VALUES (?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET until = excluded.until, at = excluded.at");
   const activeKeeps = db.prepare("SELECT thread_id, until FROM thread_keeps WHERE until > ?");
+  const ARCHIVE_COLUMNS =
+    "thread_id, title, parent_thread_id, provider, model, started_at, started_from, archived_at, unarchived_at, source, state, reason, issue_identifier, issue_url, issue_state, used_tokens, archive_count";
+  /**
+   * The one write that makes an archive row, run only by bb's archive event,
+   * with no await before it: bb announces each archive and unarchive in
+   * order, so the rows follow bb's own order. It writes a new archive: no row,
+   * a row that was unarchived, or a row older than this archive (an unarchive
+   * the plugin missed). The same archive announced twice changes nothing.
+   * Usage is never carried over: a new archive with no usage shows none.
+   */
+  const upsertArchive = db.prepare(
+    `INSERT INTO thread_archive (${ARCHIVE_COLUMNS}, first_archived_at) VALUES (
+       @thread_id, @title, @parent_thread_id, @provider, @model, @started_at, 'created', @archived_at, NULL,
+       @source, @state, @reason, @issue_identifier, @issue_url, @issue_state, @used_tokens, 1, @archived_at)
+     ON CONFLICT (thread_id) DO UPDATE SET
+       title = excluded.title, parent_thread_id = COALESCE(excluded.parent_thread_id, thread_archive.parent_thread_id),
+       provider = COALESCE(excluded.provider, thread_archive.provider), model = COALESCE(excluded.model, thread_archive.model),
+       started_at = CASE WHEN thread_archive.started_from = 'first-turn' THEN thread_archive.started_at ELSE excluded.started_at END,
+       started_from = thread_archive.started_from,
+       archived_at = excluded.archived_at, unarchived_at = NULL,
+       source = excluded.source, state = excluded.state, reason = excluded.reason, issue_identifier = excluded.issue_identifier,
+       issue_url = excluded.issue_url, issue_state = excluded.issue_state, used_tokens = excluded.used_tokens,
+       archive_count = thread_archive.archive_count + 1
+     WHERE thread_archive.unarchived_at IS NOT NULL OR excluded.archived_at > thread_archive.archived_at`,
+  );
+  // The reads after the write fill in only the archive they were read for.
+  const fillUsage = db.prepare("UPDATE thread_archive SET used_tokens = @used_tokens WHERE thread_id = @thread_id AND archived_at = @archived_at AND used_tokens IS NULL");
+  const startedFrom = db.prepare("SELECT started_from FROM thread_archive WHERE thread_id = ?");
+  const fillStart = db.prepare("UPDATE thread_archive SET started_at = ?, started_from = 'first-turn' WHERE thread_id = ? AND started_from <> 'first-turn'");
+  const markStartUnknown = db.prepare("UPDATE thread_archive SET started_from = 'unknown' WHERE thread_id = ? AND started_from = 'created'");
+  /** bb's reply says the plugin did not archive it after all: the archive its reason went to was someone else's. */
+  const rewriteOutside = db.prepare(
+    `UPDATE thread_archive SET source = 'outside', state = @state, reason = @reason, issue_identifier = @issue_identifier, issue_url = @issue_url,
+       issue_state = @issue_state, model = @model, used_tokens = @used_tokens
+     WHERE thread_id = @thread_id AND archived_at = @archived_at AND unarchived_at IS NULL AND source <> 'outside'`,
+  );
+  const markUnknown = db.prepare("UPDATE thread_archive SET reason = reason || @suffix WHERE thread_id = @thread_id AND archived_at = @archived_at");
+  const markUnarchived = db.prepare("UPDATE thread_archive SET unarchived_at = ? WHERE thread_id = ? AND unarchived_at IS NULL");
+  const countArchived = db.prepare(
+    "SELECT (SELECT COUNT(*) FROM thread_archive WHERE unarchived_at IS NULL) AS total, (SELECT MIN(first_archived_at) FROM thread_archive) AS since",
+  );
+  const newestArchived = db.prepare("SELECT thread_id FROM thread_archive WHERE unarchived_at IS NULL ORDER BY archived_at DESC, thread_id LIMIT ?");
+  // The newest rows, every still-archived row below them, and their parents' rows: everything the roll-ups join, from this table alone.
+  const relatedArchived = db.prepare(
+    `WITH RECURSIVE shown(id) AS (
+       SELECT thread_id FROM thread_archive WHERE unarchived_at IS NULL ORDER BY archived_at DESC, thread_id LIMIT @limit
+     ), tree(id) AS (
+       SELECT id FROM shown
+       UNION
+       SELECT a.thread_id FROM thread_archive a JOIN tree ON a.parent_thread_id = tree.id WHERE a.unarchived_at IS NULL
+     )
+     SELECT ${ARCHIVE_COLUMNS} FROM thread_archive
+     WHERE unarchived_at IS NULL AND (thread_id IN tree OR thread_id IN (SELECT parent_thread_id FROM thread_archive WHERE thread_id IN shown))`,
+  );
 
   let tail: Promise<unknown> = Promise.resolve();
   function locked<T>(work: () => Promise<T>): Promise<T> {
@@ -381,6 +467,188 @@ export function createThreads(deps: ThreadsDeps) {
     classification: Classification;
   }
 
+  /**
+   * The plugin's own archive, as bb's event for it will need it: why, and what
+   * the decision saw. Kept in memory from just before the plugin asks bb to
+   * archive until its reply is settled. Every event in that time gives its
+   * archive the note's facts, because an event cannot tell whose archive it
+   * announces; the reply decides, and puts back an archive that was not the
+   * plugin's. See `onArchived` for why the event, not the reply, writes rows.
+   */
+  interface ArchiveNote {
+    askedAt: number;
+    facts: ArchiveFacts;
+    /** Each archive an event gave the note's facts to, oldest first, with what an outside archive would have recorded. */
+    given: Array<{ archivedAt: number; outside: ArchiveFacts; seen: boolean }>;
+  }
+  const notes = new Map<string, ArchiveNote>();
+
+  /** Note why the plugin is about to archive a thread; returns when it asked. Call right before `sdk.threads.archive`. */
+  function intendArchive(entry: Entry, source: Exclude<ArchiveSource, "outside">, reason: string): number {
+    const { row, facts, issue } = entry;
+    const askedAt = now();
+    notes.set(row.id, {
+      askedAt,
+      facts: {
+        source,
+        state: row.state,
+        reason,
+        issue_identifier: issue?.identifier ?? null,
+        issue_url: issue?.url ?? null,
+        issue_state: issue?.stateName ?? null,
+        model: facts.model,
+        used_tokens: facts.usedTokens,
+        parent_thread_id: facts.parentThreadId ?? facts.ownerThreadId ?? null,
+      },
+      given: [],
+    });
+    return askedAt;
+  }
+
+  /**
+   * Settle the plugin's archive with bb's reply, or null when the call failed.
+   * It waits one macrotask first: bb queues the event for an archive it makes
+   * on a `setImmediate` before it replies, so by then every event for an
+   * archive made during the call has run. When bb names the thread, the
+   * plugin's archive is the latest one, and its row already has the note's
+   * facts; when two archives came during the call, bb does not say which was
+   * the plugin's, and the row says so. When bb does not name the thread,
+   * someone else archived it, and the row an event gave the note's facts is
+   * put back to what an outside archive records. A failed call cannot tell
+   * whose archive it was, so the row says it may be someone else's.
+   */
+  async function settleArchive(threadId: string, askedAt: number, archivedIds: readonly string[] | null): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const note = notes.get(threadId);
+    if (note === undefined || note.askedAt !== askedAt) return;
+    notes.delete(threadId);
+    const last = note.given.at(-1);
+    if (last === undefined) return;
+    if (archivedIds === null || archivedIds.includes(threadId)) {
+      // bb names no archiver and no time it handled the request, so these cases cannot be told apart: the row says so.
+      const unknown = archivedIds === null ? LOST_REPLY : note.given.length > 1 ? TWO_ARCHIVES : null;
+      if (unknown !== null && markUnknown.run({ suffix: unknown, thread_id: threadId, archived_at: last.archivedAt }).changes > 0) deps.archiveChanged();
+      return;
+    }
+    if (rewriteOutside.run({ ...last.outside, thread_id: threadId, archived_at: last.archivedAt }).changes === 0) return;
+    deps.archiveChanged();
+    if (!last.seen && (await fillUsageOf(threadId, last.archivedAt))) deps.archiveChanged();
+  }
+
+  /** What an outside archive records: the thread as the last snapshot saw it. */
+  function outsideFacts(seen: ThreadRowView | undefined): ArchiveFacts {
+    return {
+      source: "outside",
+      state: seen?.state ?? null,
+      reason: seen?.stateReason ?? "",
+      issue_identifier: seen?.issue?.identifier ?? null,
+      issue_url: seen?.issue?.url ?? null,
+      issue_state: seen?.issue?.stateName ?? null,
+      model: seen?.model ?? null,
+      used_tokens: seen?.usedTokens ?? null,
+      parent_thread_id: seen?.parentThreadId ?? null,
+    };
+  }
+
+  /**
+   * bb archived a thread. This is the only place an archive row is written,
+   * and nothing is awaited before the write: bb dispatches its events in
+   * order without waiting for a handler, so a write after an await, or a
+   * write on the plugin's own reply, can land after a later unarchive and
+   * bring the row back, or overwrite a later archive. The facts are the
+   * plugin's note while one is open, else the last snapshot's. The time is
+   * bb's. Reads come after: the first turn for the start, and usage for a
+   * thread the snapshot never held; each fills in only this archive's row.
+   */
+  async function onArchived(thread: ArchivedThread): Promise<void> {
+    const archivedAt = thread.archivedAt ?? now();
+    const seen = cached()?.threads.find((candidate) => candidate.id === thread.id);
+    const outside = outsideFacts(seen);
+    let note = notes.get(thread.id);
+    if (note !== undefined && archivedAt - note.askedAt > INTENT_MS) {
+      notes.delete(thread.id);
+      note = undefined;
+    }
+    if (note !== undefined && note.askedAt > archivedAt) note = undefined;
+    const facts = note === undefined ? outside : note.facts;
+    const written = upsertArchive.run({
+      ...facts,
+      thread_id: thread.id,
+      title: thread.title ?? thread.titleFallback ?? seen?.title ?? thread.id,
+      // bb may release a thread's children from their parent as it archives it, so the snapshot's parent stands in.
+      parent_thread_id: thread.parentThreadId ?? thread.lifecycleOwnerThreadId ?? facts.parent_thread_id,
+      provider: thread.providerId,
+      started_at: thread.createdAt,
+      archived_at: archivedAt,
+    });
+    if (written.changes === 0) return;
+    // Only an archive that made a write counts: the same archive announced twice must not look like a second one.
+    note?.given.push({ archivedAt, outside, seen: seen !== undefined });
+    deps.archiveChanged();
+    let filled = false;
+    if ((startedFrom.get(thread.id) as { started_from: string } | undefined)?.started_from !== "first-turn") {
+      const first = await firstTurnAt(thread.id, thread.createdAt);
+      if (first === "unknown") filled = markStartUnknown.run(thread.id).changes > 0 || filled;
+      else if (first !== null) filled = fillStart.run(first, thread.id).changes > 0 || filled;
+    }
+    if (facts === outside && seen === undefined) filled = (await fillUsageOf(thread.id, archivedAt)) || filled;
+    if (filled) deps.archiveChanged();
+  }
+
+  /** Read a thread's usage into the row of one archive, when that row has none. Returns whether it wrote. */
+  async function fillUsageOf(threadId: string, archivedAt: number): Promise<boolean> {
+    try {
+      const used = (await sdk.threads.context({ threadId })).usage?.usedTokens ?? null;
+      return used !== null && fillUsage.run({ used_tokens: used, thread_id: threadId, archived_at: archivedAt }).changes > 0;
+    } catch (error) {
+      deps.log(`could not read the context of archived ${threadId}: ${message(error)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Epoch ms the thread's own first turn started, or null when none did or bb
+   * could not say. A turn request is no start: bb records it when
+   * provisioning begins, and a request can be cancelled before any turn runs.
+   * A turn older than the thread is no start either: bb copies a fork's
+   * inherited turns into it with the source's times, so any turn event from
+   * before the thread was created is skipped. It reads a bounded number of pages:
+   * when all of them are inherited history it returns "unknown", never a
+   * guess, and the row shows its creation time marked as a lower bound.
+   */
+  async function firstTurnAt(threadId: string, createdAt: number): Promise<number | null | "unknown"> {
+    try {
+      let afterSeq: string | undefined;
+      for (let page = 0; page < TURN_PAGES; page += 1) {
+        const batch = await sdk.threads.events.list({ threadId, types: ["turn/started"], order: "asc", limit: String(TURN_PAGE), ...(afterSeq === undefined ? {} : { afterSeq }) });
+        const own = batch.find((event) => event.createdAt >= createdAt);
+        if (own !== undefined) return own.createdAt;
+        if (batch.length < TURN_PAGE) return null;
+        afterSeq = String(batch[batch.length - 1]!.seq);
+      }
+      // Every page read was inherited history: the thread's own first turn, if any, is past the bound.
+      return "unknown";
+    } catch (error) {
+      deps.log(`could not read the first turn of archived ${threadId}: ${message(error)}`);
+      return null;
+    }
+  }
+
+  /** bb unarchived a thread: its row leaves the tab, and a later archive updates the same row. */
+  function onUnarchived(thread: Pick<ArchivedThread, "id">): void {
+    if (markUnarchived.run(now(), thread.id).changes > 0) deps.archiveChanged();
+  }
+
+  /** The newest archived threads with their roll-ups, from the recorded rows and the last snapshot only. */
+  function archive(limit: number = ARCHIVE_ROWS): ArchiveView {
+    const bounded = Math.min(Math.max(Math.floor(limit), 1), MAX_ARCHIVE_ROWS);
+    const shown = (newestArchived.all(bounded) as Array<{ thread_id: string }>).map((row) => row.thread_id);
+    const records = (relatedArchived.all({ limit: bounded }) as ArchiveDbRow[]).map(recordOf);
+    const open = new Map((cached()?.threads ?? []).map((thread) => [thread.id, thread.title] as const));
+    const { total, since } = countArchived.get() as { total: number; since: number | null };
+    return composeArchive(shown, records, open, total, since);
+  }
+
   /** Read a thread's own checkout, the state its archive depends on. A live child stops the archive before this is needed. */
   async function readArchiveEnv(facts: ThreadFacts, reads: Map<string, Promise<EnvFacts>> = new Map()): Promise<void> {
     const environmentId = facts.environmentId;
@@ -505,6 +773,8 @@ export function createThreads(deps: ThreadsDeps) {
         childWorking: descendantWorking(thread.id) || thread.activity.activeBackgroundAgentCount + thread.activity.activeBackgroundCommandCount + thread.activity.activeWorkflowCount > 0,
         environmentId: thread.environmentId,
         hostId: thread.environmentHostId ?? null,
+        createdAt: thread.createdAt ?? null,
+        ownerThreadId: thread.lifecycleOwnerThreadId ?? null,
         graphComplete: complete,
         // An archive takes these with it, so each one's protection and checkout count.
         descendants: below(thread.id).map((childId) => {
@@ -551,6 +821,7 @@ export function createThreads(deps: ThreadsDeps) {
         inWindow: verdict.inWindow,
         decision: verdict.decision,
         reason: verdict.reason,
+        parentThreadId: facts.parentThreadId ?? facts.ownerThreadId ?? null,
       };
       return { row, facts, issue, ctx, classification };
     });
@@ -615,13 +886,17 @@ export function createThreads(deps: ThreadsDeps) {
         return false;
       }
     }
+    const askedAt = action === "archive" ? intendArchive(late.fresh, "lifecycle", late.fresh.row.reason) : 0;
+    let archivedIds: readonly string[] = [];
     try {
-      if (action === "archive") await sdk.threads.archive({ threadId: fresh.row.id });
+      if (action === "archive") archivedIds = (await sdk.threads.archive({ threadId: fresh.row.id })).archivedThreadIds;
       else await sdk.threads.compact({ threadId: fresh.row.id });
     } catch (error) {
+      if (action === "archive") await settleArchive(fresh.row.id, askedAt, null);
       record(entry, "failed", { error: message(error) });
       return false;
     }
+    if (action === "archive") await settleArchive(fresh.row.id, askedAt, archivedIds);
     record(late.fresh, "done");
     return action === "archive";
   }
@@ -743,13 +1018,17 @@ export function createThreads(deps: ThreadsDeps) {
         if (close > 0) throw new Refusal("conflict", `Cannot archive ${threadId}: bb reports ${close} unarchived thread${close === 1 ? "" : "s"} below it.`);
       }
       const reason = `${action === "archive" ? "Archive" : "Compact"} now: asked from the page`;
+      const askedAt = action === "archive" ? intendArchive(entry, "page", completionOf(entry.issue).why) : 0;
+      let archivedIds: readonly string[] = [];
       try {
-        if (action === "archive") await sdk.threads.archive({ threadId });
+        if (action === "archive") archivedIds = (await sdk.threads.archive({ threadId })).archivedThreadIds;
         else await sdk.threads.compact({ threadId });
       } catch (error) {
+        if (action === "archive") await settleArchive(threadId, askedAt, null);
         recordAction(entry, action, reason, "failed", message(error));
         throw new Error(`Could not ${action} ${threadId}: ${message(error)}`);
       }
+      if (action === "archive") await settleArchive(threadId, askedAt, archivedIds);
       recordAction(entry, action, reason, "done");
       return { message: action === "archive" ? `Archived ${threadId}.` : `Compacting ${threadId}.` };
     });
@@ -810,10 +1089,67 @@ export function createThreads(deps: ThreadsDeps) {
     }));
   }
 
-  return { refresh, cached, decisions, act };
+  return { refresh, cached, decisions, act, archive, onArchived, onUnarchived };
 }
 
 export type ThreadsService = ReturnType<typeof createThreads>;
+
+interface ArchiveDbRow {
+  thread_id: string;
+  title: string;
+  parent_thread_id: string | null;
+  provider: string | null;
+  model: string | null;
+  started_at: number | null;
+  started_from: "first-turn" | "created" | "unknown";
+  archived_at: number;
+  source: ArchiveSource;
+  state: string | null;
+  reason: string;
+  issue_identifier: string | null;
+  issue_url: string | null;
+  issue_state: string | null;
+  used_tokens: number | null;
+  archive_count: number;
+}
+
+function recordOf(row: ArchiveDbRow): ArchiveRecord {
+  return {
+    threadId: row.thread_id,
+    title: row.title,
+    parentThreadId: row.parent_thread_id,
+    provider: row.provider,
+    model: row.model,
+    startedAt: row.started_at,
+    startedFrom: row.started_from,
+    archivedAt: row.archived_at,
+    source: row.source,
+    state: row.state,
+    reason: row.reason,
+    issue: row.issue_identifier === null ? null : { identifier: row.issue_identifier, url: row.issue_url, stateName: row.issue_state },
+    usedTokens: row.used_tokens,
+    archiveCount: row.archive_count,
+  };
+}
+
+export function formatArchive(view: ArchiveView): string {
+  if (view.rows.length === 0) return "No archived threads recorded yet.";
+  const lines: string[] = [];
+  for (const row of view.rows) {
+    const { record } = row;
+    lines.push(`${new Date(record.archivedAt).toISOString()}  ${record.threadId}  ${record.title}`);
+    const started = startedText(record, (time) => new Date(time).toISOString());
+    lines.push(`  ${started}; tokens ${row.tokens}${row.phaseTokens === null ? "" : `; children ${row.phaseTokens}`}`);
+    lines.push(`  why: ${row.why}`);
+    lines.push(`  ${row.summary}`);
+    const parent = parentText(row.parent);
+    if (parent !== null) lines.push(`  ${parent}`);
+    if (row.note !== null) lines.push(`  ${row.note}`);
+  }
+  const since = view.recordedSince === null ? "" : ` recorded since ${new Date(view.recordedSince).toISOString()} (earlier archives, and any while the plugin was stopped, are not included)`;
+  lines.push("", `${view.rows.length} of ${view.total} archived threads${since}; tokens are approximate: each thread's context size when it was archived.`);
+  return lines.join("\n");
+}
 
 function tokens(count: number | null): string {
   return count === null ? "-" : tokenCount(count);
@@ -850,21 +1186,32 @@ export function formatDecisions(rows: DecisionRow[]): string {
     .join("\n");
 }
 
-/** `bb sgc threads [--json] [--cached]` and `bb sgc threads log [--limit N] [--json]`. */
+/** `bb sgc threads [--json] [--cached]`, `bb sgc threads log [--limit N] [--json]`, and `bb sgc threads archive [--limit N] [--json]`. */
 export function threadsCommand(service: ThreadsService, now: () => number) {
   return cliCommand({
-    summary: "List every thread with its lifecycle state, cache expiry, and the plugin's decision; `log` shows recent decisions",
+    summary: "List every thread with its lifecycle state, cache expiry, and the plugin's decision; `log` shows recent decisions; `archive` shows archived threads",
     description:
-      "Reads every thread from bb and its issue from Linear, then shows the state, the issue, provider and model, tokens, when the prompt cache expires, the decision, and why. `bb sgc threads log` shows the decisions made, newest first. In observe mode nothing is acted on. Exits 1 when bb could not be read.",
-    positionals: [{ name: "action", description: "`log` to show the decision log; leave out to list threads", required: false }],
+      "Reads every thread from bb and its issue from Linear, then shows the state, the issue, provider and model, tokens, when the prompt cache expires, the decision, and why. `bb sgc threads log` shows the decisions made, newest first. `bb sgc threads archive` shows the archived threads the plugin recorded, newest first, each with why it was archived and what its child threads did; it reads only the plugin's own record. In observe mode nothing is acted on. Exits 1 when bb could not be read.",
+    positionals: [{ name: "action", description: "`log` to show the decision log, `archive` to show archived threads; leave out to list threads", required: false }],
     options: {
       json: { type: "boolean", description: "Print machine-readable JSON" },
       cached: { type: "boolean", description: "Print the last snapshot without reading bb or Linear" },
-      limit: { type: "string", description: "With `log`: how many decisions to show (default 20, at most 500)" },
+      limit: { type: "string", description: "With `log`: how many decisions to show (default 20, at most 500). With `archive`: how many threads (default 200, at most 500)" },
     },
     async run(input) {
       const action = input.positionals.action;
-      if (action !== undefined && action !== "log") throw new PluginCliError(`Unknown action "${action}".`, { code: "invalid", hint: "Use `bb sgc threads` or `bb sgc threads log`." });
+      if (action !== undefined && action !== "log" && action !== "archive") {
+        throw new PluginCliError(`Unknown action "${action}".`, { code: "invalid", hint: "Use `bb sgc threads`, `bb sgc threads log`, or `bb sgc threads archive`." });
+      }
+      if (action === "archive") {
+        const raw = input.options.limit;
+        const limit = raw === undefined ? ARCHIVE_ROWS : Number(raw);
+        if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ARCHIVE_ROWS) {
+          throw new PluginCliError(`--limit takes a whole number from 1 to ${MAX_ARCHIVE_ROWS}.`, { code: "invalid" });
+        }
+        const view = service.archive(limit);
+        return { exitCode: 0, stdout: input.options.json ? JSON.stringify(view) : formatArchive(view) };
+      }
       if (action === "log") {
         const raw = input.options.limit;
         const limit = raw === undefined ? 20 : Number(raw);

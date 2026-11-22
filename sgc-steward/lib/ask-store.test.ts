@@ -303,3 +303,24 @@ test("a repeat of an open question stored before the Pause option returns its id
   const other = { ...withPause, id: "bbq_other", options: [{ letter: "A", text: "Different.", recommended: true }, { letter: "B", text: PAUSE_OPTION, recommended: false }] };
   assert.equal(store.admit(other, false).kind, "asked", "other options are another question");
 });
+
+test("a database from before the archive table upgrades without losing a lifecycle row, and keeps one archive row per thread", () => {
+  const db = new Database(":memory:");
+  const before = STORE_MIGRATIONS.findIndex((statement) => statement.includes("CREATE TABLE IF NOT EXISTS thread_archive"));
+  assert.ok(before > 0);
+  migrate(db, STORE_MIGRATIONS.slice(0, before));
+  db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, 5, '{}')").run();
+  db.prepare(
+    `INSERT INTO thread_decisions (at, thread_id, thread_title, cycle, decision, state, reason, inputs, result, error)
+     VALUES (6, 'thr_a', 'A', 7, 'archive', 'done', 'TEAM-1 is Done', '{}', 'done', NULL)`,
+  ).run();
+  db.prepare("INSERT INTO thread_keeps (thread_id, until, at) VALUES ('thr_k', 9, 8)").run();
+  migrate(db, STORE_MIGRATIONS);
+  assert.deepEqual(db.prepare("SELECT taken_at FROM thread_snapshot").all(), [{ taken_at: 5 }]);
+  assert.deepEqual(db.prepare("SELECT thread_id, decision FROM thread_decisions").all(), [{ thread_id: "thr_a", decision: "archive" }]);
+  assert.deepEqual(db.prepare("SELECT thread_id FROM thread_keeps").all(), [{ thread_id: "thr_k" }]);
+  const insert = db.prepare("INSERT INTO thread_archive (thread_id, title, archived_at, first_archived_at, source, reason) VALUES ('thr_a', 'A', ?, 1, 'outside', '')");
+  insert.run(1);
+  assert.throws(() => insert.run(2), /UNIQUE/, "the thread id is the key");
+  assert.deepEqual(db.prepare("SELECT archive_count, unarchived_at FROM thread_archive").all(), [{ archive_count: 1, unarchived_at: null }]);
+});

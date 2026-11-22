@@ -144,6 +144,7 @@ export const PANEL_TABS = [
   { id: "paused", label: "Paused", subPath: "paused" },
   { id: "hosts", label: "Hosts", subPath: "hosts" },
   { id: "threads", label: "Threads", subPath: "threads" },
+  { id: "archive", label: "Archive", subPath: "archive" },
 ] as const;
 
 export type PanelTab = (typeof PANEL_TABS)[number]["id"];
@@ -190,7 +191,7 @@ export interface TabBadge {
 }
 
 /** Each list tab's badge: open questions, or open todos, and an alert for a failed send, record, or read on that tab. */
-export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts" | "threads">, TabBadge> {
+export function tabBadges(view: TabInput): Record<Exclude<PanelTab, "hosts" | "threads" | "archive">, TabBadge> {
   return {
     questions: { count: openQuestions(view), alert: sendsFor("questions", view.undelivered).length + view.unposted.length + view.issueErrors.length > 0 },
     todos: { count: view.todos.length, alert: sendsFor("todos", view.undelivered).length > 0 || view.todoError !== null },

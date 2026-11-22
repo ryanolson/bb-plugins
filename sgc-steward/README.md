@@ -189,6 +189,28 @@ The RPC is `threads.list` (`{ refresh }`: the snapshot, read now when `refresh` 
 
 The service keeps its last snapshot and the decision log in the plugin's SQLite database. A decision is logged once per cache life, and again only when the decision or its reason changes.
 
+### Archive
+
+**The Archive tab** and `bb sgc threads archive` list each archived thread the plugin recorded, newest archive first. A line on top says which archives the tab covers: those recorded since its first row. Earlier archives, and any while the plugin was stopped, are not in the rows or the roll-ups, because nothing backfills them. Each row shows:
+
+- the title (a link to the thread), its issue, and its parent: `Child of <title>`, `..., which is still open`, or `Parent <id> is missing` when the parent has no archive row and was not open at the last check;
+- when it started and when bb archived it. Started is when the thread's first turn started (bb's `turn/started`), not when it was requested: bb records a request when provisioning begins, and a request can be cancelled before any turn runs. A turn older than the thread is skipped: bb copies a fork's inherited turns into it with the source's times. A thread with no started turn of its own shows `created` and its creation time instead. The lookup reads at most 2,000 turn starts: when all 2,000 it reads were inherited from the source, the row shows `created <time>+ (start not found ...)`, its creation time as a lower bound, because its own first turn, if any, is past what was read. A row whose only known time is its creation says it was created, not started, before recording began;
+- why: who archived it and the reason they had. `Archived by the lifecycle as done: TEAM-12 is Done.`, `Archived from the page (Archive now) ...`, or `Archived outside the plugin; last seen idle-active: TEAM-12 is In Progress.` for an archive by another thread, by the owner in bb, or by bb cascading a parent's archive. A thread archived more than once says how many times;
+- what happened. A thread that drove others gets a roll-up of every recorded thread below it, oldest first: `Planned with fable; 4 rounds of impl (a, b, c, d); reviews by e, f, g; other: h. TEAM-12 Done.` Each child is named by its model, else its provider. A thread that drove none shows its own fate: `TEAM-12 Done; archived by the lifecycle.` A thread that started before recording began says that its roll-up may miss children archived before then;
+- tokens, approximate, as the column header says once: the thread's context size when it was archived, and for a driver its children summed by phase, `plan 41k, impl 210k, review 66k`. The phase is the first word of a child's title after its issue number: `plan`, `planner`, `impl`, `implementer`, `coder`, `review`, `reviewer` and their forms. `1844: review impl round 2` is a review; `1844: fix review links` names no role, so it counts as `other`. A thread with no recorded usage shows `-`, never 0, and a phase where only some threads have usage shows the known sum with `+?`.
+
+A row is written when the thread is archived, never on render:
+
+- Only bb's `thread.archived` event writes a row, and it awaits nothing before the write. bb dispatches its events in order without waiting for a handler, so a write after an await, or a write on the plugin's own archive reply, could land after a later unarchive and bring the row back, or overwrite a later archive. The time is bb's archive time.
+- The event writes a new archive only: no row, a row that was unarchived, or a row older than this archive (an unarchive the plugin missed). The same archive announced twice, or an older one announced late, changes nothing.
+- For its own archives, the lifecycle and Archive now note why, in memory, just before they ask bb. The note stays open until bb's reply is settled, and every archive event in that time gets the note's state, reason, issue and tokens, because an event cannot say whose archive it announces. Any other archive takes the state, issue, model and tokens the last snapshot held.
+- The reply settles the note one macrotask after it arrives: bb queues its event for an archive on a `setImmediate` before it replies, so by then the events for every archive made during the call have run. When `archivedThreadIds` names the thread, the plugin's archive is the latest one. When it leaves the thread out, someone else archived it, and the row is put back to exactly what an outside archive records, with a usage read for a thread the snapshot never held.
+- Two cases cannot be told apart, because bb names no archiver and no time it handled the request: an outside archive and undo before bb handles the plugin's request, and the plugin's archive undone and archived again by someone before the reply arrives. In both, the count and bb's times are exact, the row keeps the plugin's reason, and the reason says that bb does not say which archive was the plugin's. A failed call after an archive keeps the plugin's reason and says the archive may be someone else's.
+- After the write the event reads the first started turn, and the usage of a thread the snapshot never held. Each read fills in only the archive it was read for. A new archive never carries the last archive's usage over. The coverage start is the first archive ever recorded, so a re-archive does not move it.
+- `thread.unarchived` takes the row off the tab. A later archive updates the same row, keyed by thread id, and counts it.
+
+Opening the tab reads only the plugin's own table and the last snapshot: the roll-up is a join over the rows already recorded, not a read of each thread. A row keeps what it recorded: a later change to the issue, or its deletion, does not change it. The page reads the rows when the tab opens, and again on the `archive` realtime channel, which the server signals after each write. The RPC is `archive.list`: the newest 200 rows, the total, and when recording began.
+
 ## How it works
 
 A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
@@ -216,6 +238,7 @@ bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc hosts [--digest] [--json]
 bb sgc threads [--json] [--cached]
 bb sgc threads log [--limit <n>] [--json]
+bb sgc threads archive [--limit <n>] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -231,7 +254,7 @@ bb sgc key --api-key-stdin
 - `resume` resumes a paused issue, as the Resume button does. `--note` adds a note to the comment and to the steward's message.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
-- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. It exits 1 when bb could not be read.
+- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. `threads archive` prints the archived threads the plugin recorded, newest first, as described in [Archive](#archive); it reads only the plugin's own record, and `--limit` is 200 by default, at most 500. It exits 1 when bb could not be read.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -256,6 +279,7 @@ bb plugin config sgc-steward set stewardThread thr_abc123
 - **A state change that two paths can make must be one conditional write.** An answer, a withdrawal, and an expiry each move an open question on. Each does `UPDATE ... WHERE state = 'open'` inside the transaction that keeps its notice, and checks `changes`; a read of the state first is not enough. The loser saves nothing. The first expiry design read the question, awaited a thread lookup, and then wrote; the write still must not trust that read. Tests: `an answer that lands first wins, and an expired question takes no answer or withdrawal` in `lib/expiry.test.ts`.
 - **Page code must never import a module that reaches a `node:` builtin.** The page is bundled for the browser. `app.tsx` once imported `appLink` from `lib/paused.ts`, which reaches `lib/questions.ts` and `node:crypto`; every server test passed, and `bb plugin update` failed at the page build. Keep what the page needs in browser-safe modules such as `lib/links.ts`, and use `import type` for types. Test: `lib/page-imports.test.ts` walks the page's import graph.
 - **A card's added choice never takes a letter past Z.** `cardChoices` letters Pause, or the note, on the next free letter, and a question with all 26 letters in use gets no added Pause, so a letter always fits the answer schema's A–Z and no option already answered is renamed. Test: `no added choice takes a letter past Z` in `lib/choices.test.ts`.
+- **A bb event handler writes its state before its first await, and an action's reply writes none.** bb dispatches each event on its own `setImmediate`, in the order of the changes, and runs handlers without waiting for them, so only the part of a handler before its first await runs in bb's order. The first Archive tab read the context of an unseen thread before writing its row, and wrote the plugin's own archive row on bb's reply. A held read let a later unarchive pass, and the late write brought the row back; a held reply overwrote a later outside archive. Write synchronously in the event handler, fill later reads in only for the write they belong to (`WHERE thread_id = ? AND archived_at = ?`), and let a reply only settle what the event took, one macrotask after it arrives, since bb queues its events before it replies. Tests: the `overlap:` tests in `server.archive.test.ts`, which hold the read and the reply with a gate, such as `overlap: a held Archive now reply after an unarchive neither brings the row back nor counts it twice`.
 - **Test time with the injected clock, never with a sleep.** `createAskStore(db, now)` and `setup({ now })` take the clock; expiry tests move it by whole days and poll.
 
 ## Develop
@@ -290,14 +314,15 @@ bb plugin logs sgc-steward
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
+- `lib/archive-view.ts`: the Archive tab's view model: why a thread was archived, the roll-up of its children, phases from titles, and tokens by phase, composed from recorded rows. The page imports it.
 - `lib/threads-view.ts`: the Threads tab's view model: row text, grouping by host, the summary, the badge count, and button refusals. The page imports it.
 - `lib/lifecycle.ts`: thread states, cache expiry, and the decision, as pure functions with no bb or Node imports.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
-- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, and `bb sgc threads`.
+- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, the archive rows, and `bb sgc threads`.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, and Threads tabs, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, Threads, and Archive tabs, its sidebar badge, and the notifier.
 - `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

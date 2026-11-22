@@ -144,7 +144,8 @@ test("a new Done of an issue replaces the page's Undo for its earlier Done", () 
 });
 
 test("each tab has its own route, and a route the page does not know shows Questions", () => {
-  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos", "paused", "hosts", "threads"]);
+  assert.deepEqual(PANEL_TABS.map((tab) => tab.id), ["questions", "todos", "paused", "hosts", "threads", "archive"]);
+  assert.equal(tabOf("archive"), "archive");
   assert.equal(tabOf(""), "questions");
   assert.equal(tabOf("todos"), "todos");
   assert.equal(tabOf("hosts"), "hosts");

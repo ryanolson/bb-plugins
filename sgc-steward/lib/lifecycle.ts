@@ -128,6 +128,10 @@ export interface ThreadFacts {
   hostId: string | null;
   /** Null for a thread with no environment; absent when it was not read. */
   env?: EnvFacts | null;
+  /** Epoch ms bb created the thread; absent when not read. */
+  createdAt?: number | null;
+  /** The thread that owns its lifecycle, when bb names one; the Archive tab's parent when there is no parent. */
+  ownerThreadId?: string | null;
 }
 
 export interface LifecycleContext {

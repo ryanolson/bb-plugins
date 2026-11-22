@@ -29,6 +29,8 @@
     "server.todos.test.ts",
     "server.answer-of.test.ts",
     "server.hosts.test.ts",
+    "server.archive.test.ts",
+    "test-support-threads.ts",
     "test-support-hosts.ts",
     "test-support.ts",
     "test-support-tsx.ts",

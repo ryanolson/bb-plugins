@@ -145,6 +145,29 @@ export const STORE_MIGRATIONS: readonly string[] = [
     thread_id TEXT PRIMARY KEY,
     sent_at INTEGER NOT NULL
   )`,
+  // The Archive tab (threads.ts): one row per archived thread, written when it is archived. An unarchive sets unarchived_at; a re-archive updates the row.
+  `CREATE TABLE IF NOT EXISTS thread_archive (
+    thread_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    parent_thread_id TEXT,
+    provider TEXT,
+    model TEXT,
+    started_at INTEGER,
+    started_from TEXT NOT NULL DEFAULT 'created',
+    archived_at INTEGER NOT NULL,
+    first_archived_at INTEGER NOT NULL,
+    unarchived_at INTEGER,
+    source TEXT NOT NULL,
+    state TEXT,
+    reason TEXT NOT NULL,
+    issue_identifier TEXT,
+    issue_url TEXT,
+    issue_state TEXT,
+    used_tokens INTEGER,
+    archive_count INTEGER NOT NULL DEFAULT 1
+  )`,
+  `CREATE INDEX IF NOT EXISTS thread_archive_by_time ON thread_archive (archived_at)`,
+  `CREATE INDEX IF NOT EXISTS thread_archive_by_parent ON thread_archive (parent_thread_id)`,
 ];
 
 export type AskState = "open" | "answered" | "withdrawn" | "expired";
