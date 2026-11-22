@@ -346,6 +346,19 @@ test("a claimed teardown that finds the fence disarmed flags fence_disarmed once
   assert.equal(await w.used(), 0);
 });
 
+test("a teardown stopped by a probe gap flags fence_disarmed with the gap line, and the note keeps it", async () => {
+  const w = await world();
+  const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
+  const gap = "probes were 9.0 s apart, more than the 8 s limit: a fence state between them went unseen";
+  w.guard.setProbe(w.ns, { ...verdict("finegrained", "enforcing"), armed: false, cause: gap });
+  await w.cli(["lease", "release", id], THREAD_A);
+  const flags = await w.flags("fence_disarmed");
+  assert.equal(flags.length, 1);
+  assert.ok(flags[0]!.detail.includes(gap), flags[0]!.detail);
+  assert.ok(String((await w.show(id)).last_error).includes(gap));
+  assert.equal(await w.used(), 2);
+});
+
 test("a teardown whose probe gives no cause says so: the fence was not armed (no cause given)", async () => {
   const w = await world();
   const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;

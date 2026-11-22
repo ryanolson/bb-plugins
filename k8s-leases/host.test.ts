@@ -62,6 +62,12 @@ if (process.argv[2] === "fence" && mode === "probe_bad") {
 } else if (process.argv[2] === "down" && mode === "claimed_disarmed") {
   process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", resolutions: [], fence_disarmed: true, probe: { canary: "disarmed", mode: "absent", scope: "unknown", armed: false, cause: "no fence webhook answered", canary_text: "created (dry run)", mode_text: "created (dry run)", extra: 1 } }));
   process.exit(4);
+} else if (process.argv[2] === "down" && (mode === "claimed_gap" || mode === "claimed_gap_without_texts")) {
+  // The guard's record when two probes were too far apart (k8s-guard claimed_teardown); before its fix it
+  // carried no canary_text or mode_text, so the plugin dropped the probe and its cause.
+  const texts = mode === "claimed_gap" ? { canary_text: "denied by the canary entry", mode_text: "denied by the main entry" } : {};
+  process.stdout.write(JSON.stringify({ error: "the fence was not armed", code: "teardown_incomplete", resolutions: [], fence_disarmed: true, probe: { canary: "finegrained", mode: "enforcing", scope: "finegrained", armed: false, ...texts, cause: "probes were 9.0 s apart, more than the 8 s limit: a fence state between them went unseen" } }));
+  process.exit(4);
 } else if (process.argv[2] === "down" && mode === "claimed_disarmed_bad") {
   process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", fence_disarmed: "yes", probe: { canary: "disarmed" } }));
   process.exit(4);
@@ -287,5 +293,16 @@ test("a claimed down passes the fence report through; malformed fence fields are
   });
   process.env.FAKE_MODE = "claimed_disarmed_bad";
   assert.deepEqual(await harness.experimental_call("down", leaseTarget), { ok: false, code: "teardown_incomplete", error: "a probe in the drain read disarmed" });
+  await harness.experimental_dispose();
+});
+
+test("the guard's probe-gap failure reaches the plugin with its cause; without the two texts it is dropped", async () => {
+  const harness = experimental_createHostEntryHarness(createHostEntry());
+  process.env.FAKE_MODE = "claimed_gap";
+  const got = (await harness.experimental_call("down", leaseTarget)) as { probe?: { cause?: string } };
+  assert.match(String(got.probe?.cause), /probes were 9\.0 s apart, more than the 8 s limit/);
+  process.env.FAKE_MODE = "claimed_gap_without_texts";
+  const old = (await harness.experimental_call("down", leaseTarget)) as { probe?: unknown };
+  assert.equal(old.probe, undefined, "a record missing canary_text and mode_text is not a probe");
   await harness.experimental_dispose();
 });
