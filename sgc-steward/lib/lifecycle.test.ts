@@ -107,11 +107,26 @@ test("completion: a closed issue, or a signed closure comment on this thread, an
   assert.equal(completionOf(undefined).done, false);
 });
 
-test("an indented or fenced code sample is not a signed claim or closure", () => {
+test("an indented or fenced code sample is not a signed claim or closure, a tab counting as four columns", () => {
   assert.equal(closureThread("    [agent:codex thr_a] done: copy this format"), null);
+  assert.equal(closureThread(" \t[agent:codex thr_a] done: example"), null);
   assert.equal(closureThread("```\n[agent:codex thr_a] done: x\n```"), null);
   assert.equal(claimThread("    [agent:codex thr_a] claim: an example"), null);
   assert.equal(closureThread("[agent:codex thr_a] done: real"), "thr_a");
+});
+
+test("a closure comment closes only an issue whose open state was read", () => {
+  assert.equal(completionOf(issue("Unknown", "unknown", { closureAt: NOW })).done, false);
+  assert.equal(completionOf(issue("Todo", "unstarted", { closureAt: NOW })).done, true);
+  assert.equal(completionOf(issue("In Review", "started", { closureAt: NOW })).done, true);
+});
+
+test("a Done issue linked only by the brief is not done, so the thread is not flagged as finished", () => {
+  const ctx = context({ issue: issue("Done", "completed", { link: "brief" }) });
+  const facts = thread({ lastActivityAt: NOW - 25 * HOUR });
+  assert.equal(stateOf(facts, ctx), "idle-active");
+  assert.match(classify(facts, ctx).reason, /only the thread's brief names/);
+  assert.notEqual(decide(facts, classify(facts, ctx), ctx).decision, "archive");
 });
 
 test("a paused or waiting issue with a closure comment stays parked, so archive-parked can act on it", () => {

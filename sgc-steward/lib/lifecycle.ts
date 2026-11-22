@@ -210,13 +210,17 @@ export function classify(facts: ThreadFacts, ctx: LifecycleContext): Classificat
       ? { state: "orphan", reason: `no issue, idle ${Math.floor(idleMs / HOUR)} h` }
       : { state: "idle-active", reason: "no issue yet" };
   }
-  if (issue.stateType === "completed" || issue.stateType === "canceled") return { state: "done", reason: `${issue.identifier} is ${issue.stateName}` };
+  const completion = completionOf(issue);
+  if (issue.stateType === "completed" || issue.stateType === "canceled") {
+    return completion.done
+      ? { state: "done", reason: completion.why }
+      : { state: "idle-active", reason: `${issue.identifier} is ${issue.stateName}, but ${completion.why}` };
+  }
   // The owner's or a reviewer's park wins over a closure comment: the archive it allows is `archive-parked`.
   if (issue.stateType === "backlog" && hasLabel(issue, (name) => name === "paused")) {
     return { state: "parked", reason: `${issue.identifier} is paused in the backlog` };
   }
   if (hasLabel(issue, (name) => name.startsWith("waiting:"))) return { state: "parked", reason: `${issue.identifier} is waiting on someone` };
-  const completion = completionOf(issue);
   if (completion.done) return { state: "done", reason: completion.why };
   // A long, quiet review is only a guess at a park, so a closure comment beats it: the archive stays `archive-done`.
   if (/review/i.test(issue.stateName) && ctx.now - Math.max(issue.updatedAt, facts.lastActivityAt) >= REVIEW_PARKED_MS) {
@@ -323,7 +327,8 @@ export interface IssueWithComments extends Omit<IssueFacts, "link" | "closureAt"
 /** A signed comment that opens as an indented or fenced code block is an example, not a signature. */
 function isExample(body: string): boolean {
   const first = body.split("\n").find((line) => line.trim() !== "") ?? "";
-  return /^\s*(```|~~~)/.test(first) || /^(\t| {4,})/.test(first);
+  // A tab advances to the next 4-column stop, so " \t" is as indented as four spaces.
+  return /^\s*(```|~~~)/.test(first) || /^ {4,}/.test(first.replace(/\t/g, "    "));
 }
 
 /** The thread id a signed `claim:` comment names, or null. */
@@ -363,9 +368,13 @@ export function completionOf(issue: IssueFacts | null | undefined): { done: bool
   if (issue === null || issue === undefined) return { done: false, why: "no issue could be read for the thread" };
   if (issue.link === "brief") return { done: false, why: `only the thread's brief names ${issue.identifier}` };
   if (issue.stateType === "completed" || issue.stateType === "canceled") return { done: true, why: `${issue.identifier} is ${issue.stateName}` };
+  if (!OPEN_STATE_TYPES.has(issue.stateType)) return { done: false, why: `${issue.identifier} has no readable state` };
   if (issue.closureAt !== null) return { done: true, why: `${issue.identifier} is ${issue.stateName}, with a signed closure comment` };
   return { done: false, why: `${issue.identifier} is ${issue.stateName}, with no closure comment` };
 }
+
+/** The states a thread can be open in. A comment closes one of these; an unknown state is no evidence. */
+const OPEN_STATE_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
 
 /** The first `TEAM-NNNN` anywhere in a thread's brief, or null. The weakest way a thread names its issue. */
 export function briefIdentifier(brief: string, teamKey: string): string | null {

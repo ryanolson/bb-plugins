@@ -24,6 +24,7 @@ import {
   tokenCount,
 } from "./lib/threads-view.ts";
 import {
+  COMPACT_MIN_TOKENS,
   HOUR,
   MINUTE,
   ORPHAN_IDLE_MS,
@@ -184,7 +185,8 @@ export function createThreads(deps: ThreadsDeps) {
   const { db, sdk, now } = deps;
   const usage = new Map<string, { key: string; used: number | null; window: number | null; offer: number | null; cost: ThreadFacts["cost"] }>();
   const models = new Map<string, string>();
-  const briefs = new Map<string, string | null>();
+  /** The identifier a brief names, by team and thread; "" for a brief that names none. */
+  const briefs = new Map<string, string>();
 
   const loadSnapshot = db.prepare("SELECT body FROM thread_snapshot WHERE id = 1");
   const saveSnapshot = db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET taken_at = excluded.taken_at, body = excluded.body");
@@ -213,9 +215,16 @@ export function createThreads(deps: ThreadsDeps) {
    */
   async function listThreads(): Promise<{ rows: Awaited<ReturnType<Sdk["threads"]["list"]>>; complete: boolean }> {
     const rows: Awaited<ReturnType<Sdk["threads"]["list"]>> = [];
+    const seen = new Set<string>();
     let complete = false;
+    let stable = true;
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const batch = await sdk.threads.list({ includeHidden: true, limit: THREADS_PAGE, offset: page * THREADS_PAGE });
+      for (const row of batch) {
+        // A row seen twice means a thread was inserted or removed between pages, so other rows were skipped.
+        if (seen.has(row.id)) stable = false;
+        seen.add(row.id);
+      }
       rows.push(...batch);
       if (batch.length < THREADS_PAGE) {
         complete = true;
@@ -223,7 +232,8 @@ export function createThreads(deps: ThreadsDeps) {
       }
     }
     if (!complete) deps.log(`bb returned ${rows.length} threads, its page cap, so some may be missing`);
-    return { rows: rows.filter((row) => row.archivedAt === null && row.deletedAt === null), complete };
+    if (!stable) deps.log("bb's thread list changed while it was read, so some threads may be missing");
+    return { rows: rows.filter((row) => row.archivedAt === null && row.deletedAt === null), complete: complete && stable };
   }
 
   async function readUsage(thread: { id: string; updatedAt: number }) {
@@ -271,18 +281,19 @@ export function createThreads(deps: ThreadsDeps) {
    * finds nothing is not kept.
    */
   async function readBriefIssue(threadId: string, teamKey: string): Promise<string | null> {
-    const known = briefs.get(threadId);
-    if (known !== undefined) return known;
+    const key = `${teamKey}/${threadId}`;
+    const known = briefs.get(key);
+    if (known !== undefined) return known === "" ? null : known;
     try {
       const [first] = await sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "asc", limit: "1" });
+      // A thread whose first turn has not arrived is asked again next pass. Once it exists, its text never changes.
       if (first === undefined || first.type !== "client/turn/requested") return null;
       const text = first.data.input
         .filter((part) => part.type === "text")
         .map((part) => part.text)
         .join("\n");
       const identifier = briefIdentifier(text, teamKey);
-      if (identifier === null) return null;
-      briefs.set(threadId, identifier);
+      briefs.set(key, identifier ?? "");
       return identifier;
     } catch (error) {
       deps.log(`could not read the brief of ${threadId}: ${message(error)}`);
@@ -467,12 +478,13 @@ export function createThreads(deps: ThreadsDeps) {
     const envReads = new Map<string, Promise<EnvFacts>>();
     const entries = await mapLimit(wanted, READ_CONCURRENCY, async (thread): Promise<Entry> => {
       const title = thread.title ?? "";
-      const orphanAge = at - thread.updatedAt >= ORPHAN_IDLE_MS;
-      const [used, model, queue, issue] = await Promise.all([
-        readUsage(thread),
+      const used = await readUsage(thread);
+      // The brief decides an orphan, and turns a big idle thread's let-cool into a compact, so it is read for both.
+      const wantBrief = at - thread.updatedAt >= ORPHAN_IDLE_MS || (used.used ?? 0) >= COMPACT_MIN_TOKENS;
+      const [model, queue, issue] = await Promise.all([
         readModel(thread.id),
         readQueue(thread),
-        issueOf({ id: thread.id, title }, orphanAge),
+        issueOf({ id: thread.id, title }, wantBrief),
       ]);
       const facts: ThreadFacts = {
         id: thread.id,
@@ -559,10 +571,11 @@ export function createThreads(deps: ThreadsDeps) {
    */
   async function carryOut(entry: Entry): Promise<boolean> {
     const action = entry.row.decision === "compact" ? "compact" : "archive";
-    // The thread's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened.
-    const first = await recheck(entry, action, { lookup: true });
+    // An archive's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened. A compact does not depend on the issue, so it does not pay for that read.
+    const how = action === "archive" ? ({ lookup: true } as const) : ({ issue: entry.issue } as const);
+    const first = await recheck(entry, action, how);
     if ("refusal" in first) {
-      record(entry, "refused", { reason: first.refusal, decision: entry.row.decision });
+      record(first.fresh ?? entry, "refused", { reason: first.refusal, decision: entry.row.decision });
       return false;
     }
     const { fresh } = first;
@@ -582,21 +595,23 @@ export function createThreads(deps: ThreadsDeps) {
       }
     }
     // The comment takes time: the whole check runs once more, as late as possible, on the thread, its checkouts, its cache, the issue, and the settings as they are then. A Linear read that fails here refuses the archive.
-    const late = await recheck(entry, action, { lookup: true });
+    const late = await recheck(entry, action, action === "archive" ? { lookup: true } : { issue: fresh.issue });
     if ("refusal" in late) {
-      record(entry, "refused", { reason: late.refusal, decision: entry.row.decision });
+      record(late.fresh ?? entry, "refused", { reason: late.refusal, decision: entry.row.decision });
       return false;
     }
     if (action === "archive") {
-      // One last list, right before bb takes the children too: a child spawned after the recheck above must not be swept.
-      const close = await liveDescendants(late.fresh.row.id);
-      const reason = !close.complete
-        ? "changed since the decision: bb's thread list was cut off, so a child may be unseen"
-        : close.ids.length > 0
-          ? `changed since the decision: child ${close.ids.join(", ")} is still live`
-          : null;
-      if (reason !== null) {
-        record(late.fresh, "refused", { reason, decision: entry.row.decision });
+      // bb's own count, asked right before it takes the children too: a child spawned after the recheck above must not be swept.
+      const close = await unarchivedBelow(late.fresh.row.id);
+      if (close > 0) {
+        record(late.fresh, "refused", { reason: `changed since the decision: bb reports ${close} unarchived thread${close === 1 ? "" : "s"} below it`, decision: entry.row.decision });
+        return false;
+      }
+      // The settings are read once more after that call, so a switch to observe during it still stops the archive.
+      const settings = await deps.settings();
+      const kind = actionFor(late.fresh);
+      if (settings.mode !== "act" || kind === null || !settings.actions.has(kind)) {
+        record(late.fresh, "refused", { reason: "changed since the decision: act mode or the action was turned off", decision: entry.row.decision });
         return false;
       }
     }
@@ -620,9 +635,9 @@ export function createThreads(deps: ThreadsDeps) {
     entry: Entry,
     action: "compact" | "archive",
     how: { lookup: true } | { issue: IssueFacts | null | undefined },
-  ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string }> {
+  ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string; fresh?: Entry }> {
     const fresh = (await collect(entry.row.id, "lookup" in how ? { lookup: true } : { issue: how.issue })).entries[0];
-    const changed = (why: string) => ({ refusal: `changed since the decision: ${why}` });
+    const changed = (why: string) => (fresh === undefined ? { refusal: `changed since the decision: ${why}` } : { refusal: `changed since the decision: ${why}`, fresh });
     if (fresh === undefined) return changed("the thread is gone");
     if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnv(fresh.facts);
     // The settings are read last, after every await that reads bb, so a change during those reads counts.
@@ -669,11 +684,17 @@ export function createThreads(deps: ThreadsDeps) {
     const archived = new Set<string>();
     for (const entry of entries) {
       const kind = actionFor(entry);
-      if (settings.mode !== "act" || !acting) record(entry, "observed");
-      else if (kind !== null && settings.actions.has(kind)) {
-        if (await carryOut(entry)) archived.add(entry.row.id);
-      } else if (entry.row.decision === "flag") await flagSteward(entry);
-      else record(entry, "observed");
+      try {
+        if (settings.mode !== "act" || !acting) record(entry, "observed");
+        else if (kind !== null && settings.actions.has(kind)) {
+          if (await carryOut(entry)) archived.add(entry.row.id);
+        } else if (entry.row.decision === "flag") await flagSteward(entry);
+        else record(entry, "observed");
+      } catch (error) {
+        // One thread's failed read must not skip every thread after it: log it and go on.
+        deps.log(`could not carry out ${entry.row.decision} for ${entry.row.id}: ${message(error)}`);
+        record(entry, "failed", { error: message(error) });
+      }
     }
     const rows = entries
       .filter((entry) => !archived.has(entry.row.id))
@@ -713,9 +734,13 @@ export function createThreads(deps: ThreadsDeps) {
       if (action === "archive") {
         const completion = completionOf(entry.issue);
         if (!completion.done) throw new Refusal("conflict", `Cannot archive ${threadId}: not finished: ${completion.why}.`);
-        const close = await liveDescendants(threadId);
-        if (!close.complete) throw new Refusal("conflict", `Cannot archive ${threadId}: bb's thread list was cut off, so a child may be unseen.`);
-        if (close.ids.length > 0) throw new Refusal("conflict", `Cannot archive ${threadId}: child ${close.ids.join(", ")} is still live.`);
+        let close: number;
+        try {
+          close = await unarchivedBelow(threadId);
+        } catch (error) {
+          throw new Refusal("conflict", `Cannot archive ${threadId}: could not ask bb for the threads below it: ${message(error)}.`);
+        }
+        if (close > 0) throw new Refusal("conflict", `Cannot archive ${threadId}: bb reports ${close} unarchived thread${close === 1 ? "" : "s"} below it.`);
       }
       const reason = `${action === "archive" ? "Archive" : "Compact"} now: asked from the page`;
       try {
@@ -731,31 +756,13 @@ export function createThreads(deps: ThreadsDeps) {
   }
 
   /**
-   * The live threads below this one, re-read just before an archive so a child
-   * spawned during the last reads is seen. `complete` is false when bb's list
-   * stopped at its page cap, which is not proof that the thread has no child.
+   * How many unarchived threads bb would take with this one, asked of bb
+   * itself just before an archive. A list could miss a child spawned between
+   * its pages; this count cannot.
    */
-  async function liveDescendants(threadId: string): Promise<{ ids: string[]; complete: boolean }> {
-    const { rows, complete } = await listThreads();
-    if (!complete) return { ids: [], complete: false };
-    const childrenOf = new Map<string, string[]>();
-    for (const row of rows) {
-      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId, row.sourceThreadId])) {
-        if (owner !== null) childrenOf.set(owner, [...(childrenOf.get(owner) ?? []), row.id]);
-      }
-    }
-    const ids: string[] = [];
-    const seen = new Set([threadId]);
-    const walk = (id: string): void => {
-      for (const child of childrenOf.get(id) ?? []) {
-        if (seen.has(child)) continue;
-        seen.add(child);
-        ids.push(child);
-        walk(child);
-      }
-    };
-    walk(threadId);
-    return { ids, complete: true };
+  async function unarchivedBelow(threadId: string): Promise<number> {
+    const { unarchivedDescendantCount } = await sdk.threads.childSummary({ threadId });
+    return unarchivedDescendantCount;
   }
 
   /** Read every thread now, log the decisions, and keep the snapshot. In act mode only a pass with `acting` carries them out. */
