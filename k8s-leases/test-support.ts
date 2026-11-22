@@ -329,9 +329,9 @@ export class FakeGuard {
     const resolutions: Array<{ attempt: string; outcome: string }> = [];
     let unresolved = 0;
     for (const a of shown.open_attempts ?? []) {
-      // A create is resolved by its stamp in storage, or by another object holding the name. 404 proves nothing.
+      // A create resolves only by its own stamp in storage: a 404, or another object holding the name, proves
+      // nothing, since the name can be free again while the create is in flight.
       if (ns.stamps.get(a.name) === a.attempt) resolutions.push({ attempt: a.attempt, outcome: "committed" });
-      else if (ns.dgds.has(a.name)) resolutions.push({ attempt: a.attempt, outcome: "failed" });
       else unresolved += 1;
     }
     if (this.failDown) {
