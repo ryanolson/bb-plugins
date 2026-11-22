@@ -23,8 +23,8 @@ import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/
 import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
-/** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol plus the build Jobs and their teardown. */
-export const GUARD_COMMIT = "62b14c4f5fdd02a4f9b514733670af218528e233";
+/** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol plus the build Jobs, their teardown and the push-secret refusal. */
+export const GUARD_COMMIT = "b41792627e19c48086160f3390b91ce8060ff2aa";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
