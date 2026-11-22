@@ -41,6 +41,9 @@ test("a child's phase comes from the first role word in its title; a title with 
   assert.equal(phaseOf("fix the flaky test"), "other");
   // A role word after the first word names no role.
   assert.equal(phaseOf("1844: fix review links"), "other");
+  // Words Object.prototype has are not roles.
+  assert.equal(phaseOf("1844: constructor cleanup"), "other");
+  assert.equal(phaseOf("toString review"), "other");
   assert.equal(phaseOf("TEAM-1844: planner for the cut"), "plan");
   assert.equal(phaseOf("1844 coder"), "impl");
 });

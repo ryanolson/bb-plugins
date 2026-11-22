@@ -85,19 +85,20 @@ export interface ArchiveView {
   recordedSince: number | null;
 }
 
-const ROLE_WORDS: Readonly<Record<string, Exclude<Phase, "other">>> = {
-  plan: "plan",
-  planner: "plan",
-  planning: "plan",
-  impl: "impl",
-  implement: "impl",
-  implementation: "impl",
-  implementer: "impl",
-  coder: "impl",
-  review: "review",
-  reviewer: "review",
-  reviewing: "review",
-};
+// A Map, not an object: a title word such as `constructor` must not find Object.prototype.
+const ROLE_WORDS: ReadonlyMap<string, Exclude<Phase, "other">> = new Map<string, Exclude<Phase, "other">>([
+  ["plan", "plan"],
+  ["planner", "plan"],
+  ["planning", "plan"],
+  ["impl", "impl"],
+  ["implement", "impl"],
+  ["implementation", "impl"],
+  ["implementer", "impl"],
+  ["coder", "impl"],
+  ["review", "review"],
+  ["reviewer", "review"],
+  ["reviewing", "review"],
+]);
 
 /** An optional issue number at the start of a title: `1844:`, `1844`, `TEAM-1844:`. */
 const ISSUE_PREFIX = /^\s*(?:[A-Za-z][A-Za-z0-9]*-)?\d+\s*:?\s*/;
@@ -110,7 +111,7 @@ const ISSUE_PREFIX = /^\s*(?:[A-Za-z][A-Za-z0-9]*-)?\d+\s*:?\s*/;
 export function phaseOf(title: string): Phase {
   const rest = title.replace(ISSUE_PREFIX, "");
   const first = /^([A-Za-z]+)\b/.exec(rest)?.[1]?.toLowerCase();
-  return (first === undefined ? undefined : ROLE_WORDS[first]) ?? "other";
+  return (first === undefined ? undefined : ROLE_WORDS.get(first)) ?? "other";
 }
 
 /** Who did the work: the model, else the provider, else the thread id. */

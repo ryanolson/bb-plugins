@@ -29,8 +29,10 @@ export interface FakeThread {
   environmentHostId?: string | null;
   /** Context size; null for a thread bb has no usage for. */
   tokens?: number | null;
-  /** Epoch ms of its first turn, as `threads.events.list` returns it. */
+  /** Epoch ms its first turn started, the `turn/started` event. */
   firstTurnAt?: number;
+  /** Epoch ms of its first turn request, the `client/turn/requested` event that carries `brief`; START by default. */
+  requestedAt?: number;
   offerAt?: string;
   model?: string;
   queuedAt?: number;
@@ -63,6 +65,8 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
     archiveReply: null as ((threadId: string) => string[]) | null,
     /** Awaited by every context read, so a test can hold one. */
     contextGate: null as Promise<void> | null,
+    /** Awaited at the start of bb's archive call, before bb archives anything, so a test can hold the request. */
+    beforeArchive: null as (() => Promise<void>) | null,
   };
   const row = (thread: FakeThread) => ({
     id: thread.id,
@@ -93,6 +97,7 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
   for (const action of ["archive", "compact"]) {
     sdk.stub(`threads.${action}`, async (args: unknown) => {
       const { threadId } = args as { threadId: string };
+      if (action === "archive") await state.beforeArchive?.();
       if (actFails.has(action)) throw new Error(`${action} boom`);
       acted.push(`${action} ${threadId}`);
       if (action === "archive") {
@@ -118,14 +123,16 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
   });
   sdk.stub("threads.events.list", async (args: unknown) => {
     const thread = find(args);
-    if (thread.brief === undefined && thread.firstTurnAt === undefined) return [];
-    return [
-      {
+    const types = (args as { types?: readonly string[] }).types;
+    const wants = (type: string) => types === undefined || types.includes(type);
+    const events: unknown[] = [];
+    if (thread.brief !== undefined && wants("client/turn/requested")) {
+      events.push({
         id: `evt_${thread.id}`,
         scope: { kind: "thread" },
         threadId: thread.id,
         seq: 1,
-        createdAt: thread.firstTurnAt ?? START,
+        createdAt: thread.requestedAt ?? START,
         type: "client/turn/requested",
         data: {
           direction: "outbound",
@@ -135,10 +142,14 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
           senderThreadId: null,
           systemMessageKind: "unlabeled",
           systemMessageSubject: null,
-          input: [{ type: "text", text: thread.brief ?? "" }],
+          input: [{ type: "text", text: thread.brief }],
         },
-      },
-    ];
+      });
+    }
+    if (thread.firstTurnAt !== undefined && wants("turn/started")) {
+      events.push({ id: `evt_${thread.id}_turn`, scope: { kind: "thread" }, threadId: thread.id, seq: 2, createdAt: thread.firstTurnAt, type: "turn/started", data: {} });
+    }
+    return events;
   });
   sdk.stub("threads.childSummary", async (args: unknown) => {
     const { threadId } = args as { threadId: string };

@@ -155,6 +155,7 @@ export const STORE_MIGRATIONS: readonly string[] = [
     started_at INTEGER,
     started_from TEXT NOT NULL DEFAULT 'created',
     archived_at INTEGER NOT NULL,
+    first_archived_at INTEGER NOT NULL,
     unarchived_at INTEGER,
     source TEXT NOT NULL,
     state TEXT,

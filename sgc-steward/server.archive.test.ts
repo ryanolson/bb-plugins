@@ -137,10 +137,14 @@ test("bb's archive event for the plugin's own archive never adds a second row or
   for (const order of ["event first", "event last"] as const) {
     const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
     t.issue("TEAM-1", "state-done");
-    // bb sends its event inside the archive call by default; "event last" sends it after the reply.
-    if (order === "event last") t.state.onArchive = null;
+    // bb sends its event inside the archive call by default. For "event last" it queues it on a setImmediate before it replies, as real bb does, so the reply lands first.
+    if (order === "event last") {
+      t.state.onArchive = async (id) => {
+        const at = t.clock.now;
+        setImmediate(() => void t.emitArchived(id, at));
+      };
+    }
     await t.pass();
-    if (order === "event last") await t.emitArchived("thr_done", t.clock.now);
     const view = await t.archive();
     assert.equal(view.total, 1, order);
     const row = rowOf(view, "thr_done");
@@ -274,7 +278,7 @@ test("overlap: a held Archive now reply after an unarchive neither brings the ro
   assert.deepEqual([row.record.archiveCount, row.record.source], [2, "outside"]);
 });
 
-test("overlap: an unarchive and an outside re-archive while Archive now's reply is held keep the latest archive's facts", async () => {
+test("overlap: an unarchive and an outside re-archive while Archive now's reply is held: bb's times and count, and a row that says which archive was the plugin's is unknown", async () => {
   const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
   t.issue("TEAM-3", "state-done");
   const { release, acting } = await heldArchiveNow(t, "thr_solo");
@@ -285,7 +289,9 @@ test("overlap: an unarchive and an outside re-archive while Archive now's reply 
   const view = await t.archive();
   assert.equal(view.total, 1);
   const row = rowOf(view, "thr_solo");
-  assert.deepEqual([row.record.source, row.record.archiveCount, row.record.archivedAt], ["outside", 2, START + 10 * MINUTE]);
+  // The plugin sees the same as when the outside archive and undo come before its own: bb does not say which archive was the plugin's.
+  assert.deepEqual([row.record.source, row.record.archiveCount, row.record.archivedAt], ["page", 2, START + 10 * MINUTE]);
+  assert.match(row.why, /bb does not say which archive was the plugin's/);
 });
 
 test("overlap: a reply whose archivedThreadIds leaves the thread out writes none of the plugin's reasons", async () => {
@@ -341,15 +347,18 @@ test("a re-archive with no usage shows -, and its phase shows the known sum with
   assert.equal(rowOf(view, "thr_drv").phaseTokens, "impl 5k+?");
 });
 
-test("started is the first turn when bb has one, and the creation time, labeled so, when it has none", async () => {
+test("started is the first turn that started, and the creation time, labeled so, when none did", async () => {
   const t = await lifecycleSetup([
-    { id: "thr_ran", title: "ran", createdAt: START - 2 * 60 * MINUTE, firstTurnAt: START - 30 * MINUTE },
+    // Requested at 11:20, while bb provisioned; the turn started at 11:30.
+    { id: "thr_ran", title: "ran", brief: "do it", createdAt: START - 2 * 60 * MINUTE, requestedAt: START - 40 * MINUTE, firstTurnAt: START - 30 * MINUTE },
+    // Requested, then cancelled before any turn started.
+    { id: "thr_cancelled", title: "cancelled", brief: "do it", createdAt: START - 90 * MINUTE, requestedAt: START - 80 * MINUTE },
     { id: "thr_quiet", title: "never ran", createdAt: START - 60 * MINUTE },
   ]);
-  await t.emitArchived("thr_ran", START);
-  await t.emitArchived("thr_quiet", START);
+  for (const id of ["thr_ran", "thr_cancelled", "thr_quiet"]) await t.emitArchived(id, START);
   const view = await t.archive();
   assert.deepEqual([rowOf(view, "thr_ran").record.startedAt, rowOf(view, "thr_ran").record.startedFrom], [START - 30 * MINUTE, "first-turn"]);
+  assert.deepEqual([rowOf(view, "thr_cancelled").record.startedAt, rowOf(view, "thr_cancelled").record.startedFrom], [START - 90 * MINUTE, "created"]);
   assert.deepEqual([rowOf(view, "thr_quiet").record.startedAt, rowOf(view, "thr_quiet").record.startedFrom], [START - 60 * MINUTE, "created"]);
 });
 
@@ -380,4 +389,103 @@ test("an archive from before the plugin asked is someone else's, even when the p
   await assert.rejects(t.act("thr_solo", "archive"));
   const row = rowOf(await t.archive(), "thr_solo");
   assert.deepEqual([row.record.source, row.record.archivedAt], ["outside", START - MINUTE]);
+});
+
+test("a child titled with a word Object.prototype has still reads as other, and the tab still opens", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_drv", title: "1844: drive" },
+    { id: "thr_kid", title: "1844: constructor cleanup", parentThreadId: "thr_drv", tokens: 1_000 },
+  ]);
+  await t.emitArchived("thr_kid", START);
+  await t.emitArchived("thr_drv", START + MINUTE);
+  const driver = rowOf(await t.archive(), "thr_drv");
+  assert.deepEqual(driver.children.map((child) => child.phase), ["other"]);
+  assert.equal(driver.phaseTokens, "other 1k");
+});
+
+test("overlap: an outside archive and undo before bb handles Archive now leave the plugin's archive its own reason", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  const hold = gate();
+  let reached = false;
+  t.state.beforeArchive = async () => {
+    reached = true;
+    await hold.promise;
+  };
+  const acting = t.act("thr_solo", "archive");
+  await until(async () => reached, "bb's archive call");
+  // Someone else archives it and undoes that while the plugin's request waits.
+  await t.emitArchived("thr_solo", START + MINUTE);
+  await t.emitUnarchived("thr_solo");
+  t.clock.now = START + 2 * MINUTE;
+  hold.release();
+  await acting;
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.source, row.record.archiveCount, row.record.archivedAt], ["page", 2, START + 2 * MINUTE]);
+  assert.match(row.why, /bb does not say which archive was the plugin's/);
+});
+
+test("overlap: a reply that names no thread puts an unseen thread's row back to the outside facts, usage read included", async () => {
+  // Never listed, so the snapshot does not hold it.
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix", tokens: 12_000 }]);
+  t.issue("TEAM-3", "state-done");
+  t.state.archiveReply = () => [];
+  t.state.onArchive = (id) => t.emitArchived(id, t.clock.now);
+  await t.act("thr_solo", "archive");
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.source, row.record.model, row.tokens], ["outside", null, "12k"]);
+  assert.equal(row.why, "Archived outside the plugin; the lifecycle never saw it.");
+});
+
+test("re-archiving a thread does not move the start of what the tab covers", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_a", title: "a" },
+    { id: "thr_b", title: "b" },
+  ]);
+  await t.emitArchived("thr_a", START);
+  await t.emitArchived("thr_b", START + 10 * MINUTE);
+  await t.emitUnarchived("thr_a");
+  await t.emitArchived("thr_a", START + 20 * MINUTE);
+  assert.equal((await t.archive()).recordedSince, START);
+});
+
+test("overlap: the same archive announced twice while the plugin's note is open is still someone else's when the reply names no thread", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  await t.list();
+  t.state.archiveReply = () => [];
+  t.state.onArchive = async (id) => {
+    await t.emitArchived(id, t.clock.now);
+    await t.emitArchived(id, t.clock.now);
+  };
+  await t.act("thr_solo", "archive");
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.source, row.record.archiveCount], ["outside", 1]);
+  assert.doesNotMatch(row.why, /does not say/);
+});
+
+test("a failed archive call after an archive keeps the plugin's reason and says the archive may be someone else's", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  t.state.onArchive = async (id) => {
+    await t.emitArchived(id, t.clock.now);
+    throw new Error("the reply was lost");
+  };
+  await assert.rejects(t.act("thr_solo", "archive"));
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.equal(row.record.source, "page");
+  assert.match(row.why, /the plugin's archive call failed, so this archive may be someone else's/);
+});
+
+test("overlap: the plugin's own archive announced twice is one archive, with no doubt about whose it was", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  t.state.onArchive = async (id) => {
+    await t.emitArchived(id, t.clock.now);
+    await t.emitArchived(id, t.clock.now);
+  };
+  await t.act("thr_solo", "archive");
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.source, row.record.archiveCount], ["page", 1]);
+  assert.doesNotMatch(row.why, /does not say/);
 });

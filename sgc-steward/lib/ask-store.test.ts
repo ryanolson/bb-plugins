@@ -319,7 +319,7 @@ test("a database from before the archive table upgrades without losing a lifecyc
   assert.deepEqual(db.prepare("SELECT taken_at FROM thread_snapshot").all(), [{ taken_at: 5 }]);
   assert.deepEqual(db.prepare("SELECT thread_id, decision FROM thread_decisions").all(), [{ thread_id: "thr_a", decision: "archive" }]);
   assert.deepEqual(db.prepare("SELECT thread_id FROM thread_keeps").all(), [{ thread_id: "thr_k" }]);
-  const insert = db.prepare("INSERT INTO thread_archive (thread_id, title, archived_at, source, reason) VALUES ('thr_a', 'A', ?, 'outside', '')");
+  const insert = db.prepare("INSERT INTO thread_archive (thread_id, title, archived_at, first_archived_at, source, reason) VALUES ('thr_a', 'A', ?, 1, 'outside', '')");
   insert.run(1);
   assert.throws(() => insert.run(2), /UNIQUE/, "the thread id is the key");
   assert.deepEqual(db.prepare("SELECT archive_count, unarchived_at FROM thread_archive").all(), [{ archive_count: 1, unarchived_at: null }]);
