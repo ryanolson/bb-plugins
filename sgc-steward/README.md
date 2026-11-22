@@ -189,6 +189,25 @@ The RPC is `threads.list` (`{ refresh }`: the snapshot, read now when `refresh` 
 
 The service keeps its last snapshot and the decision log in the plugin's SQLite database. A decision is logged once per cache life, and again only when the decision or its reason changes.
 
+### Archive
+
+**The Archive tab** and `bb sgc threads archive` list each archived thread the plugin recorded, newest archive first. Each row shows:
+
+- the title (a link to the thread), its issue, and its parent: `Child of <title>`, `..., which is still open`, or `Parent <id> is missing` when the parent has no archive row and was not open at the last check;
+- when it started (bb's creation time) and when it was archived;
+- why: who archived it and the reason they had. `Archived by the lifecycle as done: TEAM-12 is Done.`, `Archived from the page (Archive now) ...`, or `Archived outside the plugin; last seen idle-active: TEAM-12 is In Progress.` for an archive by another thread, by the owner in bb, or by bb cascading a parent's archive. A thread archived more than once says how many times;
+- what happened. A thread that drove others gets a roll-up of every recorded thread below it, oldest first: `Planned with fable; 4 rounds of impl (a, b, c, d); reviews by e, f, g; other: h. TEAM-12 Done.` Each child is named by its model, else its provider. A thread that drove none shows its own fate: `TEAM-12 Done; archived by the lifecycle.`;
+- tokens, approximate, as the column header says once: the thread's context size when it was archived, and for a driver its children summed by phase, `plan 41k, impl 210k, review 66k`. The phase comes from the first role word in a child's title (`plan`, `impl` or `coder`, `review`, and their forms such as `planner`); a title with none counts as `other`. A thread with no recorded usage shows `-`, never 0, and a phase where only some threads have usage shows the known sum with `+?`.
+
+A row is written when the thread is archived, never on render:
+
+- The lifecycle's own archive, and Archive now, write the row after bb accepts the archive, with the state, reason, issue and tokens the decision used.
+- Every other archive arrives as bb's `thread.archived` event. Its row takes the title, parent and start time from the event, and the state, issue, model and tokens from the last snapshot. A thread the snapshot never held gets one context read for its tokens, and no model.
+- bb sends the event for the plugin's own archives too, before or after the plugin's write. The plugin's write always wins, and the event writes only when the thread has no row, was unarchived, or has a row older than this archive.
+- `thread.unarchived` takes the row off the tab. A later archive updates the same row, keyed by thread id, and counts it.
+
+Opening the tab reads only the plugin's own table and the last snapshot: the roll-up is a join over the rows already recorded, not a read of each thread. A row keeps what it recorded: a later change to the issue, or its deletion, does not change it. The page reads the rows when the tab opens, and again on the `archive` realtime channel, which the server signals after each write. The RPC is `archive.list`: the newest 200 rows and the total.
+
 ## How it works
 
 A service on the bb server polls Linear every `pollMinutes`. It lists the team's open issues that have the `checkin` or `needs-decision` label. It reads an issue's comments again only when the issue changed, and every issue once an hour. It reads every page of an issue's comments, threaded replies included, and sorts them itself. An issue with more than 1000 comments, or more than 20 replies in one thread, shows as unreadable instead of being guessed. Polls and answers run one at a time. Each request to Linear has a 30-second deadline, and an answer stops a poll in progress and skips polls waiting their turn, instead of waiting for them. An answer's comment id comes from the answer itself, so the same answer, retried or sent again, is never posted twice. Each block has a revision, a hash of its context, questions, and options, and the thread in its signature. Before it posts, it reads the issue again. It refuses when the block it answers changed or closed, when a question it answers has an answer already, or when the issue is completed or canceled, so an answer never closes a question you did not see. A block that arrived since does not stop it, because the answer does not name that block. Each poll also reads the todo list, in one more request. A failed read of the todos keeps the list from the read before and does not stop the questions.
@@ -216,6 +235,7 @@ bb sgc todo done <issue> [--note <text>] [--json]
 bb sgc hosts [--digest] [--json]
 bb sgc threads [--json] [--cached]
 bb sgc threads log [--limit <n>] [--json]
+bb sgc threads archive [--limit <n>] [--json]
 bb sgc key --api-key-stdin
 ```
 
@@ -231,7 +251,7 @@ bb sgc key --api-key-stdin
 - `resume` resumes a paused issue, as the Resume button does. `--note` adds a note to the comment and to the steward's message.
 - `todo done` marks a todo done, as the Done button does. `--note` adds a note to the comment and to the steward's message.
 - `hosts` prints each host's threads against bb's concurrency limit, as described in [Hosts](#hosts). `--digest` prints only the hosts at their limit and the hosts with waiting turns. It exits 1 when the limits could not be read.
-- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. It exits 1 when bb could not be read.
+- `threads` reads every thread and prints its state, issue, provider and model, tokens used, when its cache expires, the decision, and the reason, soonest expiry first, as described in [Thread lifecycle](#thread-lifecycle). `--cached` prints the last snapshot and reads nothing. `threads log` prints the logged decisions, newest first; `--limit` is 20 by default, at most 500. `threads archive` prints the archived threads the plugin recorded, newest first, as described in [Archive](#archive); it reads only the plugin's own record, and `--limit` is 200 by default, at most 500. It exits 1 when bb could not be read.
 - `key` reads the API key from stdin and stores it.
 
 ## Settings
@@ -290,14 +310,15 @@ bb plugin logs sgc-steward
 - `lib/todos.ts`: which issues are todos, their task lines, and the text that Done and Undo post and send.
 - `lib/hosts.ts`: the Hosts view model, its digest, and their text, for the CLI and the page.
 - `lib/hosts-read.ts`: the reads of bb behind the Hosts view: the threads, the held rows, and the limits.
+- `lib/archive-view.ts`: the Archive tab's view model: why a thread was archived, the roll-up of its children, phases from titles, and tokens by phase, composed from recorded rows. The page imports it.
 - `lib/threads-view.ts`: the Threads tab's view model: row text, grouping by host, the summary, the badge count, and button refusals. The page imports it.
 - `lib/lifecycle.ts`: thread states, cache expiry, and the decision, as pure functions with no bb or Node imports.
 - `lib/refusal.ts`: the refusal the page and the CLI both show.
 - `paused.ts`: the paused list on the server: its poll, Resume, RPC, and CLI.
-- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, and `bb sgc threads`.
+- `threads.ts`: the thread lifecycle on the server: the five-minute read, the snapshot and decision log, the archive rows, and `bb sgc threads`.
 - `todos.ts`: the todo list on the server: its poll, Done, Undo, notifications, RPC, and CLI.
 - `server.ts`: settings, the poller, the answer and delivery paths, RPC, and the `bb sgc` CLI.
-- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, and Threads tabs, its sidebar badge, and the notifier.
+- `app.tsx`: the SGC questions page with its Questions, Todos, Paused, Hosts, Threads, and Archive tabs, its sidebar badge, and the notifier.
 - `components/answer-fields.tsx`: a question card's choices, rendered as Markdown radios, and its answer box.
 - `test-support-tsx.ts`: lets `node --test` import `.tsx` components, with a stand-in for bb's `Markdown`.
 - `skills/sgc-steward/SKILL.md`: the format and the CLI, for agents.

@@ -36,6 +36,7 @@ import {
   type ThreadRowView,
   type ThreadsView,
 } from "./lib/threads-view.ts";
+import { ARCHIVE_CHANNEL, parentText, type ArchiveRowView, type ArchiveView } from "./lib/archive-view.ts";
 import {
   announcement,
   askAnswerInput,
@@ -1153,6 +1154,134 @@ function Threads({
   );
 }
 
+// --- archive --------------------------------------------------------------
+
+/** The Archive tab's rows: read when the tab opens, and again whenever the server writes an archive row. */
+function useArchive(active: boolean) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [view, setView] = useState<ArchiveView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const latest = useRef(0);
+  const load = useCallback(() => {
+    const request = ++latest.current;
+    rpc.call("archive.list", null).then(
+      (next) => {
+        if (request !== latest.current) return;
+        setView(next);
+        setError(null);
+      },
+      (cause: unknown) => {
+        if (request === latest.current) setError(errorText(cause));
+      },
+    );
+  }, [rpc]);
+  useEffect(() => {
+    if (active) load();
+  }, [active, load]);
+  useRealtime(
+    ARCHIVE_CHANNEL,
+    useCallback(() => {
+      if (active) load();
+    }, [active, load]),
+  );
+  return { view, error };
+}
+
+function ThreadLink({ threadId, children }: { threadId: string; children: ReactNode }) {
+  const navigate = useBbNavigate();
+  return (
+    <button type="button" className="cursor-pointer text-left underline-offset-2 hover:underline" title={threadId} onClick={() => navigate.toThread(threadId)}>
+      {children}
+    </button>
+  );
+}
+
+function ArchiveRow({ row }: { row: ArchiveRowView }) {
+  const { record } = row;
+  const parent = parentText(row.parent);
+  return (
+    <tr className="border-t border-border align-top">
+      <td className="px-2 py-1.5">
+        <div className="font-medium">
+          <ThreadLink threadId={record.threadId}>{record.title || record.threadId}</ThreadLink>
+        </div>
+        {record.issue === null ? null : (
+          <div className="font-mono text-xs">
+            {record.issue.url === null ? (
+              record.issue.identifier
+            ) : (
+              <UrlLink href={appLink(record.issue.url)} className="underline-offset-2 hover:underline">
+                {record.issue.identifier}
+              </UrlLink>
+            )}
+          </div>
+        )}
+        {parent === null ? null : (
+          <div className={cn("text-xs", row.parent?.status === "missing" ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>
+            {row.parent?.status === "missing" ? parent : <ThreadLink threadId={row.parent!.threadId}>{parent}</ThreadLink>}
+          </div>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-2 py-1.5 text-xs tabular-nums">
+        <div>{record.startedAt === null ? "?" : new Date(record.startedAt).toLocaleString()}</div>
+        <div>{new Date(record.archivedAt).toLocaleString()}</div>
+      </td>
+      <td className="max-w-64 px-2 py-1.5 text-xs">{row.why}</td>
+      <td className="max-w-72 px-2 py-1.5 text-xs">
+        <div>{row.summary}</div>
+        {row.children.length === 0 ? null : (
+          <div className="mt-1 flex flex-wrap gap-x-2 text-muted-foreground">
+            {row.children.map((child) => (
+              <span key={child.threadId} title={`${child.title}: ${child.fate}`}>
+                <ThreadLink threadId={child.threadId}>
+                  {child.phase} {child.name}
+                </ThreadLink>
+              </span>
+            ))}
+          </div>
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-xs tabular-nums">
+        <div>{row.tokens}</div>
+        {row.phaseTokens === null ? null : <div className="text-muted-foreground">{row.phaseTokens}</div>}
+      </td>
+    </tr>
+  );
+}
+
+/** The Archive tab: each archived thread the plugin recorded, newest first, with why it went and what its children did. */
+function Archive({ view, error }: { view: ArchiveView | null; error: string | null }) {
+  return (
+    <>
+      <div className="text-sm text-muted-foreground">
+        {view === null ? "Loading…" : view.total > view.rows.length ? `The newest ${view.rows.length} of ${view.total} archived threads.` : `${view.total} archived threads.`}
+      </div>
+      {error === null ? null : <Notice tone="error">Could not read the archive: {error}</Notice>}
+      {view !== null && view.rows.length === 0 ? <Notice>No archived threads recorded yet. Each archive from now on gets a row.</Notice> : null}
+      {view === null || view.rows.length === 0 ? null : (
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs text-muted-foreground">
+              <tr>
+                {["Thread", "Started / archived", "Why", "What happened", "Tokens (approximate: context size when archived; children by phase)"].map((title) => (
+                  <th key={title} scope="col" className="px-2 py-1.5 font-medium">
+                    {title}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {view.rows.map((row) => (
+                <ArchiveRow key={row.record.threadId} row={row} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
 /** The SGC page: the last check and its trouble on top, then a tab per list. */
 function SgcPage({ subPath }: { subPath: string }) {
   const { rpc, snapshot, setSnapshot, loadError, load } = useQuestions();
@@ -1163,6 +1292,7 @@ function SgcPage({ subPath }: { subPath: string }) {
   const hosts = useHosts(tab === "hosts");
   const threads = useThreads(tab === "threads");
   const threadsNow = useNow(10_000);
+  const archive = useArchive(tab === "archive");
   const [chosen, setChosen] = useState<string[]>([]);
   const [match, setMatch] = useState<LabelMatch>("any");
   const [order, setOrder] = useState<CardOrder>("age");
@@ -1282,6 +1412,9 @@ function SgcPage({ subPath }: { subPath: string }) {
         </TabPanel>
         <TabPanel tab="threads" active={tab}>
           <Threads data={threads.data} error={threads.error} onRefresh={() => threads.load(true)} onChanged={() => threads.load()} now={threadsNow} />
+        </TabPanel>
+        <TabPanel tab="archive" active={tab}>
+          <Archive view={archive.view} error={archive.error} />
         </TabPanel>
       </div>
     </div>

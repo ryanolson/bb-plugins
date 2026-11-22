@@ -31,6 +31,8 @@ export interface ThreadRowView {
   inWindow: boolean;
   decision: Decision;
   reason: string;
+  /** The thread it was spawned under, for the Archive tab when bb's archive event no longer names it; absent in a snapshot from before it was kept. */
+  parentThreadId?: string | null;
 }
 
 export interface ThreadsView {

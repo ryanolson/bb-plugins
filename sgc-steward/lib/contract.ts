@@ -235,6 +235,44 @@ const threadsViewSchema = z.object({
       inWindow: z.boolean(),
       decision: decisionSchema,
       reason: z.string(),
+      parentThreadId: z.string().nullable().optional(),
+    }),
+  ),
+});
+const phaseSchema = z.enum(["plan", "impl", "review", "other"]);
+const archiveViewSchema = z.object({
+  total: z.number().int(),
+  rows: z.array(
+    z.object({
+      record: z.object({
+        threadId: z.string(),
+        title: z.string(),
+        parentThreadId: z.string().nullable(),
+        provider: z.string().nullable(),
+        model: z.string().nullable(),
+        startedAt: z.number().nullable(),
+        archivedAt: z.number(),
+        source: z.enum(["lifecycle", "page", "outside"]),
+        state: z.string().nullable(),
+        reason: z.string(),
+        issue: z.object({ identifier: z.string(), url: z.string().nullable(), stateName: z.string().nullable() }).nullable(),
+        usedTokens: z.number().nullable(),
+        archiveCount: z.number().int(),
+      }),
+      why: z.string(),
+      parent: z
+        .discriminatedUnion("status", [
+          z.object({ threadId: z.string(), status: z.literal("archived"), title: z.string() }),
+          z.object({ threadId: z.string(), status: z.literal("open"), title: z.string() }),
+          z.object({ threadId: z.string(), status: z.literal("missing") }),
+        ])
+        .nullable(),
+      children: z.array(
+        z.object({ threadId: z.string(), title: z.string(), name: z.string(), phase: phaseSchema, fate: z.string(), usedTokens: z.number().nullable() }),
+      ),
+      summary: z.string(),
+      tokens: z.string(),
+      phaseTokens: z.string().nullable(),
     }),
   ),
 });
@@ -319,6 +357,8 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1), action: z.enum(["keep", "compact", "archive"]) }),
     output: z.object({ message: z.string() }),
   },
+  /** The archived threads the plugin recorded, newest first, with their roll-ups. Reads only the plugin's database. */
+  "archive.list": { input: z.null(), output: archiveViewSchema },
   /** Hand out the questions no window has notified about yet, once each. */
   "notifications.claim": { input: z.null(), output: z.object({ notifications: z.array(notificationSchema) }) },
 });

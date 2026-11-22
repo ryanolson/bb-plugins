@@ -73,6 +73,7 @@ import { createPaused } from "./paused.ts";
 import { createTodos } from "./todos.ts";
 import { parseCacheLifeOverrides, parseLifecycleActions } from "./lib/lifecycle.ts";
 import { THREADS_POLL_MS, createThreads, threadsCommand } from "./threads.ts";
+import { ARCHIVE_CHANNEL } from "./lib/archive-view.ts";
 import { SETTINGS, WITHDRAW_TOOL } from "./lib/settings.ts";
 import { firstLine, formatPanel, parseBlockOption, preview, truncate, withdrawalReport, type WithdrawalResult } from "./lib/format.ts";
 
@@ -193,6 +194,8 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
       comment: async (issueId, body, key) => void (await writeLinear((linear) => postComment(linear, issueId, body, answerCommentId(issueId, key)))),
       steward: () => stewardFor(),
       send: async (threadId, text) => void (await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] })),
+      // Its own channel: the questions channel makes every open window claim notifications.
+      archiveChanged: () => bb.realtime.publish(ARCHIVE_CHANNEL, {}),
       // Reads only: it never takes the plugin's Linear lock, and errors say nothing of the key.
       linear: async () => {
         const { linearApiKey, teamKey } = await settings.get();
@@ -832,9 +835,14 @@ export function createSgcStewardPlugin(options: SgcStewardOptions = {}) {
           return await refuse(error);
         }
       },
+      "archive.list": () => threads.archive(),
       ...todos.rpc,
       ...pausedWork.rpc,
     });
+
+    // Every archive, the plugin's own or anyone else's, including bb's cascade to a parent's children, gets its row here; an unarchive takes it off the Archive tab.
+    bb.events.on("thread.archived", async ({ thread }) => threads.onArchived(thread));
+    bb.events.on("thread.unarchived", ({ thread }) => threads.onUnarchived(thread));
 
     // The steward's power to withdraw any question lives only here: bb hands
     // execute the thread of the agent session that made the call, which no
