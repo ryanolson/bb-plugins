@@ -58,7 +58,14 @@ export interface IssueFacts {
   labels: string[];
   /** Epoch ms of the issue's last change. */
   updatedAt: number;
+  /** How the issue was found for this thread. A `brief` link can label a thread but never finish it. */
+  link: IssueLink;
+  /** Epoch ms of a signed closure comment naming this thread, or null. */
+  closureAt: number | null;
 }
+
+/** A thread's issue, by how strongly the thread names it. */
+export type IssueLink = "claim" | "title" | "brief";
 
 /** What `environments.status` says about the thread's checkout. */
 export interface EnvFacts {
@@ -83,13 +90,12 @@ export interface EnvFacts {
 /** A thread below another, which an archive of the parent archives with it. */
 export interface DescendantFacts {
   id: string;
+  /** For the reason text. */
+  title?: string;
   /** Why it is protected, or null. */
   protectedBy: string | null;
-  environmentId?: string | null;
   /** What keeps it from being archived with its parent: queued work or work in the background; null when idle. */
   busy?: string | null;
-  /** Its checkout, as for the thread: null for none, absent when not read. */
-  env?: EnvFacts | null;
 }
 
 export interface ThreadFacts {
@@ -114,6 +120,8 @@ export interface ThreadFacts {
   oldestQueuedAt: number | null;
   /** Some descendant thread is running a turn. */
   childWorking: boolean;
+  /** False when `threads.list` stopped at its page cap, so a child may be unseen. Absent means complete. */
+  graphComplete?: boolean;
   /** Every unarchived thread below this one: archiving the parent archives them too. */
   descendants?: DescendantFacts[];
   environmentId: string | null;
@@ -202,11 +210,19 @@ export function classify(facts: ThreadFacts, ctx: LifecycleContext): Classificat
       ? { state: "orphan", reason: `no issue, idle ${Math.floor(idleMs / HOUR)} h` }
       : { state: "idle-active", reason: "no issue yet" };
   }
-  if (issue.stateType === "completed" || issue.stateType === "canceled") return { state: "done", reason: `${issue.identifier} is ${issue.stateName}` };
+  const completion = completionOf(issue);
+  if (issue.stateType === "completed" || issue.stateType === "canceled") {
+    return completion.done
+      ? { state: "done", reason: completion.why }
+      : { state: "idle-active", reason: `${issue.identifier} is ${issue.stateName}, but ${completion.why}` };
+  }
+  // The owner's or a reviewer's park wins over a closure comment: the archive it allows is `archive-parked`.
   if (issue.stateType === "backlog" && hasLabel(issue, (name) => name === "paused")) {
     return { state: "parked", reason: `${issue.identifier} is paused in the backlog` };
   }
   if (hasLabel(issue, (name) => name.startsWith("waiting:"))) return { state: "parked", reason: `${issue.identifier} is waiting on someone` };
+  if (completion.done) return { state: "done", reason: completion.why };
+  // A long, quiet review is only a guess at a park, so a closure comment beats it: the archive stays `archive-done`.
   if (/review/i.test(issue.stateName) && ctx.now - Math.max(issue.updatedAt, facts.lastActivityAt) >= REVIEW_PARKED_MS) {
     return { state: "parked", reason: `${issue.identifier} has been in review for 48 hours with nothing to do` };
   }
@@ -221,21 +237,30 @@ function envBlockers(env: EnvFacts | null | undefined, who: string): string[] {
 }
 
 /**
- * What stops an archive: empty when it is safe. An archive takes the thread's
- * descendants with it, so each of them must be unprotected and safe as well.
+ * The blockers that need no environment read: protection, a working child,
+ * and every live child. `collect` checks these before it reads any checkout.
  */
-export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
+export function envlessBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
   const blockers: string[] = [];
   const guarded = isProtected(facts, ctx);
   if (guarded !== null) blockers.push(`the thread is protected: ${guarded}`);
   if (facts.childWorking) blockers.push("a child thread is working");
-  blockers.push(...envBlockers(facts.env, "the"));
+  if (facts.graphComplete === false) blockers.push("bb's thread list was cut off, so a child may be unseen");
   for (const child of facts.descendants ?? []) {
+    blockers.push(`child ${child.id} is still live${child.title === undefined || child.title === "" ? "" : ` (${child.title.length > 60 ? `${child.title.slice(0, 59)}…` : child.title})`}`);
     if (child.protectedBy !== null) blockers.push(`child ${child.id} is protected: ${child.protectedBy}`);
     if (child.busy) blockers.push(`child ${child.id} ${child.busy}`);
-    blockers.push(...envBlockers(child.env, `child ${child.id}'s`));
   }
   return blockers;
+}
+
+/**
+ * What stops an archive: empty when it is safe. A live child always stops it,
+ * because an archive takes the thread's descendants with it and a child may be
+ * doing work of its own. Its checkout is not read: the archive cannot happen.
+ */
+export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
+  return [...envlessBlockers(facts, ctx), ...envBlockers(facts.env, "the")];
 }
 
 /**
@@ -256,8 +281,10 @@ export function decide(facts: ThreadFacts, classification: Classification, ctx: 
   if (state === "stuck" || state === "orphan") return { decision: "flag", reason: classification.reason, inWindow };
   if (state === "working" || state === "waiting") return { decision: "none", reason: classification.reason, inWindow };
 
-  // A finished or parked thread is archived whenever it is seen and safe: once its cache is cold there is nothing left to save, and a thread whose issue closes late is no different.
+  // A finished or parked thread is archived whenever it is seen and safe: once its cache is cold there is nothing left to save. Completion comes first: an idle thread is not a finished one.
   if (state === "done" || state === "parked") {
+    const completion = completionOf(ctx.issue);
+    if (!completion.done) return { decision: "flag", reason: `${classification.state} but not finished: ${completion.why}`, inWindow };
     const blockers = safetyBlockers(facts, ctx);
     if (blockers.length > 0) return { decision: "flag", reason: `${classification.state} but not safe to archive: ${blockers.join("; ")}`, inWindow };
     return { decision: "archive", reason: classification.reason, inWindow };
@@ -293,18 +320,72 @@ export function titleIdentifier(title: string, teamKey: string): string | null {
   return bare === null ? null : `${teamKey.toUpperCase()}-${bare[1]}`;
 }
 
-export interface IssueWithComments extends IssueFacts {
+export interface IssueWithComments extends Omit<IssueFacts, "link" | "closureAt"> {
   comments: Array<{ body: string; createdAt: number }>;
+}
+
+/** A signed comment that opens as an indented or fenced code block is an example, not a signature. */
+function isExample(body: string): boolean {
+  const first = body.split("\n").find((line) => line.trim() !== "") ?? "";
+  // A tab advances to the next 4-column stop, so " \t" is as indented as four spaces.
+  return /^\s*(```|~~~)/.test(first) || /^ {4,}/.test(first.replace(/\t/g, "    "));
 }
 
 /** The thread id a signed `claim:` comment names, or null. */
 export function claimThread(body: string): string | null {
+  if (isExample(body)) return null;
   const match = /^\[agent:[^\s\]]+[ \t]+(thr_[a-z0-9]+)[ \t]*\]\s*claim:/i.exec(body.trim());
   return match === null ? null : match[1]!.toLowerCase();
 }
 
-/** A thread's issue: the latest signed claim that names it, else its title's prefix. */
-export function issueFor(thread: { id: string; title: string }, issues: readonly IssueWithComments[], teamKey: string): IssueWithComments | null {
+/**
+ * The thread id a signed comment closes, or null. Only a `done:`, `closed:` or
+ * `superseded:` comment counts, and never the plugin's own `archived` record:
+ * that comment must not become the evidence for the archive it announces.
+ */
+export function closureThread(body: string): string | null {
+  if (isExample(body)) return null;
+  const match = /^\[agent:(?!sgc-steward\b)[^\s\]]+[ \t]+(thr_[a-z0-9]+)[ \t]*\]\s*(?:done|closed|superseded):/i.exec(body.trim());
+  return match === null ? null : match[1]!.toLowerCase();
+}
+
+/** Epoch ms of the latest signed closure comment naming this thread, or null. */
+export function closureAt(comments: ReadonlyArray<{ body: string; createdAt: number }>, threadId: string): number | null {
+  let latest: number | null = null;
+  for (const comment of comments) {
+    if (closureThread(comment.body) === threadId.toLowerCase() && (latest === null || comment.createdAt > latest)) latest = comment.createdAt;
+  }
+  return latest;
+}
+
+/**
+ * Whether an archive may treat the thread as finished. The issue must be Done
+ * or Canceled, or carry a signed closure comment that names the thread. A
+ * thread linked only by its brief is never finished: the brief may name a
+ * related issue first. No issue, or an unreadable Linear, is not finished.
+ */
+export function completionOf(issue: IssueFacts | null | undefined): { done: boolean; why: string } {
+  if (issue === null || issue === undefined) return { done: false, why: "no issue could be read for the thread" };
+  if (issue.link === "brief") return { done: false, why: `only the thread's brief names ${issue.identifier}` };
+  if (issue.stateType === "completed" || issue.stateType === "canceled") return { done: true, why: `${issue.identifier} is ${issue.stateName}` };
+  if (!OPEN_STATE_TYPES.has(issue.stateType)) return { done: false, why: `${issue.identifier} has no readable state` };
+  if (issue.closureAt !== null) return { done: true, why: `${issue.identifier} is ${issue.stateName}, with a signed closure comment` };
+  return { done: false, why: `${issue.identifier} is ${issue.stateName}, with no closure comment` };
+}
+
+/** The states a thread can be open in. A comment closes one of these; an unknown state is no evidence. */
+const OPEN_STATE_TYPES = new Set(["backlog", "unstarted", "started", "triage"]);
+
+/** The first `TEAM-NNNN` anywhere in a thread's brief, or null. The weakest way a thread names its issue. */
+export function briefIdentifier(brief: string, teamKey: string): string | null {
+  const key = teamKey.replace(/[^A-Za-z0-9]/g, "");
+  if (key === "") return null;
+  const match = new RegExp(`\\b${key}-(\\d{1,6})\\b`, "i").exec(brief);
+  return match === null ? null : `${teamKey.toUpperCase()}-${match[1]}`;
+}
+
+/** A thread's issue: the latest signed claim that names it, else its title's prefix, else the first issue its brief names. */
+export function issueFor(thread: { id: string; title: string }, issues: readonly IssueWithComments[], teamKey: string, brief?: string | null): IssueWithComments | null {
   let best: { issue: IssueWithComments; at: number } | null = null;
   for (const issue of issues) {
     for (const comment of issue.comments) {
@@ -313,7 +394,9 @@ export function issueFor(thread: { id: string; title: string }, issues: readonly
   }
   if (best !== null) return best.issue;
   const identifier = titleIdentifier(thread.title, teamKey);
-  return identifier === null ? null : (issues.find((issue) => issue.identifier.toUpperCase() === identifier) ?? null);
+  if (identifier !== null) return issues.find((issue) => issue.identifier.toUpperCase() === identifier) ?? null;
+  const fromBrief = briefIdentifier(brief ?? "", teamKey);
+  return fromBrief === null ? null : (issues.find((issue) => issue.identifier.toUpperCase() === fromBrief) ?? null);
 }
 
 /** The kinds of action the plugin may take in act mode. */

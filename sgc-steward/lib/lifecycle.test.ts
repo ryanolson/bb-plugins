@@ -8,8 +8,12 @@ import {
   cacheExpiry,
   claimThread,
   classify,
+  closureAt,
+  closureThread,
+  completionOf,
   decide,
   formatExpiresIn,
+  briefIdentifier,
   issueFor,
   cacheLifeOverridesProblem,
   lifecycleActionsProblem,
@@ -52,7 +56,7 @@ function thread(extra: Partial<ThreadFacts> = {}): ThreadFacts {
 }
 
 function issue(stateName: string, stateType: string, extra: Partial<IssueFacts> = {}): IssueFacts {
-  return { id: "uuid-1678", identifier: "TEAM-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, ...extra };
+  return { id: "uuid-1678", identifier: "TEAM-1678", url: "linear://x", title: "t", stateName, stateType, labels: [], updatedAt: NOW - HOUR, link: "claim", closureAt: null, ...extra };
 }
 
 function context(extra: Partial<LifecycleContext> = {}): LifecycleContext {
@@ -88,6 +92,129 @@ test("parked: a paused backlog issue, a waiting label, and a review with 48 quie
 test("done: the issue is Done or Canceled", () => {
   assert.equal(stateOf(thread(), context({ issue: issue("Done", "completed") })), "done");
   assert.equal(stateOf(thread(), context({ issue: issue("Canceled", "canceled") })), "done");
+});
+
+test("completion: a closed issue, or a signed closure comment on this thread, and nothing else", () => {
+  assert.deepEqual(completionOf(issue("Done", "completed")), { done: true, why: "TEAM-1678 is Done" });
+  assert.equal(completionOf(issue("Todo", "unstarted")).done, false);
+  assert.equal(completionOf(issue("In Review", "started")).done, false);
+  assert.deepEqual(completionOf(issue("In Progress", "started", { closureAt: NOW - MINUTE })), {
+    done: true,
+    why: "TEAM-1678 is In Progress, with a signed closure comment",
+  });
+  assert.equal(completionOf(issue("Done", "completed", { link: "brief" })).done, false, "a brief link cannot finish a thread");
+  assert.equal(completionOf(null).done, false);
+  assert.equal(completionOf(undefined).done, false);
+});
+
+test("an indented or fenced code sample is not a signed claim or closure, a tab counting as four columns", () => {
+  assert.equal(closureThread("    [agent:codex thr_a] done: copy this format"), null);
+  assert.equal(closureThread(" \t[agent:codex thr_a] done: example"), null);
+  assert.equal(closureThread("```\n[agent:codex thr_a] done: x\n```"), null);
+  assert.equal(claimThread("    [agent:codex thr_a] claim: an example"), null);
+  assert.equal(closureThread("[agent:codex thr_a] done: real"), "thr_a");
+});
+
+test("a closure comment closes only an issue whose open state was read", () => {
+  assert.equal(completionOf(issue("Unknown", "unknown", { closureAt: NOW })).done, false);
+  assert.equal(completionOf(issue("Todo", "unstarted", { closureAt: NOW })).done, true);
+  assert.equal(completionOf(issue("In Review", "started", { closureAt: NOW })).done, true);
+});
+
+test("a Done issue linked only by the brief is not done, so the thread is not flagged as finished", () => {
+  const ctx = context({ issue: issue("Done", "completed", { link: "brief" }) });
+  const facts = thread({ lastActivityAt: NOW - 25 * HOUR });
+  assert.equal(stateOf(facts, ctx), "idle-active");
+  assert.match(classify(facts, ctx).reason, /only the thread's brief names/);
+  assert.notEqual(decide(facts, classify(facts, ctx), ctx).decision, "archive");
+});
+
+test("a paused or waiting issue with a closure comment stays parked, so archive-parked can act on it", () => {
+  const paused = issue("Backlog", "backlog", { labels: ["paused"], closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread(), context({ issue: paused })), "parked");
+  const waiting = issue("In Progress", "started", { labels: ["waiting:owner"], closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread(), context({ issue: waiting })), "parked");
+  // A quiet review with a closure is done, not parked: the park there is only a guess.
+  const review = issue("In Review", "started", { updatedAt: NOW - 49 * HOUR, closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread({ lastActivityAt: NOW - 49 * HOUR }), context({ issue: review })), "done");
+});
+
+test("a signed done comment names the thread it closes; the steward's archived comment does not", () => {
+  const comments = [
+    { body: "[agent:claude-code thr_a] done: shipped", createdAt: 1 },
+    { body: "[agent:claude-code thr_b] closed: not ours", createdAt: 2 },
+    { body: "[agent:sgc-steward] archived thr_a: TEAM-1 is Done", createdAt: 3 },
+    { body: "[agent:codex thr_a] claim: taking it", createdAt: 4 },
+  ];
+  assert.equal(closureAt(comments, "thr_a"), 1);
+  assert.equal(closureAt(comments, "thr_b"), 2);
+  assert.equal(closureAt([comments[2]!], "thr_a"), null);
+  assert.equal(closureAt([comments[3]!], "thr_a"), null);
+});
+
+test("a planner whose issue is Todo is never done, however idle, and never archived", () => {
+  const ctx = context({ issue: issue("Todo", "unstarted", { labels: ["approved"] }) });
+  for (const age of [MINUTE, 25 * HOUR]) {
+    const facts = thread({ title: "Planner: k8s-guard pre-made namespaces", lastActivityAt: NOW - age });
+    assert.equal(stateOf(facts, ctx), "idle-active");
+    assert.notEqual(decide(facts, classify(facts, ctx), ctx).decision, "archive");
+  }
+});
+
+test("an untitled thread with no issue is never an archive candidate", () => {
+  const ctx = context({ issue: null });
+  const facts30m = thread({ title: "", lastActivityAt: NOW - 30 * MINUTE });
+  assert.equal(stateOf(facts30m, ctx), "idle-active");
+  assert.notEqual(decide(facts30m, classify(facts30m, ctx), ctx).decision, "archive");
+  const old = thread({ title: "", lastActivityAt: NOW - 25 * HOUR });
+  assert.equal(stateOf(old, ctx), "orphan");
+  assert.equal(decide(old, classify(old, ctx), ctx).decision, "flag");
+});
+
+test("In Review with 48 quiet hours is parked, and flags without a closure comment", () => {
+  const quiet = { updatedAt: NOW - 49 * HOUR };
+  const ctx = context({ issue: issue("In Review", "started", quiet) });
+  const facts = thread({ lastActivityAt: NOW - 49 * HOUR });
+  assert.equal(stateOf(facts, ctx), "parked");
+  const verdict = decide(facts, classify(facts, ctx), ctx);
+  assert.equal(verdict.decision, "flag");
+  assert.match(verdict.reason, /no closure comment/);
+});
+
+test("a live child blocks an archive of a done thread, and the reason names it", () => {
+  const ctx = context({ issue: issue("Done", "completed") });
+  const child = { id: "thr_kid", protectedBy: null, title: "Planner: x", env: CLEAN };
+  const facts = expiringIn(10 * MINUTE, { descendants: [child] } as Partial<ThreadFacts>);
+  assert.match(safetyBlockers(facts, ctx).join(";"), /child thr_kid is still live/);
+  const verdict = decide(facts, { state: "done", reason: "TEAM-1678 is Done" }, ctx);
+  assert.equal(verdict.decision, "flag");
+  assert.match(verdict.reason, /child thr_kid is still live/);
+});
+
+test("the brief names the issue when the title and comments do not, and a title still beats it", () => {
+  const withBrief = (identifier: string): IssueWithComments => ({ ...issue("Todo", "unstarted", { identifier }), comments: [] });
+  const claimed: IssueWithComments = {
+    ...issue("In Progress", "started", { identifier: "TEAM-2" }),
+    comments: [{ body: "[agent:codex thr_other] claim: mine", createdAt: 1 }],
+  };
+  const issues = [withBrief("TEAM-1833"), withBrief("TEAM-1712"), claimed];
+  assert.equal(issueFor({ id: "thr_plan", title: "Planner: k8s-guard pre-made namespaces" }, issues, "TEAM", "## TEAM-1833: plan only")?.identifier, "TEAM-1833");
+  assert.equal(issueFor({ id: "thr_plan", title: "Planner: x" }, issues, "TEAM", "TEAM-1712 and TEAM-1833")?.identifier, "TEAM-1712", "the first id wins");
+  assert.equal(issueFor({ id: "thr_a", title: "2: x" }, issues, "TEAM", "TEAM-1833")?.identifier, "TEAM-2");
+  assert.equal(issueFor({ id: "thr_a", title: "nothing" }, issues, "TEAM", "no issue named here"), null);
+  assert.equal(briefIdentifier("no id here", "TEAM"), null);
+  assert.equal(briefIdentifier("STRGT-1833: plan only", "STRGT"), "STRGT-1833");
+});
+
+test("an unreadable Linear gives no archive and no flag", () => {
+  const ctx = context({ issue: undefined });
+  for (const age of [MINUTE, 30 * HOUR]) {
+    const facts = thread({ lastActivityAt: NOW - age });
+    assert.equal(stateOf(facts, ctx), "idle-active");
+    const { decision } = decide(facts, classify(facts, ctx), ctx);
+    assert.notEqual(decision, "archive");
+    assert.notEqual(decision, "flag");
+  }
 });
 
 test("orphan: no issue and idle 24 hours; sooner it is idle-active; with Linear unread it is never an orphan", () => {
@@ -147,18 +274,26 @@ test("a compact is decided only in the last 15 minutes of the cache", () => {
   assert.match(verdict(-1).reason, /cold/);
 });
 
-test("a done or parked thread is archived whenever it is seen and safe, cold or not", () => {
+test("a done thread is archived whenever it is seen and safe, cold or not", () => {
   const done = context({ issue: issue("Done", "completed") });
-  const parked = context({ issue: issue("Backlog", "backlog", { labels: ["paused"] }) });
-  for (const ctx of [done, parked]) {
-    for (const left of [3 * HOUR, 16 * MINUTE, 5 * MINUTE, -1, -30 * HOUR]) {
-      const facts = expiringIn(left);
-      assert.equal(decide(facts, classify(facts, ctx), ctx).decision, "archive", `${left}`);
-    }
+  for (const left of [3 * HOUR, 16 * MINUTE, 5 * MINUTE, -1, -30 * HOUR]) {
+    const facts = expiringIn(left);
+    assert.equal(decide(facts, classify(facts, done), done).decision, "archive", `${left}`);
   }
   // Unsafe, it is flagged, cold or not.
   const dirty = expiringIn(-HOUR, { env: { ...CLEAN, clean: false } });
   assert.equal(decide(dirty, classify(dirty, done), done).decision, "flag");
+});
+
+test("a parked thread is archived only with a closure comment, cold or not", () => {
+  const paused = issue("Backlog", "backlog", { labels: ["paused"] });
+  const open = context({ issue: paused });
+  const closed = context({ issue: { ...paused, closureAt: NOW - HOUR } });
+  for (const left of [3 * HOUR, -30 * HOUR]) {
+    const facts = expiringIn(left);
+    assert.equal(decide(facts, classify(facts, open), open).decision, "flag");
+    assert.equal(decide(facts, classify(facts, closed), closed).decision, "archive");
+  }
 });
 
 test("a cache that lives under 15 minutes decides a compact in its last 5 minutes", () => {
@@ -171,13 +306,14 @@ test("a cache that lives under 15 minutes decides a compact in its last 5 minute
   assert.equal(short(5 * MINUTE), "compact");
 });
 
-test("archive: a done or parked thread that is safe", () => {
+test("archive: a done thread that is safe; a parked one needs a closure comment", () => {
   const done = context({ issue: issue("Done", "completed") });
-  const parked = context({ issue: issue("Backlog", "backlog", { labels: ["paused"] }) });
-  for (const ctx of [done, parked]) {
-    const facts = expiringIn(10 * MINUTE);
-    assert.equal(decide(facts, classify(facts, ctx), ctx).decision, "archive");
-  }
+  const paused = issue("Backlog", "backlog", { labels: ["paused"] });
+  const facts = expiringIn(10 * MINUTE);
+  assert.equal(decide(facts, classify(facts, done), done).decision, "archive");
+  assert.equal(decide(facts, classify(facts, context({ issue: paused })), context({ issue: paused })).decision, "flag");
+  const closed = context({ issue: { ...paused, closureAt: NOW - HOUR } });
+  assert.equal(decide(facts, classify(facts, closed), closed).decision, "archive");
 });
 
 test("compact: idle-active, 100k tokens or more, with an open issue", () => {
@@ -234,21 +370,26 @@ for (const [name, change, pattern] of UNSAFE) {
   });
 }
 
-// Archiving a parent archives its children, so a child's checkout and protection count.
-test("a child that is protected, dirty, ahead, or unreadable blocks an archive of its parent; a clean child does not", () => {
+// Archiving a parent archives its children, so any live child stops it; its protection and queue are named too.
+test("any live child blocks an archive of its parent; protection and queue are named, its checkout is not read", () => {
   const ctx = context({ issue: issue("Done", "completed") });
-  const child = (extra: object) => ({ id: "thr_kid", protectedBy: null, env: CLEAN, ...extra });
+  const child = (extra: object) => ({ id: "thr_kid", protectedBy: null, ...extra });
   const blockers = (descendants: object[]) => safetyBlockers(expiringIn(10 * MINUTE, { descendants } as Partial<ThreadFacts>), ctx).join(";");
-  assert.equal(blockers([child({})]), "");
+  assert.match(blockers([child({})]), /child thr_kid is still live/);
+  assert.match(blockers([child({ title: "Planner: x" })]), /child thr_kid is still live \(Planner: x\)/);
   assert.match(blockers([child({ protectedBy: "pinned in bb" })]), /child thr_kid is protected: pinned in bb/);
-  assert.match(blockers([child({ env: { ...CLEAN, clean: false } })]), /child thr_kid.*uncommitted/);
-  assert.match(blockers([child({ env: { ...CLEAN, ahead: true } })]), /child thr_kid.*commits not on its base/);
-  assert.match(blockers([child({ env: { ...CLEAN, known: false, detail: "gone" } })]), /child thr_kid.*could not be read: gone/);
-  assert.match(blockers([child({ env: undefined })]), /child thr_kid.*not checked/);
-  assert.equal(blockers([child({ env: null })]), "");
   assert.match(blockers([child({ busy: "has a queued message" })]), /child thr_kid has a queued message/);
-  const facts = expiringIn(10 * MINUTE, { descendants: [child({ env: { ...CLEAN, clean: false } })] } as Partial<ThreadFacts>);
+  // A child's checkout never matters: the archive cannot happen while the child is live.
+  assert.doesNotMatch(blockers([child({})]), /environment/);
+  const facts = expiringIn(10 * MINUTE, { descendants: [child({})] } as Partial<ThreadFacts>);
   assert.equal(decide(facts, { state: "done", reason: "x" }, ctx).decision, "flag");
+});
+
+test("an incomplete thread list blocks an archive, because a child may be unseen", () => {
+  const ctx = context({ issue: issue("Done", "completed") });
+  const facts = expiringIn(10 * MINUTE, { graphComplete: false });
+  assert.match(safetyBlockers(facts, ctx).join(";"), /thread list was cut off/);
+  assert.equal(decide(facts, classify(facts, ctx), ctx).decision, "flag");
 });
 
 test("a thread with no environment is safe to archive", () => {

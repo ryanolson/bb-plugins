@@ -24,14 +24,21 @@ import {
   tokenCount,
 } from "./lib/threads-view.ts";
 import {
+  COMPACT_MIN_TOKENS,
   HOUR,
   MINUTE,
+  ORPHAN_IDLE_MS,
   protectionOf,
   safetyBlockers,
+  envlessBlockers,
   cacheExpiry,
+  claimThread,
   classify,
   cacheLifeMs,
+  closureAt,
+  completionOf,
   decide,
+  briefIdentifier,
   formatExpiresIn,
   issueFor,
   titleIdentifier,
@@ -40,6 +47,7 @@ import {
   type EnvFacts,
   type LifecycleAction,
   type IssueFacts,
+  type IssueLink,
   type IssueWithComments,
   type LifecycleContext,
   type ThreadFacts,
@@ -124,7 +132,15 @@ function withComments(issue: LifecycleIssue): IssueWithComments {
   };
 }
 
-const asFacts = ({ comments: _comments, ...facts }: IssueWithComments): IssueFacts => facts;
+const asFacts = (issue: IssueWithComments, threadId: string, link: IssueLink): IssueFacts => {
+  const { comments, ...facts } = issue;
+  return { ...facts, link, closureAt: closureAt(comments, threadId) };
+};
+
+/** A strong link: the thread claimed the issue in a comment, or its title names it. */
+function linkOf(issue: IssueWithComments, threadId: string): IssueLink {
+  return issue.comments.some((comment) => claimThread(comment.body) === threadId.toLowerCase()) ? "claim" : "title";
+}
 
 
 /** Whether a remote has a branch of this name. A failed or cut-off read says no. */
@@ -169,6 +185,8 @@ export function createThreads(deps: ThreadsDeps) {
   const { db, sdk, now } = deps;
   const usage = new Map<string, { key: string; used: number | null; window: number | null; offer: number | null; cost: ThreadFacts["cost"] }>();
   const models = new Map<string, string>();
+  /** The identifier a brief names, by team and thread; "" for a brief that names none. */
+  const briefs = new Map<string, string>();
 
   const loadSnapshot = db.prepare("SELECT body FROM thread_snapshot WHERE id = 1");
   const saveSnapshot = db.prepare("INSERT INTO thread_snapshot (id, taken_at, body) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET taken_at = excluded.taken_at, body = excluded.body");
@@ -191,14 +209,31 @@ export function createThreads(deps: ThreadsDeps) {
     return run;
   }
 
-  async function listThreads() {
+  /**
+   * Every unarchived thread, and whether the list is whole. A list that stops
+   * at the page cap may hide a child, so an archive waits for a smaller list.
+   */
+  async function listThreads(): Promise<{ rows: Awaited<ReturnType<Sdk["threads"]["list"]>>; complete: boolean }> {
     const rows: Awaited<ReturnType<Sdk["threads"]["list"]>> = [];
+    const seen = new Set<string>();
+    let complete = false;
+    let stable = true;
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const batch = await sdk.threads.list({ includeHidden: true, limit: THREADS_PAGE, offset: page * THREADS_PAGE });
+      for (const row of batch) {
+        // A row seen twice means a thread was inserted or removed between pages, so other rows were skipped.
+        if (seen.has(row.id)) stable = false;
+        seen.add(row.id);
+      }
       rows.push(...batch);
-      if (batch.length < THREADS_PAGE) break;
+      if (batch.length < THREADS_PAGE) {
+        complete = true;
+        break;
+      }
     }
-    return rows.filter((row) => row.archivedAt === null && row.deletedAt === null);
+    if (!complete) deps.log(`bb returned ${rows.length} threads, its page cap, so some may be missing`);
+    if (!stable) deps.log("bb's thread list changed while it was read, so some threads may be missing");
+    return { rows: rows.filter((row) => row.archivedAt === null && row.deletedAt === null), complete: complete && stable };
   }
 
   async function readUsage(thread: { id: string; updatedAt: number }) {
@@ -238,6 +273,34 @@ export function createThreads(deps: ThreadsDeps) {
     }
   }
 
+  /**
+   * The issue identifier a thread's brief names, or null. The brief is its first
+   * user turn. It is read only once a thread has been idle long enough to count
+   * as an orphan, where the link changes the verdict, and only the identifier is
+   * kept, so a long session does not hold every brief in memory. A read that
+   * finds nothing is not kept.
+   */
+  async function readBriefIssue(threadId: string, teamKey: string): Promise<string | null> {
+    const key = `${teamKey}/${threadId}`;
+    const known = briefs.get(key);
+    if (known !== undefined) return known === "" ? null : known;
+    try {
+      const [first] = await sdk.threads.events.list({ threadId, types: ["client/turn/requested"], order: "asc", limit: "1" });
+      // A thread whose first turn has not arrived is asked again next pass. Once it exists, its text never changes.
+      if (first === undefined || first.type !== "client/turn/requested") return null;
+      const text = first.data.input
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+      const identifier = briefIdentifier(text, teamKey);
+      briefs.set(key, identifier ?? "");
+      return identifier;
+    } catch (error) {
+      deps.log(`could not read the brief of ${threadId}: ${message(error)}`);
+      return null;
+    }
+  }
+
   /** The count of queued turns and the creation time of the oldest; read only for a thread bb says has queued work. */
   async function readQueue(thread: { id: string; queuedWork: string }): Promise<{ count: number; oldest: number | null }> {
     if (thread.queuedWork === "none") return { count: 0, oldest: null };
@@ -272,6 +335,9 @@ export function createThreads(deps: ThreadsDeps) {
     return {
       issue: issue?.identifier ?? null,
       issueState: issue?.stateName ?? null,
+      issueLink: issue?.link ?? null,
+      closedByComment: issue?.closureAt ?? null,
+      children: (facts.descendants ?? []).map((child) => child.id),
       status: facts.status,
       providerId: facts.providerId,
       model: facts.model,
@@ -315,16 +381,15 @@ export function createThreads(deps: ThreadsDeps) {
     classification: Classification;
   }
 
-  /** Read the checkout of a thread and of each thread below it, the state an archive of the thread depends on. */
-  async function readArchiveEnvs(facts: ThreadFacts): Promise<void> {
-    const reads = new Map<string, Promise<EnvFacts>>();
-    const envOf = (environmentId: string | null | undefined): Promise<EnvFacts | null> => {
-      if (environmentId === null || environmentId === undefined) return Promise.resolve(null);
-      if (!reads.has(environmentId)) reads.set(environmentId, readEnv(sdk, environmentId));
-      return reads.get(environmentId)!;
-    };
-    facts.env = await envOf(facts.environmentId);
-    for (const child of facts.descendants ?? []) child.env = await envOf(child.environmentId);
+  /** Read a thread's own checkout, the state its archive depends on. A live child stops the archive before this is needed. */
+  async function readArchiveEnv(facts: ThreadFacts, reads: Map<string, Promise<EnvFacts>> = new Map()): Promise<void> {
+    const environmentId = facts.environmentId;
+    if (environmentId === null) {
+      facts.env = null;
+      return;
+    }
+    if (!reads.has(environmentId)) reads.set(environmentId, readEnv(sdk, environmentId));
+    facts.env = await reads.get(environmentId)!;
   }
 
   /** Host names, by id; empty when bb cannot list them. */
@@ -344,16 +409,21 @@ export function createThreads(deps: ThreadsDeps) {
   async function collect(only?: string, options: { lookup?: boolean; issue?: IssueFacts | null | undefined } = {}): Promise<{ at: number; linearError: string | null; entries: Entry[] }> {
     const settings = await deps.settings();
     const at = now();
-    const listed = await listThreads();
+    const { rows: listed, complete } = await listThreads();
     const childrenOf = new Map<string, string[]>();
-    // An archive follows the parent and the lifecycle owner alike, so both edges are walked.
+    // An archive follows the parent, the lifecycle owner and a spawned thread's source alike. Working state follows only the first two: a fork is not the source's child at work.
+    const busyOf = new Map<string, string[]>();
     for (const row of listed) {
-      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId])) {
+      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId, row.sourceThreadId])) {
         if (owner !== null) childrenOf.set(owner, [...(childrenOf.get(owner) ?? []), row.id]);
+      }
+      for (const owner of new Set([row.parentThreadId, row.lifecycleOwnerThreadId])) {
+        if (owner !== null) busyOf.set(owner, [...(busyOf.get(owner) ?? []), row.id]);
       }
     }
     const byId = new Map(listed.map((row) => [row.id, row]));
-    const below = (id: string, seen: Set<string> = new Set()): string[] => {
+    // The root is in `seen` from the start, so a fork edge back to it cannot make a thread its own descendant.
+    const below = (id: string, seen: Set<string> = new Set([id])): string[] => {
       const out: string[] = [];
       for (const child of childrenOf.get(id) ?? []) {
         if (seen.has(child)) continue;
@@ -368,7 +438,7 @@ export function createThreads(deps: ThreadsDeps) {
       if (known !== undefined) return known;
       if (seen.has(id)) return false;
       seen.add(id);
-      const result = (childrenOf.get(id) ?? []).some((child) => ACTIVE.has(byId.get(child)?.status ?? "") || descendantWorking(child, seen));
+      const result = (busyOf.get(id) ?? []).some((child) => ACTIVE.has(byId.get(child)?.status ?? "") || descendantWorking(child, seen));
       working.set(id, result);
       return result;
     };
@@ -377,29 +447,45 @@ export function createThreads(deps: ThreadsDeps) {
     const hostNames = await readHostNames();
     const kept = new Map((activeKeeps.all(at) as Array<{ thread_id: string; until: number }>).map((row) => [row.thread_id, row.until]));
     const issueCache = new Map<string, IssueWithComments | null>();
-    const issueOf = async (thread: { id: string; title: string }): Promise<IssueFacts | null | undefined> => {
+    /** `brief` is true only for a thread old enough to be an orphan, where the brief's link changes its state. */
+    const issueOf = async (thread: { id: string; title: string }, brief: boolean): Promise<IssueFacts | null | undefined> => {
       if (only !== undefined && !options.lookup) return options.issue;
       if ("error" in linear) return undefined;
-      const found = issueFor(thread, linear.issues, linear.teamKey);
-      if (found !== null) return asFacts(found);
-      const identifier = titleIdentifier(thread.title, linear.teamKey);
-      if (identifier === null) return null;
+      const strong = issueFor(thread, linear.issues, linear.teamKey);
+      if (strong !== null) return asFacts(strong, thread.id, linkOf(strong, thread.id));
+      // The title and the claims named nothing: the brief may name the issue, and a weak link may label the thread but never finish it.
+      const identifier = brief ? await readBriefIssue(thread.id, linear.teamKey) : null;
+      const weak = issueFor(thread, linear.issues, linear.teamKey, identifier);
+      if (weak !== null) return asFacts(weak, thread.id, "brief");
+      const named = titleIdentifier(thread.title, linear.teamKey);
+      const wanted = named ?? identifier;
+      if (wanted === null) return null;
       // An issue older than the lookback: ask for it by name.
-      if (!issueCache.has(identifier)) {
+      if (!issueCache.has(wanted)) {
         try {
-          const one = await linear.client.getLifecycleIssue(identifier);
-          issueCache.set(identifier, one === null ? null : withComments(one));
+          const one = await linear.client.getLifecycleIssue(wanted);
+          issueCache.set(wanted, one === null ? null : withComments(one));
         } catch {
           return undefined;
         }
       }
-      const older = issueCache.get(identifier);
-      return older === undefined || older === null ? null : asFacts(older);
+      const older = issueCache.get(wanted);
+      if (older === undefined || older === null) return null;
+      return asFacts(older, thread.id, named === null ? "brief" : linkOf(older, thread.id));
     };
 
     const wanted = only === undefined ? listed : listed.filter((thread) => thread.id === only);
+    const envReads = new Map<string, Promise<EnvFacts>>();
     const entries = await mapLimit(wanted, READ_CONCURRENCY, async (thread): Promise<Entry> => {
-      const [used, model, queue, issue] = await Promise.all([readUsage(thread), readModel(thread.id), readQueue(thread), issueOf({ id: thread.id, title: thread.title ?? thread.titleFallback ?? thread.id })]);
+      const title = thread.title ?? "";
+      const used = await readUsage(thread);
+      // The brief decides an orphan, and turns a big idle thread's let-cool into a compact, so it is read for both.
+      const wantBrief = at - thread.updatedAt >= ORPHAN_IDLE_MS || (used.used ?? 0) >= COMPACT_MIN_TOKENS;
+      const [model, queue, issue] = await Promise.all([
+        readModel(thread.id),
+        readQueue(thread),
+        issueOf({ id: thread.id, title }, wantBrief),
+      ]);
       const facts: ThreadFacts = {
         id: thread.id,
         title: thread.title ?? thread.titleFallback ?? thread.id,
@@ -419,13 +505,14 @@ export function createThreads(deps: ThreadsDeps) {
         childWorking: descendantWorking(thread.id) || thread.activity.activeBackgroundAgentCount + thread.activity.activeBackgroundCommandCount + thread.activity.activeWorkflowCount > 0,
         environmentId: thread.environmentId,
         hostId: thread.environmentHostId ?? null,
+        graphComplete: complete,
         // An archive takes these with it, so each one's protection and checkout count.
         descendants: below(thread.id).map((childId) => {
           const child = byId.get(childId)!;
           return {
             id: childId,
+            title: child.title ?? child.titleFallback ?? childId,
             protectedBy: protectionOf({ id: childId, pinned: child.pinnedAt !== null }, { now: at, stewardThread: settings.stewardThread, keptUntil: kept.get(childId) ?? null }),
-            environmentId: child.environmentId,
             busy:
               child.queuedWork !== "none"
                 ? "has a queued message"
@@ -439,9 +526,9 @@ export function createThreads(deps: ThreadsDeps) {
       const classification = classify(facts, ctx);
       const expiry = cacheExpiry(facts, settings.cacheLifeOverrides);
       let verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
-      // An archive needs the checkout's state: read it only for a thread that could be archived now.
+      // An archive needs the checkout's state, but only when nothing else already blocks it: a child that is still live is reason enough.
       if (classification.state === "done" || classification.state === "parked") {
-        await readArchiveEnvs(facts);
+        if (envlessBlockers(facts, ctx).length === 0) await readArchiveEnv(facts, envReads);
         verdict = decide(facts, classification, ctx, settings.cacheLifeOverrides);
       }
       const row: ThreadRowView = {
@@ -484,10 +571,11 @@ export function createThreads(deps: ThreadsDeps) {
    */
   async function carryOut(entry: Entry): Promise<boolean> {
     const action = entry.row.decision === "compact" ? "compact" : "archive";
-    // The thread's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened.
-    const first = await recheck(entry, action, { lookup: true });
+    // An archive's issue is worked out again, from its title and the claims as they are now: it may have been retitled, claimed by another issue, or reopened. A compact does not depend on the issue, so it does not pay for that read.
+    const how = action === "archive" ? ({ lookup: true } as const) : ({ issue: entry.issue } as const);
+    const first = await recheck(entry, action, how);
     if ("refusal" in first) {
-      record(entry, "refused", { reason: first.refusal });
+      record(first.fresh ?? entry, "refused", { reason: first.refusal, decision: entry.row.decision });
       return false;
     }
     const { fresh } = first;
@@ -506,11 +594,26 @@ export function createThreads(deps: ThreadsDeps) {
         return false;
       }
     }
-    // The comment takes time: the whole check runs once more, as late as possible, on the thread, its checkouts, its cache, and the settings as they are then.
-    const late = await recheck(entry, action, { issue: fresh.issue });
+    // The comment takes time: the whole check runs once more, as late as possible, on the thread, its checkouts, its cache, the issue, and the settings as they are then. A Linear read that fails here refuses the archive.
+    const late = await recheck(entry, action, action === "archive" ? { lookup: true } : { issue: fresh.issue });
     if ("refusal" in late) {
-      record(entry, "refused", { reason: late.refusal });
+      record(late.fresh ?? entry, "refused", { reason: late.refusal, decision: entry.row.decision });
       return false;
+    }
+    if (action === "archive") {
+      // bb's own count, asked right before it takes the children too: a child spawned after the recheck above must not be swept.
+      const close = await unarchivedBelow(late.fresh.row.id);
+      if (close > 0) {
+        record(late.fresh, "refused", { reason: `changed since the decision: bb reports ${close} unarchived thread${close === 1 ? "" : "s"} below it`, decision: entry.row.decision });
+        return false;
+      }
+      // The settings are read once more after that call, so a switch to observe during it still stops the archive.
+      const settings = await deps.settings();
+      const kind = actionFor(late.fresh);
+      if (settings.mode !== "act" || kind === null || !settings.actions.has(kind)) {
+        record(late.fresh, "refused", { reason: "changed since the decision: act mode or the action was turned off", decision: entry.row.decision });
+        return false;
+      }
     }
     try {
       if (action === "archive") await sdk.threads.archive({ threadId: fresh.row.id });
@@ -519,7 +622,7 @@ export function createThreads(deps: ThreadsDeps) {
       record(entry, "failed", { error: message(error) });
       return false;
     }
-    record(entry, "done");
+    record(late.fresh, "done");
     return action === "archive";
   }
 
@@ -532,11 +635,11 @@ export function createThreads(deps: ThreadsDeps) {
     entry: Entry,
     action: "compact" | "archive",
     how: { lookup: true } | { issue: IssueFacts | null | undefined },
-  ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string }> {
+  ): Promise<{ fresh: Entry; settings: ThreadsSettings } | { refusal: string; fresh?: Entry }> {
     const fresh = (await collect(entry.row.id, "lookup" in how ? { lookup: true } : { issue: how.issue })).entries[0];
-    const changed = (why: string) => ({ refusal: `changed since the decision: ${why}` });
+    const changed = (why: string) => (fresh === undefined ? { refusal: `changed since the decision: ${why}` } : { refusal: `changed since the decision: ${why}`, fresh });
     if (fresh === undefined) return changed("the thread is gone");
-    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnvs(fresh.facts);
+    if (action === "archive" && fresh.facts.env === undefined) await readArchiveEnv(fresh.facts);
     // The settings are read last, after every await that reads bb, so a change during those reads counts.
     const settings = await deps.settings();
     if (settings.mode !== "act") return changed("act mode was turned off");
@@ -565,7 +668,7 @@ export function createThreads(deps: ThreadsDeps) {
     // Kept before the send, so a crash after it does not send twice; a send that failed is forgotten, so the next pass tries again.
     setFlag.run(id, now());
     try {
-      await deps.send(steward, `[sgc-steward] Thread ${id} stuck: ${entry.row.reason}`);
+      await deps.send(steward, `[sgc-steward] Thread ${id} ${entry.row.state}: ${entry.row.reason}`);
     } catch (error) {
       // A reply that was lost may hide a message that landed, and the steward is told once a day at most, so the time stays: the next try is tomorrow.
       record(entry, "failed", { error: `could not tell the steward: ${message(error)}` });
@@ -581,11 +684,17 @@ export function createThreads(deps: ThreadsDeps) {
     const archived = new Set<string>();
     for (const entry of entries) {
       const kind = actionFor(entry);
-      if (settings.mode !== "act" || !acting) record(entry, "observed");
-      else if (kind !== null && settings.actions.has(kind)) {
-        if (await carryOut(entry)) archived.add(entry.row.id);
-      } else if (entry.row.decision === "flag") await flagSteward(entry);
-      else record(entry, "observed");
+      try {
+        if (settings.mode !== "act" || !acting) record(entry, "observed");
+        else if (kind !== null && settings.actions.has(kind)) {
+          if (await carryOut(entry)) archived.add(entry.row.id);
+        } else if (entry.row.decision === "flag") await flagSteward(entry);
+        else record(entry, "observed");
+      } catch (error) {
+        // One thread's failed read must not skip every thread after it: log it and go on.
+        deps.log(`could not carry out ${entry.row.decision} for ${entry.row.id}: ${message(error)}`);
+        record(entry, "failed", { error: message(error) });
+      }
     }
     const rows = entries
       .filter((entry) => !archived.has(entry.row.id))
@@ -601,15 +710,16 @@ export function createThreads(deps: ThreadsDeps) {
     if (facts.status === "error") blockers.push("the thread is in error");
     else if (ACTIVE.has(facts.status)) blockers.push("a turn is running");
     if (facts.queuedCount > 0) blockers.push("it has a queued message");
-    // A compact leaves the checkout and the children alone.
-    blockers.push(...safetyBlockers(action === "archive" ? facts : { ...facts, env: null, descendants: [] }, ctx));
+    // A compact leaves the checkout, the children, and the thread list alone.
+    blockers.push(...safetyBlockers(action === "archive" ? facts : { ...facts, env: null, descendants: [], graphComplete: true }, ctx));
     return blockers;
   }
 
-  /** Keep, Compact now, or Archive now, as the owner asked from the page; refused with the reason when the thread is not safe. */
+  /** Keep, Compact now, or Archive now, as the owner asked from the page; refused with the reason when the thread is not safe or not finished. */
   function act(threadId: string, action: RowAction): Promise<{ message: string }> {
     return locked(async () => {
-      const { entries } = await collect(threadId);
+      // An archive is held to the same completion rule as act mode, so it reads Linear; keep and compact do not need the issue.
+      const { entries } = await collect(threadId, action === "archive" ? { lookup: true } : {});
       const entry = entries[0];
       if (entry === undefined) throw new Refusal("not_found", `No thread ${threadId}.`);
       if (action === "keep") {
@@ -618,9 +728,20 @@ export function createThreads(deps: ThreadsDeps) {
         recordAction(entry, "keep", "kept for 24 hours by the owner (Keep on the page)", "done");
         return { message: `${threadId} is protected for 24 hours.` };
       }
-      if (action === "archive") await readArchiveEnvs(entry.facts);
+      if (action === "archive") await readArchiveEnv(entry.facts);
       const blockers = actionBlockers(entry, action);
       if (blockers.length > 0) throw new Refusal("conflict", `Cannot ${action} ${threadId}: ${blockers.join("; ")}.`);
+      if (action === "archive") {
+        const completion = completionOf(entry.issue);
+        if (!completion.done) throw new Refusal("conflict", `Cannot archive ${threadId}: not finished: ${completion.why}.`);
+        let close: number;
+        try {
+          close = await unarchivedBelow(threadId);
+        } catch (error) {
+          throw new Refusal("conflict", `Cannot archive ${threadId}: could not ask bb for the threads below it: ${message(error)}.`);
+        }
+        if (close > 0) throw new Refusal("conflict", `Cannot archive ${threadId}: bb reports ${close} unarchived thread${close === 1 ? "" : "s"} below it.`);
+      }
       const reason = `${action === "archive" ? "Archive" : "Compact"} now: asked from the page`;
       try {
         if (action === "archive") await sdk.threads.archive({ threadId });
@@ -632,6 +753,16 @@ export function createThreads(deps: ThreadsDeps) {
       recordAction(entry, action, reason, "done");
       return { message: action === "archive" ? `Archived ${threadId}.` : `Compacting ${threadId}.` };
     });
+  }
+
+  /**
+   * How many unarchived threads bb would take with this one, asked of bb
+   * itself just before an archive. A list could miss a child spawned between
+   * its pages; this count cannot.
+   */
+  async function unarchivedBelow(threadId: string): Promise<number> {
+    const { unarchivedDescendantCount } = await sdk.threads.childSummary({ threadId });
+    return unarchivedDescendantCount;
   }
 
   /** Read every thread now, log the decisions, and keep the snapshot. In act mode only a pass with `acting` carries them out. */
