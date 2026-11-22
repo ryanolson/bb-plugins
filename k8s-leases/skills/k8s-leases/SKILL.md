@@ -25,13 +25,19 @@ bb k8s flags [--json]                # open flags for the steward's digest
 bb k8s flag clear <id>               # the steward clears a flag it reported
 ```
 
-k8s-guard calls these. Take a lease with `k8s-guard lease acquire`, which passes `--uid` and `--thread` for you.
+k8s-guard calls these. Take a lease with `k8s-guard lease acquire`, which passes `--uid` and `--thread` for you, or claim the pre-made namespace with `k8s-guard ns claim`.
 
 ```
 bb k8s lease acquire --cluster <c> --namespace <ns> --uid <uid> --thread <id> --gpu-type <t> --gpus <n> --hours <h>
+bb k8s lease acquire --claim --request <req_...> --replaces <lease_id|none> --cluster <c> --namespace <premade> --uid <uid> --gpu-type <t> --gpus <n> --hours <h>
+bb k8s lease latest --cluster <c> --namespace <ns>   # the latest lease on it, live or ended
 bb k8s lease op begin <lease_id>     # {token, deadline}; slot_busy while another write holds it
+bb k8s lease attempt begin <lease_id> <token> --attempt <att_...> --verb <v> --kind <k> --name <n> [--uid <u> --rv <v>]
+bb k8s lease attempt resolve <lease_id> <att_...> --outcome committed|failed|superseded
 bb k8s lease op end <lease_id> <token>
 ```
+
+A claim's owner is the calling thread. Claims refuse `enforcement_unhealthy` until the admission webhook that counts controller writes exists.
 
 Every lease command prints JSON on stdout. A refusal exits 1 with `{"error": "...", "code": "..."}`.
 
@@ -42,10 +48,12 @@ Every lease command prints JSON on stdout. A refusal exits 1 with `{"error": "..
 | `active` | GPUs are yours until `expires_at`. |
 | `revoking` | It expired, its thread is gone, or it held more GPUs than leased. DGDs go to 0 on every tick. The namespace is deleted at `grace_deadline`. |
 | `releasing` | Its thread returned it. The namespace is being deleted. |
-| `released`, `torn-down` | The namespace is gone, and its GPUs are free. |
+| `released`, `torn-down` | The namespace is gone (a claimed one: the lease's objects are gone), and its GPUs are free. |
 
-A lease frees its GPUs only when a host reports its namespace gone.
+A lease frees its GPUs only when a host reports its namespace gone. A claimed lease (the pre-made namespace) frees them only when a teardown on a host reports nothing of the lease left and no write attempt open; its namespace is never deleted.
 
 ## Refusal codes of acquire
 
-`not_your_thread`, `cluster_not_allowed`, `cluster_never`, `cluster_read_only`, `cluster_profile_incomplete`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `gpu_type_no_limit`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`.
+`not_your_thread`, `cluster_not_allowed`, `cluster_never`, `cluster_read_only`, `cluster_profile_incomplete`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `gpu_type_no_limit`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`. With `--claim` also: `profiles_unavailable`, `namespace_not_premade`, `namespace_not_ours`, `predecessor_mismatch` (with `current`), `request_conflict`.
+
+`op begin` and `attempt begin` refuse `attempt_unresolved` while an earlier write's outcome is unknown; `attempt begin` refuses `slot_lost` without the live slot's token.

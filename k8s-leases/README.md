@@ -53,7 +53,9 @@ sequenceDiagram
 
 - **One process decides.** Every `bb k8s` call runs in the bb server. Each check-and-write is one SQLite transaction with no await inside. So two hosts cannot take the same GPUs, and two writes cannot hold one slot.
 - **Acquire** confirms the namespace on a host first: its UID, and its `wcep.agent/thread` label, which must be the calling thread. Then it checks the cluster's profile (not `never`, `bot_can_write`, its GPU type, which must have a limit), the first-run approval, the hours, one node or a multi-node approval, a heartbeat in the last 10 minutes, the limit, and that no other lease holds the namespace.
-- **The slot.** `op begin` works only while the lease is active and its one slot is free or past its 2-minute deadline.
+- **The slot.** `op begin` works only while the lease is active, its one slot is free or past its 2-minute deadline, and no earlier write attempt is unresolved.
+- **Claims of a pre-made namespace.** Where the bot cannot create namespaces, ops made one per cluster, named in the profiles as `[bot] premade_namespace`. `acquire --claim` takes it: the owner is the calling thread, a host checks the exact profile name, both opt-in labels and the live UID, and one transaction decides health, exclusivity, the expected predecessor and the budget. The lease's row is the claim, the charge and the completion. The same request id returns its recorded outcome; the same owner adopts its matching active lease; a new claim replaces only the namespace's latest lease, which must have ended, and keeps it as `predecessor`. Claims refuse `enforcement_unhealthy` until the admission webhook that counts controller writes exists; that gate is a code option, not a setting.
+- **Write attempts.** k8s-guard records each write under a lease (`attempt begin`, with the slot's token) before it sends it, and resolves it after (`attempt resolve`). An open attempt blocks the next write and keeps a claimed lease's teardown from completing. Every recorded or resolved attempt moves the lease's attempt epoch.
 - **Reconcile.** A schedule runs every minute. It reads the lease table and starts the work, awaiting nothing first: for every live lease a teardown (if not active), an inspection, and a thread check (if active), plus a probe of every host and a read of the profiles. Each call has its own timeout, so no slow host, lookup or call holds up the others.
   - An expired lease moves to `revoking` at once. The thread check asks bb about the lease's thread, with a 20-second limit. When it finishes and bb reports the thread archived, deleted or missing, the lease moves to `revoking`.
   - `inspect` goes to every healthy host at once. The first answer that shows more GPUs than the lease, or GPUs of another or unknown type, revokes the lease.
@@ -63,6 +65,7 @@ sequenceDiagram
   - A namespace whose `expires-at` differs from the lease gets `k8s-guard extend`, one at a time per lease. `k8s-guard` decides where a namespace keeps its `expires-at`. The plugin reads it only through `inspect`.
 - **Teardown is narrow.** Every write passes the lease's namespace UID, and the guard refuses a write to a namespace with another UID.
 - **GPUs free late.** A lease frees its GPUs only when at least one host reports its namespace gone or re-created, and no host that answered still sees it. The report must come from a call that started after the last call that saw the namespace. A host that gives no answer frees nothing.
+- **A claimed lease completes once.** Its namespace is never deleted, so its GPUs never free on a namespace read. A `down` on a host resolves its open attempts, deletes its objects, reads them again, and reports `complete` or `teardown_incomplete` with what it resolved. Completion and the return of the GPUs are one transaction, conditional on the exact closing lease, its namespace UID, an attempt epoch unchanged since that `down` was started, and no open attempt. A stale or replayed result frees nothing. There is no timer: an attempt nobody can resolve holds the GPUs, and is flagged after 15 minutes.
 - **Extend.** The panel lists every lease. Each active lease has an Extend button: +30 min, +1 h, +2 h, or a custom amount. The plugin moves the expiry, records the extension, and runs `k8s-guard extend` at once.
 
 ## Known limits
@@ -70,7 +73,8 @@ sequenceDiagram
 - bb has no setting or RPC that only Ryan can use. Any agent can change these settings or call the `extend` RPC. So every settings change and every extension is raised as a flag for the steward's digest. The runbook tells agents never to do either.
 - The `bb` CLI forwards the calling thread from `BB_THREAD_ID` without checking it. A process that sets it can act as another thread.
 - The Kubernetes API cannot be fenced by the slot. A write that stalls after its last check can land late. The next tick undoes it.
-- If the bb server or the plugin is down, nothing in this plugin runs. The offline timer of `k8s-sweep` scales to 0 at `expires-at` and deletes after the grace period.
+- If the bb server or the plugin is down, nothing in this plugin runs. The offline timer of `k8s-sweep` scales to 0 at `expires-at` and deletes after the grace period. A claimed namespace keeps no `expires-at`, so nothing acts on it while the plugin is down.
+- Claims stay off until the admission webhook exists: without it, a controller's write in flight (a Pod create during a foreground delete) is not counted, so a claimed lease could complete with work still coming.
 - A namespace that never finishes deleting keeps its GPUs charged. It is flagged after 3 failed ticks.
 
 ## Development
@@ -82,7 +86,7 @@ npx tsc -p .
 bb plugin build .
 ```
 
-The plugin's SQLite schema is version 1, in `lib/store.ts`. From the first install on, migrations are append-only: never edit or reorder a shipped statement; add a new one after it.
+The plugin's SQLite schema is version 2, in `lib/store.ts`: version 1 is the first install, and version 2 adds claims and write attempts. Migrations are append-only: never edit or reorder a shipped statement; add a new one after it.
 
 The contract test runs the plugin against the real `k8s-guard`, through the real host entry, on the guard's own fake `kubectl` and fixtures (`contract/world.py`). It never touches a real cluster. It needs the guard repository checked out at the commit pinned in `contract.test.ts` (`GUARD_COMMIT`). Without `K8S_GUARD_REPO` it is skipped.
 
