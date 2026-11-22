@@ -23,8 +23,8 @@ import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/
 import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
-/** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol plus the build Jobs, their teardown and the push-secret refusal. */
-export const GUARD_COMMIT = "70ff32b414e672225a0ea5d993262b64e12348f8";
+/** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol, the build Jobs and the lease fence (gate, probe, drain). */
+export const GUARD_COMMIT = "5c6b3543ac28b95f46dd39f26bf230c90930d10e";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
@@ -113,7 +113,13 @@ async function plugin(options: { hostCall?: (method: string, input: any, hostId:
       return options.hostCall ? options.hostCall(method, input, hostId, real) : real();
     },
   });
-  const factory = createK8sLeasesPlugin({ now: clock.now, tickWaitMs: 60_000, fenceGate: () => options.admission === true });
+  // With `admission`, the plugin's own fence rule judges the real guard's probe; without it, claims refuse.
+  const factory = createK8sLeasesPlugin({
+    now: clock.now,
+    tickWaitMs: 60_000,
+    drainMs: 0,
+    ...(options.admission === true ? {} : { fenceGate: () => false }),
+  });
   await factory(bb);
   let current = harness;
   const wire = () => {
@@ -391,13 +397,26 @@ test("a down with GPU pods left: the real guard reports deleted with pods left, 
 });
 
 test("a claimed namespace through the real guard: a write in flight across teardown holds the GPUs until it is observed, then exactly one release", { skip }, async () => {
-  const p = await plugin({ admission: true });
+  // Every host down reply, so the fence fields the real guard reports can be checked.
+  const downs: any[] = [];
+  const p = await plugin({
+    admission: true,
+    hostCall: async (method, _input, _hostId, real) => {
+      const reply = await real();
+      if (method === "down") downs.push(reply);
+      return reply;
+    },
+  });
   await p.tick();
   py("add-premade", { uid: randomUUID() });
   const claimed = await agentGuard(world.me, "--context", world.ctx, "-n", world.premade, "ns", "claim", "--gpus", "4", "--hours", "1");
   assert.equal(claimed.code, 0, `k8s-guard ns claim: ${JSON.stringify(claimed.json)}`);
   const id = claimed.json.lease_id as string;
   assert.equal((await p.show(id)).mode, "claimed");
+  // The real probe read the fence armed, the plugin issued seq 1, and the guard opened the gate for it.
+  assert.equal(claimed.json.seq, 1);
+  assert.equal(claimed.json.fence.state, "active", JSON.stringify(claimed.json));
+  assert.equal(state().objects[world.premade]!["ConfigMap/wcep-agent-fence"].data.lease_id, id);
   // The create reaches the server and its reply never comes; the guard is killed while it waits.
   const st = state() as any;
   st.stall_create = ["DynamoGraphDeployment/w"];
@@ -427,6 +446,13 @@ test("a claimed namespace through the real guard: a write in flight across teard
   await p.tick();
   const ended = await p.show(id);
   assert.equal(ended.state, "released", JSON.stringify(ended));
+  // The completing down carried the fence: the gate closed for this lease and seq, the drain, armed throughout.
+  const complete = downs.filter((d) => d.ok && d.complete === true);
+  assert.equal(complete.length, 1, JSON.stringify(downs));
+  assert.deepEqual(complete[0].fence, { lease_id: id, seq: 1, state: "closing" });
+  assert.equal(complete[0].armed, "continuous");
+  assert.equal(typeof complete[0].drain_monotonic_seconds, "number");
+  assert.equal(state().objects[world.premade]!["ConfigMap/wcep-agent-fence"].data.state, "closing");
   assert.equal(ended.open_attempts.length, 0);
   assert.equal(state().objects[world.premade]!["DynamoGraphDeployment/w"], undefined);
   assert.ok(state().namespaces[world.premade], "the pre-made namespace is never deleted");

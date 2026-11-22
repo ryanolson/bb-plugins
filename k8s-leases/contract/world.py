@@ -82,6 +82,8 @@ os.execv(sys.executable, [sys.executable, {str(bin_dir / 'kubectl-fake')!r}, *sy
             'FAKE_KUBECTL_LOG': str(world / 'kubectl.log'), 'FAKE_TSH_LOG': str(world / 'tsh.log'),
             'K8S_GUARD_DOWN_WAIT_SECONDS': '0', 'K8S_GUARD_POLL_SECONDS': '0',
             'FAKE_KUBECTL': str(pinned), 'FAKE_TBOT_LOG': str(world / 'tbot.log'),
+            # The fence's drain, shortened for the test; the plugin's own minimum is shortened to match.
+            'K8S_GUARD_FENCE_DRAIN_SECONDS': '0', 'K8S_GUARD_FENCE_PROBE_SECONDS': '0',
         },
         'bin': str(bin_dir), 'guard': str(bin_dir / 'k8s-guard'), 'kubeconfig': str(bot),
         'check': str(repo / 'dot_agents/skills/k8s-clusters/scripts/executable_k8s-check'),
@@ -94,6 +96,8 @@ elif command == 'add-premade':
     ns = g.namespace(g.PREMADE, None, args['uid'])
     del ns['metadata']['labels']['wcep.agent/thread']
     del ns['metadata']['annotations']
+    # Enrolled in the lease fence (ops set the label); the guard's fake answers the fence probe armed.
+    ns['metadata']['labels']['dynamo.nvidia.com/agent-lease-fence'] = 'true'
     st['namespaces'][g.PREMADE] = ns
     st['objects'].setdefault(g.PREMADE, {})
     st['pods'].setdefault(g.PREMADE, [])
