@@ -10,8 +10,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { cliCommand, defineCli, experimental_PluginRpcRefusal, type BbPluginApi, type PluginCliContext, type PluginCliResult } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  ATTEMPT_ID,
   CHANNEL,
   CLUSTER,
+  OUTCOME,
+  REQUEST_ID,
   GPU_TYPE,
   HOST_CALL_MARGIN_MS,
   HOST_TIMEOUTS,
@@ -35,7 +38,7 @@ import { own } from "./lib/own.ts";
 import { checkAsk } from "./lib/policy.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { SETTINGS, parseConfig, type Config } from "./lib/settings.ts";
-import { MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
+import { ADMISSION_ABSENT, MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
 
 /** `acquire` refuses unless some host sent a heartbeat this recently. */
 export const HEARTBEAT_WINDOW_MS = 10 * 60_000;
@@ -61,6 +64,14 @@ export interface K8sLeasesOptions {
   newLeaseId?: () => string;
   newToken?: () => string;
   tickWaitMs?: number;
+  /**
+   * Whether the admission webhook that fences controller writes is in place. Claims of a pre-made
+   * namespace need it; it does not exist yet, so the default is false and claims refuse. Not a
+   * setting: any agent can change settings.
+   */
+  admissionHealthy?: () => boolean;
+  /** Test-only fault injection: a throw at a phase of the claim transaction models a killed plugin. */
+  faults?: { claim?: (phase: "before-commit" | "after-commit") => void };
 }
 
 function message(error: unknown): string {
@@ -86,6 +97,8 @@ function showJson(row: LeaseRow) {
     renewals: row.renewals,
     reason: row.reason,
     grace_deadline: iso(row.grace_deadline),
+    mode: row.mode,
+    predecessor: row.predecessor,
   };
 }
 
@@ -143,6 +156,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
   const newLeaseId = options.newLeaseId ?? (() => `lse_${randomBytes(8).toString("hex")}`);
   const newToken = options.newToken ?? (() => `tok_${randomUUID()}`);
   const tickWaitMs = options.tickWaitMs ?? TICK_WAIT_MS;
+  const admissionHealthy = options.admissionHealthy ?? (() => false);
+  const faults = options.faults ?? {};
 
   return async function k8sLeases(bb: BbPluginApi): Promise<void> {
     const settings = bb.settings.define(SETTINGS);
@@ -387,6 +402,80 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       return { lease_id: row.id, expires_at: iso(row.expires_at) };
     }
 
+
+    /**
+     * Claim the profile's pre-made namespace. The owner is the calling thread; a host confirms the exact
+     * profile name, both Namespace labels and the live UID; then one transaction decides.
+     */
+    async function claim(input: Record<string, unknown>, ctx: PluginCliContext) {
+      const owner = ctx.threadId;
+      if (owner === undefined || !THREAD_ID.safeParse(owner).success) throw new Refusal("not_your_thread", "A claim comes from a bb thread.");
+      if (input.thread !== undefined && input.thread !== owner) {
+        throw new Refusal("not_your_thread", `--thread ${String(input.thread)} is not the calling thread (${owner}).`);
+      }
+      const request = parsed(REQUEST_ID, input.request, "--request");
+      const replaces = input.replaces === "none" ? null : parsed(LEASE_ID, input.replaces, "--replaces");
+      const cluster = parsed(CLUSTER, input.cluster, "--cluster");
+      const namespace = parsed(NAMESPACE, input.namespace, "--namespace");
+      const uid = parsed(UID, input.uid, "--uid");
+      const gpuType = parsed(GPU_TYPE, input.gpuType, "--gpu-type");
+      const gpus = parsed(z.number().int().min(1), input.gpus, "--gpus");
+      const hours = parsed(z.coerce.number().positive().finite(), input.hours, "--hours");
+      // A retry of a request that was granted gets its recorded outcome, whatever has changed since.
+      const prior = store.byRequest(request);
+      if (prior !== undefined) {
+        if (prior.thread_id !== owner) throw new Refusal("request_conflict", `Request ${request} belongs to another thread.`);
+        return { lease_id: prior.id, expires_at: iso(prior.expires_at), state: prior.state };
+      }
+      if (!admissionHealthy()) throw new Refusal("enforcement_unhealthy", ADMISSION_ABSENT);
+      const cfg = await current();
+      // The pre-made namespace is named only by the profiles a host read; the clusters setting never names one.
+      const profiles = currentProfiles() ?? (await refreshProfiles(cfg));
+      if (profiles === null) throw new Refusal("profiles_unavailable", "No host could read the cluster profiles; a claim needs them.");
+      const { context } = checkAsk({ thread: owner, cluster, namespace, gpuType, gpus, hours }, cfg, profiles);
+      const bot = profiles.bot;
+      if (bot?.premade_namespace === undefined || bot.premade_namespace !== namespace) {
+        throw new Refusal("namespace_not_premade", `${namespace} is not the profiles' pre-made namespace (${bot?.premade_namespace ?? "none"}).`);
+      }
+      if (!store.freshHeartbeat(HEARTBEAT_WINDOW_MS, cfg.hosts)) {
+        throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${HEARTBEAT_WINDOW_MS / 60_000} minutes.`);
+      }
+      if ((await threadFate(owner)) !== "live") throw new Refusal("thread_not_live", `bb does not report ${owner} as a live thread.`);
+      let seen;
+      try {
+        seen = await hosts.one<{ ok: true; value: Inspect } | GuardFailure>("inspect", target({ context, namespace, uid, id: "" }, cfg, "inspect"));
+      } catch (error) {
+        throw new Refusal("enforcement_unhealthy", message(error));
+      }
+      const { result } = seen;
+      if (!result.ok) {
+        throw result.code === "not_found"
+          ? new Refusal("namespace_not_found", `${namespace} does not exist on ${cluster}.`)
+          : new Refusal("inspect_failed", `Could not read ${namespace} on ${cluster} (${result.code}): ${result.error}`);
+      }
+      const ns = result.value;
+      if (ns.uid !== uid) throw new Refusal("uid_mismatch", `${namespace} has UID ${ns.uid}, not ${uid}.`);
+      if (bot.developer === undefined || ns.developer !== bot.developer || ns.agent_rbac !== "true") {
+        throw new Refusal("namespace_not_ours", `${namespace} lacks dynamo.nvidia.com/developer=${bot.developer} or dynamo.nvidia.com/developer-agent-rbac=true.`);
+      }
+      const allocation = allocationOf(ns);
+      if (allocation > gpus) throw new Refusal("namespace_over_lease", `${namespace} already holds ${allocation} GPUs, more than ${gpus}.`);
+      const { row, outcome } = await withSettings((fresh) => {
+        const recheck = checkAsk({ thread: owner, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles() ?? profiles);
+        if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during the claim; try again.`);
+        return store.claim(
+          { id: newLeaseId(), request, thread: owner, cluster, context, namespace, uid, gpuType, gpus, hours, approvals: recheck.approvals, replaces },
+          fresh,
+          HEARTBEAT_WINDOW_MS,
+          admissionHealthy(),
+          () => faults.claim?.("before-commit"),
+        );
+      });
+      faults.claim?.("after-commit");
+      publish();
+      return { lease_id: row.id, expires_at: iso(row.expires_at), state: row.state, ...(outcome === "adopted" ? { adopted: true } : {}) };
+    }
+
     const leaseArg = [{ name: "lease_id", description: "The lease, lse_...", required: true }] as const;
     const jsonFlag = { json: { type: "boolean", description: "Print JSON (lease commands always do)." } } as const;
 
@@ -400,36 +489,99 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
             summary: "Take a lease on one namespace for the calling thread",
             options: {
               cluster: { type: "string", required: true, description: "Kube context of an allowed cluster" },
-              namespace: { type: "string", required: true, description: "The namespace k8s-guard created" },
+              namespace: { type: "string", required: true, description: "The namespace k8s-guard created, or with --claim the pre-made one" },
               uid: { type: "string", required: true, description: "The namespace's UID, as the guard read it" },
-              thread: { type: "string", required: true, description: "The calling thread; must match the namespace's wcep.agent/thread label" },
+              thread: { type: "string", description: "The calling thread; must match the namespace's wcep.agent/thread label (with --claim, optional: the owner is the caller)" },
+              claim: { type: "boolean", description: "Claim the profiles' pre-made namespace (k8s-guard ns claim)" },
+              request: { type: "string", description: "With --claim: the request id k8s-guard kept before the call; a retry returns its outcome" },
+              replaces: { type: "string", description: "With --claim: the namespace's latest lease (lease latest), or none" },
               "gpu-type": { type: "string", required: true, description: "GPU type, such as gb300" },
               gpus: { type: "integer", min: 1, max: 4096, required: true, description: "GPUs to hold" },
               hours: { type: "string", required: true, description: "Hours, at most the plugin's limit (4 by default)" },
               ...jsonFlag,
             },
             run: (input, ctx) =>
-              json(() =>
-                acquire(
-                  {
-                    cluster: input.options.cluster,
-                    namespace: input.options.namespace,
-                    uid: input.options.uid,
-                    thread: input.options.thread,
-                    gpuType: input.options["gpu-type"],
-                    gpus: input.options.gpus,
-                    hours: input.options.hours,
-                  },
-                  ctx,
-                ),
-              ),
+              json(() => {
+                const ask = {
+                  cluster: input.options.cluster,
+                  namespace: input.options.namespace,
+                  uid: input.options.uid,
+                  thread: input.options.thread,
+                  gpuType: input.options["gpu-type"],
+                  gpus: input.options.gpus,
+                  hours: input.options.hours,
+                };
+                return input.options.claim ? claim({ ...ask, request: input.options.request, replaces: input.options.replaces }, ctx) : acquire(ask, ctx);
+              }),
+          }),
+          "lease latest": cliCommand({
+            summary: "The latest lease on a namespace, live or ended: what a claim names as --replaces",
+            options: {
+              cluster: { type: "string", required: true, description: "The cluster's profile name" },
+              namespace: { type: "string", required: true, description: "The namespace" },
+              ...jsonFlag,
+            },
+            run: (input) =>
+              json(async () => {
+                const cluster = parsed(CLUSTER, input.options.cluster, "--cluster");
+                const namespace = parsed(NAMESPACE, input.options.namespace, "--namespace");
+                const cfg = await current();
+                const profiles = currentProfiles() ?? (await refreshProfiles(cfg));
+                if (profiles === null) throw new Refusal("profiles_unavailable", "No host could read the cluster profiles.");
+                const profile = own(profiles.clusters, cluster);
+                if (profile === undefined) throw new Refusal("cluster_not_allowed", `${cluster} has no cluster profile.`);
+                const row = store.latestOn(profile.context, namespace);
+                return { lease_id: row?.id ?? null, state: row?.state ?? null };
+              }),
+          }),
+          "lease attempt begin": cliCommand({
+            summary: "Record a write before k8s-guard sends it (the slot's holder only)",
+            positionals: [...leaseArg, { name: "token", description: "The token op begin printed", required: true }],
+            options: {
+              attempt: { type: "string", required: true, description: "The attempt id, att_..., stamped on the object" },
+              verb: { type: "string", required: true, description: "create, patch or delete" },
+              kind: { type: "string", required: true, description: "The object's kind" },
+              name: { type: "string", required: true, description: "The object's name" },
+              uid: { type: "string", description: "For patch and delete: the UID the write's precondition carries" },
+              rv: { type: "string", description: "For patch and delete: the resourceVersion the write's precondition carries" },
+              ...jsonFlag,
+            },
+            run: (input, ctx) =>
+              json(async () => {
+                const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
+                const verb = parsed(z.enum(["create", "patch", "delete"]), input.options.verb, "--verb");
+                const kind = parsed(z.string().regex(/^[A-Za-z][A-Za-z0-9]{0,62}$/), input.options.kind, "--kind");
+                const name = parsed(z.string().regex(/^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/), input.options.name, "--name");
+                const uid = input.options.uid === undefined ? null : parsed(z.string().max(64), input.options.uid, "--uid");
+                const rv = input.options.rv === undefined ? null : parsed(z.string().max(64), input.options.rv, "--rv");
+                const attempt = parsed(ATTEMPT_ID, input.options.attempt, "--attempt");
+                return store.attemptBegin(id, ctx.threadId, String(input.positionals.token), { attempt, verb, kind, name, uid, rv }, await config());
+              }),
+          }),
+          "lease attempt resolve": cliCommand({
+            summary: "Report what a recorded write did: committed, failed, or superseded",
+            positionals: [...leaseArg, { name: "attempt", description: "The attempt id", required: true }],
+            options: { outcome: { type: "string", required: true, description: "committed, failed or superseded" }, ...jsonFlag },
+            run: (input, ctx) =>
+              json(() => {
+                const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
+                const attempt = parsed(ATTEMPT_ID, input.positionals.attempt, "attempt");
+                const outcome = parsed(OUTCOME, input.options.outcome, "--outcome");
+                const done = store.attemptResolve(id, ctx.threadId, { attempt, outcome });
+                publish();
+                return done;
+              }),
           }),
           "lease show": cliCommand({
             summary: "Show one lease",
             positionals: leaseArg,
             options: jsonFlag,
             run: (input) =>
-              json(async () => showJson(store.get(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), await config()))),
+              json(async () => {
+                const row = store.get(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), await config());
+                const open = store.openAttempts(row.id).map((a) => ({ attempt: a.id, verb: a.verb, kind: a.kind, name: a.name, uid: a.target_uid, rv: a.target_rv }));
+                return { ...showJson(row), attempt_epoch: row.attempt_epoch, open_attempts: open };
+              }),
           }),
           "lease op begin": cliCommand({
             summary: "Take the lease's one operation slot for 2 minutes",

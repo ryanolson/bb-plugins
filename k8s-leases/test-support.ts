@@ -46,6 +46,20 @@ interface Pod {
   dgd: string;
   gpus: number;
   terminating: boolean;
+  /** The pod template's wcep.agent/lease label, or null. */
+  lease?: string | null;
+}
+
+/** The bot's developer, and the pre-made namespace's labels, as the cluster profiles name them. Made up. */
+export const DEVELOPER = "alice";
+export const PREMADE = "dyntest-alice-agent";
+
+/** A write the guard sent whose outcome nobody knows yet: it lands (or not) when a test says. */
+interface Pending {
+  attempt: string;
+  dgd: string;
+  gpus: number;
+  lease: string;
 }
 
 export interface FakeNamespace {
@@ -60,6 +74,16 @@ export interface FakeNamespace {
   deleting: boolean;
   /** The lease record's resourceVersion: every write to expires-at bumps it. */
   recordRv: number;
+  /** Namespace labels; a pre-made namespace carries the developer and agent-RBAC labels. */
+  labels: Record<string, string>;
+  /** The profile's pre-made namespace: never deleted, never written as a Namespace. */
+  premade: boolean;
+  /** Each DGD's wcep.agent/lease label, and the attempt stamp of the write that made it. */
+  dgdLease: Map<string, string | null>;
+  stamps: Map<string, string>;
+  pending: Pending[];
+  /** Requests that would change the Namespace object itself. Must stay 0 for a pre-made namespace. */
+  namespaceWrites: number;
 }
 
 let uidCounter = 0;
@@ -89,9 +113,39 @@ export class FakeCluster {
       pods: [],
       deleting: false,
       recordRv: 1,
+      labels: {},
+      premade: false,
+      dgdLease: new Map(),
+      stamps: new Map(),
+      pending: [],
+      namespaceWrites: 0,
     };
     this.namespaces.set(this.key(cluster, name), ns);
     return ns;
+  }
+
+  /** The namespace ops made for the bot: both labels, no thread label, no expiry. */
+  premade(cluster: string, name = PREMADE, labels: Record<string, string> = { "dynamo.nvidia.com/developer": DEVELOPER, "dynamo.nvidia.com/developer-agent-rbac": "true" }): FakeNamespace {
+    const ns = this.create(cluster, name, null);
+    ns.labels = { ...labels };
+    ns.premade = true;
+    return ns;
+  }
+
+  /** A leased write lands, stamped with its attempt; its pods start with the lease label. */
+  landLeased(ns: FakeNamespace, dgd: string, gpus: number, lease: string, attempt: string): void {
+    ns.dgds.set(dgd, gpus);
+    ns.dgdLease.set(dgd, lease);
+    ns.stamps.set(dgd, attempt);
+    if (gpus > 0) ns.pods.push({ dgd, gpus, terminating: false, lease });
+  }
+
+  /** A paused write reaches storage now. */
+  landPending(ns: FakeNamespace, attempt: string): void {
+    const at = ns.pending.findIndex((p) => p.attempt === attempt);
+    assert.ok(at >= 0, `no pending write ${attempt}`);
+    const [write] = ns.pending.splice(at, 1);
+    this.landLeased(ns, write!.dgd, write!.gpus, write!.lease, write!.attempt);
   }
 
   get(cluster: string, name: string): FakeNamespace | undefined {
@@ -150,6 +204,8 @@ export class FakeCluster {
       pod_gpus: pods,
       gpu_type: dgd + pods > 0 ? ns.gpuType : null,
       gpu_pods_left: ns.pods.length,
+      developer: ns.labels["dynamo.nvidia.com/developer"] ?? null,
+      agent_rbac: ns.labels["dynamo.nvidia.com/developer-agent-rbac"] ?? null,
     };
   }
 
@@ -243,6 +299,7 @@ export class FakeGuard {
         return { ok: false, code: "record_conflict", error: "the lease record changed under this extend" };
       }
     }
+    if (method === "down" && ns.premade) return this.claimedDown(input, ns, record);
     if (method === "down") {
       if (this.failDown) {
         record("failed");
@@ -260,6 +317,64 @@ export class FakeGuard {
     }
     record("ok");
     return { ok: true };
+  }
+
+  /**
+   * The real guard's teardown of a claimed namespace: resolve each open attempt from what storage
+   * shows, delete the lease's objects, and report complete only when nothing of the lease is left.
+   * It never writes the Namespace.
+   */
+  private async claimedDown(input: any, ns: FakeNamespace, record: (outcome: string) => void): Promise<unknown> {
+    const shown = (await this.cli(["lease", "show", input.leaseId])).json;
+    const resolutions: Array<{ attempt: string; outcome: string }> = [];
+    let unresolved = 0;
+    for (const a of shown.open_attempts ?? []) {
+      // A create is resolved by its stamp in storage, or by another object holding the name. 404 proves nothing.
+      if (ns.stamps.get(a.name) === a.attempt) resolutions.push({ attempt: a.attempt, outcome: "committed" });
+      else if (ns.dgds.has(a.name)) resolutions.push({ attempt: a.attempt, outcome: "failed" });
+      else unresolved += 1;
+    }
+    if (this.failDown) {
+      record("failed");
+      return { ok: false, code: "api_error", error: "the API refused the delete" };
+    }
+    for (const [name, lease] of ns.dgdLease) {
+      if (lease !== input.leaseId) continue;
+      ns.dgds.delete(name);
+      ns.dgdLease.delete(name);
+      ns.stamps.delete(name);
+      for (const pod of ns.pods) if (pod.dgd === name) pod.terminating = true;
+    }
+    const held = ns.pods.filter((pod) => pod.lease === input.leaseId).length;
+    if (this.loseNextDownResponse) {
+      this.loseNextDownResponse = false;
+      record("lost");
+      throw new Error("the response was lost");
+    }
+    if (unresolved > 0 || held > 0) {
+      record("incomplete");
+      return { ok: false, code: "teardown_incomplete", error: `${unresolved} attempt(s) unresolved, ${held} leased pod(s) left`, resolutions };
+    }
+    record("complete");
+    return { ok: true, complete: true, resolutions };
+  }
+
+  /**
+   * An agent's `k8s-guard apply` in a claimed namespace: the slot, an attempt recorded before the
+   * write, then the write. With `pause`, the write is in flight and the guard dies: no resolve, no op end.
+   */
+  async claimedApply(leaseId: string, thread: string, ns: FakeNamespace, dgd: string, gpus: number, attempt: string, opts: { pause?: boolean } = {}): Promise<{ code: number; json: any }> {
+    const begin = await this.cli(["lease", "op", "begin", leaseId], thread);
+    if (begin.code !== 0) return begin;
+    const opened = await this.cli(["lease", "attempt", "begin", leaseId, begin.json.token, "--attempt", attempt, "--verb", "create", "--kind", "DynamoGraphDeployment", "--name", dgd], thread);
+    if (opened.code !== 0) return opened;
+    if (opts.pause) {
+      ns.pending.push({ attempt, dgd, gpus, lease: leaseId });
+      return opened;
+    }
+    this.cluster.landLeased(ns, dgd, gpus, leaseId, attempt);
+    await this.cli(["lease", "attempt", "resolve", leaseId, attempt, "--outcome", "committed"], thread);
+    return this.cli(["lease", "op", "end", leaseId, begin.json.token], thread);
   }
 
   /**
@@ -339,7 +454,14 @@ export class FakeThreads {
   };
 }
 
-export async function setup(settings: Record<string, string | number> = {}) {
+export interface SetupOptions {
+  /** Whether the admission webhook (phase 2) is in place. Unset: the production default, absent. */
+  admission?: () => boolean;
+  /** Fault injection for the claim transaction. */
+  faults?: { claim?: (phase: "before-commit" | "after-commit") => void };
+}
+
+export async function setup(settings: Record<string, string | number> = {}, options: SetupOptions = {}) {
   const clock = new Clock();
   const cluster = new FakeCluster();
   const guard = new FakeGuard(cluster, clock);
@@ -351,6 +473,8 @@ export async function setup(settings: Record<string, string | number> = {}) {
     newToken: () => `tok_${String(++ids).padStart(6, "0")}`,
     // Production ticks only start work; a test tick settles it, bounded so a stalled fake cannot hang the suite.
     tickWaitMs: 2_000,
+    ...(options.admission === undefined ? {} : { admissionHealthy: options.admission }),
+    ...(options.faults === undefined ? {} : { faults: options.faults }),
   });
   const created = createFakePluginHost({
     pluginId: "k8s-leases",
@@ -420,6 +544,28 @@ export async function setup(settings: Record<string, string | number> = {}) {
     current = await current.harness.lifecycle.reload(factory);
   }
 
+  /** `k8s-guard ns claim`'s acquire: owner from the calling thread, a request id, the expected predecessor. */
+  function claim(
+    thread: string,
+    ns: FakeNamespace,
+    gpus: number,
+    opts: { request?: string; replaces?: string; uid?: string; gpuType?: string; hours?: number; thread?: string } = {},
+  ) {
+    const argv = [
+      "lease", "acquire", "--claim",
+      "--request", opts.request ?? `req_${thread.slice(4)}${String(gpus).padStart(4, "0")}`,
+      "--replaces", opts.replaces ?? "none",
+      "--cluster", ns.cluster,
+      "--namespace", ns.name,
+      "--uid", opts.uid ?? ns.uid,
+      "--gpu-type", opts.gpuType ?? ns.gpuType,
+      "--gpus", String(gpus),
+      "--hours", String(opts.hours ?? 2),
+    ];
+    if (opts.thread !== undefined) argv.push("--thread", opts.thread);
+    return cli(argv, thread);
+  }
+
   return {
     get bb() {
       return current.bb;
@@ -427,7 +573,7 @@ export async function setup(settings: Record<string, string | number> = {}) {
     get harness() {
       return current.harness;
     },
-    clock, cluster, guard, threads, cli, tick, lease, acquire, reload, factory };
+    clock, cluster, guard, threads, cli, tick, lease, acquire, claim, reload, factory };
 }
 
 /** Run ticks, one minute apart, until `done` or `max` ticks. */

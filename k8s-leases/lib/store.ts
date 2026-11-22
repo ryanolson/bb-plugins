@@ -70,6 +70,28 @@ CREATE TABLE flags (
     detail TEXT NOT NULL,
     cleared_at INTEGER
   )`,
+  // Version 2: claims of a pre-made namespace. A claimed lease's row is its claim, its charge and its
+  // completion: it has a request id (a retry returns its recorded outcome), the lease it replaced, and an
+  // attempt epoch that moves with every write attempt opened or resolved. `attempts` holds each guard
+  // write, recorded before it is sent and resolved after.
+  `ALTER TABLE leases ADD COLUMN mode TEXT NOT NULL DEFAULT 'created' CHECK (mode IN ('created','claimed'));
+ALTER TABLE leases ADD COLUMN request_id TEXT;
+ALTER TABLE leases ADD COLUMN predecessor TEXT;
+ALTER TABLE leases ADD COLUMN attempt_epoch INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX leases_request ON leases(request_id) WHERE request_id IS NOT NULL;
+CREATE TABLE attempts (
+    id TEXT PRIMARY KEY,
+    lease_id TEXT NOT NULL,
+    verb TEXT NOT NULL CHECK (verb IN ('create','patch','delete')),
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    target_uid TEXT,
+    target_rv TEXT,
+    opened_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    outcome TEXT CHECK (outcome IN ('committed','failed','superseded'))
+  );
+CREATE INDEX attempts_open ON attempts(lease_id) WHERE resolved_at IS NULL`,
 ];
 
 export interface LeaseRow {
@@ -101,6 +123,47 @@ export interface LeaseRow {
   /** When the first `down` of this lease started. */
   down_first_at: number | null;
   stuck_flagged: number;
+  /** `created`: a namespace the guard made. `claimed`: the profile's pre-made namespace. */
+  mode: "created" | "claimed";
+  request_id: string | null;
+  predecessor: string | null;
+  attempt_epoch: number;
+}
+
+export interface AttemptRow {
+  id: string;
+  lease_id: string;
+  verb: "create" | "patch" | "delete";
+  kind: string;
+  name: string;
+  target_uid: string | null;
+  target_rv: string | null;
+  opened_at: number;
+  resolved_at: number | null;
+  outcome: "committed" | "failed" | "superseded" | null;
+}
+
+export interface AttemptTarget {
+  attempt: string;
+  verb: "create" | "patch" | "delete";
+  kind: string;
+  name: string;
+  uid: string | null;
+  rv: string | null;
+}
+
+export type AttemptOutcome = "committed" | "failed" | "superseded";
+export interface Resolution {
+  attempt: string;
+  outcome: AttemptOutcome;
+}
+
+export interface ClaimRequest extends Omit<AcquireRequest, "thread"> {
+  /** The authenticated caller: the lease's owner. */
+  thread: string;
+  request: string;
+  /** The lease this claim expects to replace, or null for none. */
+  replaces: string | null;
 }
 
 export interface ExtensionRow {
@@ -143,6 +206,10 @@ export interface AcquireRequest {
   approvals: string[] | null;
 }
 
+/** Why claims are refused in phase 1: the admission webhook that counts controller writes does not exist yet. */
+export const ADMISSION_ABSENT =
+  "Claims of a pre-made namespace stay off until the admission webhook that fences controller writes is installed; without it a controller write in flight is uncounted.";
+
 /** Flags raised after this many failed reconciles in a row. */
 export const FAILURES_BEFORE_FLAG = 3;
 
@@ -168,7 +235,27 @@ export function createStore(db: Db, now: () => number) {
     extensions: db.prepare<[string], ExtensionRow>("SELECT * FROM extensions WHERE lease_id = ? ORDER BY at"),
     heartbeats: db.prepare<[], HeartbeatRow>("SELECT * FROM heartbeats ORDER BY host_id"),
     flags: db.prepare<[], FlagRow>("SELECT * FROM flags WHERE cleared_at IS NULL ORDER BY id"),
+    byRequest: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE request_id = ?"),
+    latestOn: db.prepare<[string, string], LeaseRow>("SELECT * FROM leases WHERE context = ? AND namespace = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"),
+    openAttempts: db.prepare<[string], AttemptRow>("SELECT * FROM attempts WHERE lease_id = ? AND resolved_at IS NULL ORDER BY opened_at, id"),
   };
+
+  /** Resolve the open attempts named, once each; every one resolved moves the lease's attempt epoch. */
+  function resolve(id: string, resolutions: readonly Resolution[]): number {
+    let done = 0;
+    for (const r of resolutions) {
+      const changed = db
+        .prepare("UPDATE attempts SET resolved_at = ?, outcome = ? WHERE id = ? AND lease_id = ? AND resolved_at IS NULL")
+        .run(now(), r.outcome, r.attempt, id).changes;
+      done += changed;
+    }
+    if (done > 0) db.prepare("UPDATE leases SET attempt_epoch = attempt_epoch + ? WHERE id = ?").run(done, id);
+    return done;
+  }
+
+  function terms(row: LeaseRow, req: ClaimRequest): boolean {
+    return row.gpu_type === req.gpuType && row.gpus === req.gpus && row.hours === req.hours && row.cluster === req.cluster;
+  }
 
   /** Move every expired active lease to revoking; its grace runs from its expiry, as the offline timer's does. */
   function sweepExpired(graceMs: number): void {
@@ -215,6 +302,10 @@ export function createStore(db: Db, now: () => number) {
 
     find(id: string): LeaseRow | undefined {
       return q.get.get(id);
+    },
+
+    byRequest(request: string): LeaseRow | undefined {
+      return q.byRequest.get(request);
     },
 
     live(): LeaseRow[] {
@@ -284,6 +375,11 @@ export function createStore(db: Db, now: () => number) {
         sweepExpired(cfg.graceMs);
         const row = owned(id, thread);
         if (row.state !== "active") throw new Refusal("lease_not_active", `Lease ${id} is ${row.state}.`);
+        const open = q.openAttempts.all(id);
+        if (open.length > 0) {
+          // A write whose outcome is unknown may still land: the next budget-checked write waits for it.
+          throw new Refusal("attempt_unresolved", `Lease ${id} has a write whose outcome is unknown (${open.map((a) => `${a.verb} ${a.kind}/${a.name}`).join(", ")}); k8s-guard resolves it first.`);
+        }
         const t = now();
         const taken = db
           .prepare(
@@ -305,6 +401,121 @@ export function createStore(db: Db, now: () => number) {
         owned(id, thread);
         const freed = db.prepare("UPDATE leases SET op_token = NULL, op_deadline = NULL WHERE id = ? AND op_token = ?").run(id, token);
         return { state: mustGet(id).state, lapsed: freed.changes !== 1 };
+      }).immediate();
+    },
+
+    /**
+     * Claim the pre-made namespace, in one transaction: the recorded outcome of the same request; else
+     * health, exclusivity (the same owner adopts its matching active lease), the predecessor, the
+     * budget, and the insert. The caller has confirmed the namespace on a host.
+     */
+    claim(req: ClaimRequest, cfg: Config, heartbeatMs: number, admission: boolean, fault?: () => void): { row: LeaseRow; outcome: "granted" | "adopted" | "replayed" } {
+      return db.transaction(() => {
+        const prior = q.byRequest.get(req.request);
+        if (prior !== undefined) {
+          if (prior.thread_id !== req.thread) throw new Refusal("request_conflict", `Request ${req.request} belongs to another thread.`);
+          return { row: prior, outcome: "replayed" as const };
+        }
+        const t = now();
+        sweepExpired(cfg.graceMs);
+        if (!admission) throw new Refusal("enforcement_unhealthy", ADMISSION_ABSENT);
+        if (!freshHeartbeat(heartbeatMs, cfg.hosts)) {
+          throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${heartbeatMs / 60_000} minutes.`);
+        }
+        const held = q.liveOn.get(req.context, req.namespace) ?? q.liveUid.get(req.uid);
+        if (held !== undefined) {
+          if (held.mode === "claimed" && held.state === "active" && held.thread_id === req.thread && held.uid === req.uid && terms(held, req)) {
+            return { row: held, outcome: "adopted" as const };
+          }
+          throw new Refusal("namespace_leased", `${req.namespace} on ${req.cluster} already has lease ${held.id} (${held.state}).`);
+        }
+        const latest = q.latestOn.get(req.context, req.namespace);
+        if ((latest?.id ?? null) !== req.replaces) {
+          throw new Refusal("predecessor_mismatch", `${req.namespace}'s latest lease is ${latest?.id ?? "none"}, not ${req.replaces ?? "none"}; read it again before you claim.`, {
+            current: latest?.id ?? "none",
+          });
+        }
+        const limit = own(cfg.limits, req.gpuType) ?? 0;
+        const used = q.used.get(req.gpuType)?.used ?? 0;
+        if (used + req.gpus > limit) {
+          throw new Refusal("over_limit", `${req.gpus} ${req.gpuType} GPUs would make ${used + req.gpus}; the limit is ${limit} (${used} held).`);
+        }
+        if (req.approvals !== null) {
+          const usedApproval = db.prepare<[string], { lease_id: string }>("SELECT lease_id FROM approvals_used WHERE approval = ?");
+          const free = req.approvals.find((key) => usedApproval.get(key) === undefined);
+          if (free === undefined) throw new Refusal("multi_node_unapproved", `Each multi-node approval for ${req.namespace} is used already; one approval covers one lease.`);
+          db.prepare("INSERT INTO approvals_used (approval, lease_id, at) VALUES (?, ?, ?)").run(free, req.id, t);
+        }
+        db.prepare(
+          `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason, mode, request_id, predecessor)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, 'claimed', ?, ?)`,
+        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.approvals !== null ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000), req.request, req.replaces);
+        fault?.();
+        return { row: mustGet(req.id), outcome: "granted" as const };
+      }).immediate();
+    },
+
+    /** The latest lease ever made on a namespace, live or ended: what a fresh claim must name as `replaces`. */
+    latestOn(context: string, namespace: string): LeaseRow | undefined {
+      return q.latestOn.get(context, namespace);
+    },
+
+    openAttempts(id: string): AttemptRow[] {
+      return q.openAttempts.all(id);
+    },
+
+    /** Record a write before it is sent: only by the holder of the lease's live slot, one open attempt at a time. */
+    attemptBegin(id: string, thread: string | undefined, token: string, target: AttemptTarget, cfg: Config): { attempt: string; epoch: number } {
+      return db.transaction(() => {
+        sweepExpired(cfg.graceMs);
+        const row = owned(id, thread);
+        if (row.state !== "active") throw new Refusal("lease_not_active", `Lease ${id} is ${row.state}.`);
+        if (row.op_token !== token || row.op_deadline === null || row.op_deadline <= now()) {
+          throw new Refusal("slot_lost", `The slot of lease ${id} is not held by this token; take it again.`);
+        }
+        const open = q.openAttempts.all(id);
+        if (open.length > 0) throw new Refusal("attempt_unresolved", `Lease ${id} already has an unresolved write (${open[0]!.id}).`);
+        db.prepare(
+          "INSERT INTO attempts (id, lease_id, verb, kind, name, target_uid, target_rv, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(target.attempt, id, target.verb, target.kind, target.name, target.uid, target.rv, now());
+        db.prepare("UPDATE leases SET attempt_epoch = attempt_epoch + 1 WHERE id = ?").run(id);
+        return { attempt: target.attempt, epoch: mustGet(id).attempt_epoch };
+      }).immediate();
+    },
+
+    /** The owner's guard reports what a write did. Only an open attempt of this lease changes. */
+    attemptResolve(id: string, thread: string | undefined, resolution: Resolution): { resolved: boolean } {
+      return db.transaction(() => {
+        owned(id, thread);
+        return { resolved: resolve(id, [resolution]) === 1 };
+      }).immediate();
+    },
+
+    /** Resolutions a trusted host's teardown reported. */
+    resolveAttempts(id: string, resolutions: readonly Resolution[]): number {
+      return db.transaction(() => resolve(id, resolutions)).immediate();
+    },
+
+    /**
+     * Complete a claimed lease's teardown and return its GPUs, in one transaction, only when every
+     * condition holds: it is this exact closing lease and namespace UID; nothing moved its attempt epoch
+     * since the teardown read it (no attempt opened or resolved but the ones this result reports); and
+     * after those resolutions no attempt is open. The teardown's inventory read came after its own
+     * resolution reads. Anything else frees nothing, so a stale or replayed result frees zero GPUs.
+     */
+    completeClaimed(id: string, uid: string, epoch: number, resolutions: readonly Resolution[]): { completed: boolean; freed: number } {
+      return db.transaction(() => {
+        const row = q.get.get(id);
+        if (row === undefined || row.mode !== "claimed" || row.uid !== uid) return { completed: false, freed: 0 };
+        if (row.state !== "revoking" && row.state !== "releasing") return { completed: false, freed: 0 };
+        if (row.attempt_epoch !== epoch) return { completed: false, freed: 0 };
+        resolve(id, resolutions);
+        if (q.openAttempts.all(id).length > 0) return { completed: false, freed: 0 };
+        const final: LeaseState = row.state === "releasing" ? "released" : "torn-down";
+        db.prepare(
+          "UPDATE leases SET state = ?, reason = COALESCE(reason, 'teardown_complete'), ended_at = ?, op_token = NULL, op_deadline = NULL, failures = 0, last_error = NULL WHERE id = ?",
+        ).run(final, now(), id);
+        return { completed: true, freed: row.gpus };
       }).immediate();
     },
 
@@ -383,11 +594,11 @@ export function createStore(db: Db, now: () => number) {
       }).immediate();
     },
 
-    /** A host saw the namespace gone, or re-created: the lease frees its GPUs. */
+    /** A host saw the namespace gone, or re-created: the lease frees its GPUs. Never a claimed lease: only completeClaimed ends one. */
     end(id: string, why: string): LeaseRow {
       return db.transaction(() => {
         const row = mustGet(id);
-        if (!CHARGED.includes(row.state)) return row;
+        if (!CHARGED.includes(row.state) || row.mode === "claimed") return row;
         const final: LeaseState = row.state === "releasing" ? "released" : "torn-down";
         db.prepare(
           `UPDATE leases SET state = ?, reason = COALESCE(reason, ?), ended_at = ?, op_token = NULL, op_deadline = NULL, failures = 0, last_error = NULL WHERE id = ?`,
@@ -441,7 +652,9 @@ export function createStore(db: Db, now: () => number) {
         addFlag(
           id,
           "teardown_failing",
-          `Lease ${id} (${row.namespace} on ${row.cluster}): its namespace still exists ${Math.round((now() - row.down_first_at) / 60_000)} min after the first delete. Its GPUs stay charged.`,
+          row.mode === "claimed"
+            ? `Lease ${id} (${row.namespace} on ${row.cluster}): its teardown has not completed ${Math.round((now() - row.down_first_at) / 60_000)} min after the first down (an unresolved write, a held pod, or an object that changed hands). Its GPUs stay charged; no timer frees them.`
+            : `Lease ${id} (${row.namespace} on ${row.cluster}): its namespace still exists ${Math.round((now() - row.down_first_at) / 60_000)} min after the first delete. Its GPUs stay charged.`,
         );
       }).immediate();
     },

@@ -6,11 +6,24 @@ import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { HOST_TIMEOUTS, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
+import { z } from "zod";
+import { ATTEMPT_ID, HOST_TIMEOUTS, OUTCOME, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
 import { guardArgv, guardEnv, readGuardOutput, readInspect, type GuardMethod, type GuardOutcome, type GuardTarget } from "./lib/guard.ts";
 
 
 const MAX_OUTPUT = 1024 * 1024;
+
+/** The attempts a claimed-namespace teardown resolved, as the guard prints them; anything malformed is dropped. */
+const RESOLUTIONS = z.array(z.object({ attempt: ATTEMPT_ID, outcome: OUTCOME }).strip()).max(1000);
+
+function resolutionsIn(stdout: string): Array<{ attempt: string; outcome: "committed" | "failed" | "superseded" }> | undefined {
+  try {
+    const parsed = RESOLUTIONS.safeParse((JSON.parse(stdout) as { resolutions?: unknown }).resolutions);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface Ran {
   exitCode: number;
@@ -57,11 +70,15 @@ function findExecutable(command: string, path: string | undefined): string | nul
 export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } = {}) {
   const timeouts: HostTimeouts = { ...HOST_TIMEOUTS, ...options.timeoutMs };
 
-  async function guard(method: GuardMethod, input: GuardTarget & { run: GuardRun }, signal: AbortSignal): Promise<GuardOutcome> {
+  async function guardRun(method: GuardMethod, input: GuardTarget & { run: GuardRun }, signal: AbortSignal): Promise<{ outcome: GuardOutcome; stdout: string }> {
     const ran = await run(expandHome(input.run.command), guardArgv(method, input), guardEnv(input.run, process.env), timeouts[method], signal);
-    if (ran.missing) return { ok: false, code: "guard_missing", error: `${input.run.command} is not on PATH` };
-    if (ran.timedOut) return { ok: false, code: "guard_timeout", error: `k8s-guard ${method} ran past ${timeouts[method]} ms and was stopped` };
-    return readGuardOutput(ran.exitCode, ran.stdout, ran.stderr);
+    if (ran.missing) return { outcome: { ok: false, code: "guard_missing", error: `${input.run.command} is not on PATH` }, stdout: "" };
+    if (ran.timedOut) return { outcome: { ok: false, code: "guard_timeout", error: `k8s-guard ${method} ran past ${timeouts[method]} ms and was stopped` }, stdout: "" };
+    return { outcome: readGuardOutput(ran.exitCode, ran.stdout, ran.stderr), stdout: ran.stdout };
+  }
+
+  async function guard(method: GuardMethod, input: GuardTarget & { run: GuardRun }, signal: AbortSignal): Promise<GuardOutcome> {
+    return (await guardRun(method, input, signal)).outcome;
   }
 
   async function write(method: "expire" | "extend", input: GuardTarget & { run: GuardRun }, signal: AbortSignal) {
@@ -111,14 +128,18 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
       inspect: async (input, context) => readInspect(await guard("inspect", input, context.signal)),
       expire: (input, context) => write("expire", input, context.signal),
       down: async (input, context) => {
-        const outcome = await guard("down", input, context.signal);
-        if (!outcome.ok) return outcome;
-        // The deletion started. Pass on what the guard says is still terminating.
-        const value = (typeof outcome.value === "object" && outcome.value !== null ? outcome.value : {}) as { terminating?: unknown; gpu_pods_left?: unknown };
+        const { outcome, stdout } = await guardRun("down", input, context.signal);
+        const resolutions = resolutionsIn(stdout);
+        if (!outcome.ok) return resolutions === undefined ? outcome : { ...outcome, resolutions };
+        // The deletion started. Pass on what the guard says is still terminating, and in a claimed
+        // namespace whether nothing of the lease is left.
+        const value = (typeof outcome.value === "object" && outcome.value !== null ? outcome.value : {}) as { terminating?: unknown; gpu_pods_left?: unknown; complete?: unknown };
         return {
           ok: true as const,
           ...(typeof value.terminating === "boolean" ? { terminating: value.terminating } : {}),
           ...(Number.isInteger(value.gpu_pods_left) && (value.gpu_pods_left as number) >= 0 ? { gpu_pods_left: value.gpu_pods_left as number } : {}),
+          ...(value.complete === true ? { complete: true } : {}),
+          ...(resolutions === undefined ? {} : { resolutions }),
         };
       },
       extend: (input, context) => write("extend", input, context.signal),

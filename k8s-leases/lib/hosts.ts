@@ -24,6 +24,10 @@ export const REFUSALS: ReadonlySet<string> = new Set([
   "not_expired",
   "record_conflict",
   "lease_record_missing",
+  // A claimed namespace's teardown that found work left (an unresolved write, a held pod, an object
+  // that changed hands): the cluster's state, not a broken host.
+  "teardown_incomplete",
+  "object_not_yours",
 ]);
 
 /** No host could be reached, or none gave an answer. */

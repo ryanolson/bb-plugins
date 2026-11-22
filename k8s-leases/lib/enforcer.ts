@@ -22,7 +22,7 @@
 // touches the database, and every promise has a handler from the start.
 import { UID, allocationOf, type GuardFailure, type Inspect } from "./contract.ts";
 import type { HostAnswer, Hosts } from "./hosts.ts";
-import type { LeaseRow, Store } from "./store.ts";
+import type { LeaseRow, Resolution, Store } from "./store.ts";
 import type { Config } from "./settings.ts";
 
 /** What bb says about a lease's thread. Only the first three revoke. */
@@ -30,7 +30,9 @@ export type ThreadFate = "archived" | "deleted" | "missing" | "live" | "unknown"
 
 export type GuardMethod = "inspect" | "expire" | "down" | "extend";
 type InspectResult = { ok: true; value: Inspect } | GuardFailure;
-type WriteResult = { ok: true; gpu_pods_left?: number; terminating?: boolean } | GuardFailure;
+type WriteResult =
+  | { ok: true; gpu_pods_left?: number; terminating?: boolean; complete?: boolean; resolutions?: Resolution[] }
+  | (GuardFailure & { resolutions?: Resolution[] });
 
 export interface EnforcerDeps {
   store: Store;
@@ -132,6 +134,7 @@ export function createEnforcer(deps: EnforcerDeps) {
       fail(lease, `k8s-guard ${method}: ${message(error)}`);
       return false;
     }
+    if (method === "down" && lease.mode === "claimed") return claimedDown(lease, reply.result);
     if (reply.result.ok) {
       const left = (reply.result as { gpu_pods_left?: number }).gpu_pods_left ?? 0;
       if (method === "down" && left > 0) {
@@ -154,6 +157,32 @@ export function createEnforcer(deps: EnforcerDeps) {
     } else {
       fail(lease, `k8s-guard ${method} failed (${code}): ${error}`);
     }
+    return false;
+  }
+
+  /**
+   * A claimed namespace's teardown result. Its GPUs return only through the store's conditional
+   * completion, against the attempt epoch read when this down was dispatched; resolutions from an
+   * incomplete teardown are kept. Nothing here looks at whether the namespace exists.
+   */
+  function claimedDown(lease: LeaseRow, result: WriteResult): boolean {
+    const resolutions = result.resolutions ?? [];
+    if (result.ok && result.complete === true) {
+      const done = db().completeClaimed(lease.id, lease.uid, lease.attempt_epoch, resolutions);
+      if (!done.completed) {
+        db().resolveAttempts(lease.id, resolutions);
+        db().noteReport(lease.id, "k8s-guard down: complete, but the lease changed since this teardown read it; the next one decides");
+      }
+      deps.changed();
+      return done.completed;
+    }
+    if (!result.ok && result.code === "teardown_incomplete") {
+      db().resolveAttempts(lease.id, resolutions);
+      db().noteReport(lease.id, `k8s-guard down: ${result.error}`);
+      return false;
+    }
+    if (!result.ok) fail(lease, `k8s-guard down failed (${result.code}): ${result.error}`);
+    else fail(lease, "k8s-guard down on a claimed namespace reported no completion");
     return false;
   }
 
@@ -252,6 +281,11 @@ export function createEnforcer(deps: EnforcerDeps) {
     // and only when no other inspect of this lease is still out: its answer could still see it.
     const seenAt = lastSeen.get(id) ?? 0;
     const gone = answered.filter((reply) => (!reply.result.ok || reply.result.value.uid !== uid) && reply.seq > seenAt);
+    if (sees.length === 0 && gone.length > 0 && lease.mode === "claimed") {
+      // A claimed lease ends only through its teardown's completion: a write in flight could still land.
+      db().flagOnce(id, "claimed_namespace_missing", `Lease ${id} (${lease.namespace} on ${lease.cluster}): no host sees the claimed namespace with UID ${uid}. Its GPUs stay charged until a teardown completes.`);
+      return;
+    }
     if (sees.length === 0 && gone.length > 0 && (inspecting.get(id) ?? 0) === 0) {
       db().end(id, gone.some((reply) => reply.result.ok) ? "namespace_recreated" : "namespace_gone");
       lastSeen.delete(id);
@@ -269,6 +303,11 @@ export function createEnforcer(deps: EnforcerDeps) {
     db().sweepExpired(cfg.graceMs);
     const fresh = db().find(id)!;
     if (fresh.state !== "active") return;
+    if (fresh.mode === "claimed") {
+      // The plugin's row holds a claimed lease's expiry; the namespace keeps none, and no offline timer acts on it.
+      if (!revokedHere) db().clearFailures(id);
+      return;
+    }
     // Every host that sees the namespace must agree with the lease's expiry.
     const synced = !expiries.some((at) => at !== fresh.expires_at) || (await extend(fresh, cfg));
     if (synced && !revokedHere) db().clearFailures(id);

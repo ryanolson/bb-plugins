@@ -13,6 +13,12 @@ export const UID = z.string().regex(/^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/, "not a na
 export const LEASE_ID = z.string().regex(/^lse_[a-z0-9]{8,32}$/, "not a lease id");
 export const THREAD_ID = z.string().regex(/^thr_[a-z0-9]{4,64}$/, "not a bb thread id");
 export const GPU_TYPE = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "not a GPU type");
+/** A claim's request id, made by k8s-guard and kept in the thread's storage before the call. */
+export const REQUEST_ID = z.string().regex(/^req_[a-z0-9]{8,64}$/, "not a request id");
+/** A write attempt's id, made by k8s-guard before the write and stamped on the object it writes. */
+export const ATTEMPT_ID = z.string().regex(/^att_[a-z0-9]{8,64}$/, "not an attempt id");
+export const OUTCOME = z.enum(["committed", "failed", "superseded"]);
+const RESOLUTION = z.object({ attempt: ATTEMPT_ID, outcome: OUTCOME }).strict();
 
 /** How the host entry runs `k8s-guard`, from the plugin's settings. */
 export const GUARD_RUN = z
@@ -45,6 +51,9 @@ export const INSPECT = z.object({
   allocation: z.number().int().min(0).optional(),
   /** The lease the namespace's lease record names. */
   lease_id: z.string().nullable().optional(),
+  /** The Namespace's dynamo.nvidia.com/developer and developer-agent-rbac labels: a claim checks both. */
+  developer: z.string().nullable().optional(),
+  agent_rbac: z.string().nullable().optional(),
 });
 export type Inspect = z.infer<typeof INSPECT>;
 
@@ -59,6 +68,9 @@ export function allocationOf(ns: Inspect): number {
  */
 export const PROFILES = z.object({
   schema_version: z.literal(1),
+  /** The bot: its developer label, and the one pre-made namespace a claim may name, if any. */
+  // Lenient: a bot section the plugin cannot read names no pre-made namespace, and refuses only claims.
+  bot: z.object({ developer: z.string().optional(), premade_namespace: NAMESPACE.optional() }).optional().catch(undefined),
   clusters: z.record(
     CLUSTER,
     z.object({
@@ -98,12 +110,24 @@ export const hostContract = defineRpcContract({
     input: z.object(LEASE_TARGET).strict(),
     output: z.union([z.object({ ok: z.literal(true) }).strict(), FAILURE]),
   },
-  /** A down that works has started the deletion; GPU pods may still be terminating. */
+  /**
+   * A down that works has started the deletion; GPU pods may still be terminating. In a claimed
+   * namespace it reports `complete` only when nothing of the lease is left, with the attempts it
+   * resolved; `teardown_incomplete` carries the resolutions it could make.
+   */
   down: {
     input: z.object(LEASE_TARGET).strict(),
     output: z.union([
-      z.object({ ok: z.literal(true), terminating: z.boolean().optional(), gpu_pods_left: z.number().int().min(0).optional() }).strict(),
-      FAILURE,
+      z
+        .object({
+          ok: z.literal(true),
+          terminating: z.boolean().optional(),
+          gpu_pods_left: z.number().int().min(0).optional(),
+          complete: z.boolean().optional(),
+          resolutions: z.array(RESOLUTION).optional(),
+        })
+        .strict(),
+      FAILURE.extend({ resolutions: z.array(RESOLUTION).optional() }).strict(),
     ]),
   },
   extend: {
