@@ -10,7 +10,7 @@
 //   K8S_GUARD_REPO=/path/to/dynamo-dotfiles npm run test:contract
 // Without K8S_GUARD_REPO every test here is skipped.
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -24,7 +24,7 @@ import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
 /** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles main, PR #19 merged. */
-export const GUARD_COMMIT = "129e81d46cb347d0484e3d87444d89238cc7b05e";
+export const GUARD_COMMIT = "daade0dbd84a0d35691c8e8b3440ee9b027c8de1";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
@@ -44,6 +44,8 @@ interface World {
   profile: string;
   prefix: string;
   me: string;
+  other: string;
+  premade: string;
 }
 
 let world: World;
@@ -91,7 +93,7 @@ after(async () => {
 });
 
 /** The plugin on bb's fake host, with its host entry running the real guard on both hosts. */
-async function plugin(options: { hostCall?: (method: string, input: any, hostId: string, real: () => Promise<unknown>) => Promise<unknown> } = {}) {
+async function plugin(options: { hostCall?: (method: string, input: any, hostId: string, real: () => Promise<unknown>) => Promise<unknown>; admission?: boolean } = {}) {
   let t = Math.floor(Date.now() / 1000) * 1000;
   const clock = { now: () => t, advance: (ms: number) => (t += ms) };
   const host = experimental_createHostEntryHarness(createHostEntry());
@@ -111,11 +113,31 @@ async function plugin(options: { hostCall?: (method: string, input: any, hostId:
       return options.hostCall ? options.hostCall(method, input, hostId, real) : real();
     },
   });
-  await createK8sLeasesPlugin({ now: clock.now, tickWaitMs: 60_000 })(bb);
-  cli = async (argv, threadId) => harness.behavior.runCli(argv, threadId === null ? {} : { threadId });
-  const show = async (id: string) => JSON.parse((await harness.behavior.runCli(["lease", "show", id])).stdout);
-  const tick = () => harness.behavior.runSchedule("reconcile");
-  return { bb, harness, host, clock, show, tick };
+  const factory = createK8sLeasesPlugin({ now: clock.now, tickWaitMs: 60_000, admissionHealthy: () => options.admission === true });
+  await factory(bb);
+  let current = harness;
+  const wire = () => {
+    cli = async (argv, threadId) => current.behavior.runCli(argv, threadId === null ? {} : { threadId });
+  };
+  wire();
+  const show = async (id: string) => JSON.parse((await current.behavior.runCli(["lease", "show", id])).stdout);
+  const tick = () => current.behavior.runSchedule("reconcile");
+  /** The plugin restarts on the same database. */
+  const reload = async () => {
+    current = (await current.lifecycle.reload(factory)).harness;
+    wire();
+  };
+  return {
+    bb,
+    get harness() {
+      return current;
+    },
+    host,
+    clock,
+    show,
+    tick,
+    reload,
+  };
 }
 
 /**
@@ -135,6 +157,15 @@ function agentGuard(thread: string, ...args: string[]): Promise<{ code: number; 
       (error, stdout) => resolve({ code: error === null ? 0 : typeof error.code === "number" ? error.code : -1, json: JSON.parse(stdout || "{}") }),
     );
     child.stdin?.end();
+  });
+}
+
+/** The real guard as an agent runs it, killable: its own process group, so its kubectl dies with it. */
+function agentGuardChild(thread: string, ...args: string[]) {
+  return spawn(world.guard, args, {
+    env: { ...process.env, BB_THREAD_ID: thread, BB_THREAD_STORAGE: storageOf(thread), KUBECONFIG: world.kubeconfig },
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
 }
 
@@ -358,3 +389,89 @@ test("a down with GPU pods left: the real guard reports deleted with pods left, 
   assert.equal((await p.show(id)).state, "released");
   await p.harness.lifecycle.dispose();
 });
+
+test("a claimed namespace through the real guard: a write in flight across teardown holds the GPUs until it is observed, then exactly one release", { skip }, async () => {
+  const p = await plugin({ admission: true });
+  await p.tick();
+  py("add-premade", { uid: randomUUID() });
+  const claimed = await agentGuard(world.me, "--context", world.ctx, "-n", world.premade, "ns", "claim", "--gpus", "4", "--hours", "1");
+  assert.equal(claimed.code, 0, `k8s-guard ns claim: ${JSON.stringify(claimed.json)}`);
+  const id = claimed.json.lease_id as string;
+  assert.equal((await p.show(id)).mode, "claimed");
+  // The create reaches the server and its reply never comes; the guard is killed while it waits.
+  const st = state() as any;
+  st.stall_create = ["DynamoGraphDeployment/w"];
+  st.hold_file = join(world.dir, "release-write");
+  st.held_marker = join(world.dir, "write-held");
+  py("set", st);
+  const manifest = join(world.dir, "claimed-w.json");
+  writeFileSync(manifest, JSON.stringify(gpuDgd("w", 4, id)));
+  const child = agentGuardChild(world.me, "--context", world.ctx, "-n", world.premade, "apply", "-f", manifest);
+  for (let i = 0; i < 500 && !existsSync(join(world.dir, "write-held")); i += 1) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(existsSync(join(world.dir, "write-held")), "the write never reached the server");
+  process.kill(-child.pid!, "SIGKILL");
+  await new Promise((r) => child.once("exit", r));
+  assert.equal((await p.show(id)).open_attempts.length, 1);
+  // Its slot expires; the plugin restarts; the owner returns the lease. Nothing of it is listed yet.
+  p.clock.advance(3 * MIN);
+  await p.reload();
+  const down = await agentGuard(world.me, "--context", world.ctx, "-n", world.premade, "down", world.premade);
+  assert.equal(down.code, 0, JSON.stringify(down.json));
+  await p.tick();
+  assert.equal((await p.show(id)).state, "releasing", "teardown completed with a write in flight");
+  const early = await agentGuard(world.other, "--context", world.ctx, "-n", world.premade, "ns", "claim", "--gpus", "4", "--hours", "1");
+  assert.equal(early.json.code, "namespace_leased", JSON.stringify(early.json));
+  // The write lands; the next teardown observes its stamp, deletes it, and completes once.
+  py("land-pending");
+  p.clock.advance(MIN);
+  await p.tick();
+  const ended = await p.show(id);
+  assert.equal(ended.state, "released", JSON.stringify(ended));
+  assert.equal(ended.open_attempts.length, 0);
+  assert.equal(state().objects[world.premade]!["DynamoGraphDeployment/w"], undefined);
+  assert.ok(state().namespaces[world.premade], "the pre-made namespace is never deleted");
+  const nsWrites = writesTo(world.premade).filter((c) => (c.flags?.["--raw"] ?? "").endsWith(`/namespaces/${world.premade}`));
+  assert.deepEqual(nsWrites, [], "a Namespace request was sent");
+  await p.tick();
+  assert.equal((await p.show(id)).state, "released");
+  const successor = await agentGuard(world.other, "--context", world.ctx, "-n", world.premade, "ns", "claim", "--gpus", "4", "--hours", "1");
+  assert.equal(successor.code, 0, JSON.stringify(successor.json));
+  assert.equal((await p.show(successor.json.lease_id)).predecessor, id);
+  await p.harness.lifecycle.dispose();
+});
+
+/** A GPU DGD as an agent writes it under a lease: every template carries the lease. */
+function gpuDgd(name: string, gpus: number, lease: string) {
+  const label = { "wcep.agent/lease": lease };
+  const container = (n: number) => ({
+    name: "main",
+    image: "registry.example.test/dynamo:abc1234",
+    resources: {
+      requests: { cpu: "2", memory: "8Gi", ...(n ? { "nvidia.com/gpu": String(n) } : {}) },
+      limits: { cpu: "2", memory: "8Gi", ...(n ? { "nvidia.com/gpu": String(n) } : {}) },
+    },
+  });
+  return {
+    apiVersion: "nvidia.com/v1beta1",
+    kind: "DynamoGraphDeployment",
+    metadata: { name },
+    spec: {
+      components: [
+        { name: "Frontend", type: "frontend", replicas: 1, podTemplate: { metadata: { labels: label }, spec: { containers: [container(0)] } } },
+        {
+          name: "decode",
+          type: "worker",
+          replicas: 1,
+          podTemplate: {
+            metadata: { labels: label },
+            spec: {
+              containers: [container(gpus)],
+              nodeSelector: { "nvidia.com/gpu.product": "NVIDIA-GB300" },
+              affinity: { podAffinity: { requiredDuringSchedulingIgnoredDuringExecution: [{ labelSelector: { matchLabels: label }, topologyKey: "kubernetes.io/hostname" }] } },
+            },
+          },
+        },
+      ],
+    },
+  };
+}

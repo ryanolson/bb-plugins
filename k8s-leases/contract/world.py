@@ -69,7 +69,11 @@ os.execv(sys.executable, [sys.executable, {str(bin_dir / 'kubectl-fake')!r}, *sy
     profiles = world / 'profiles.toml'
     import hashlib, re
     pin = hashlib.sha256(pinned.read_bytes()).hexdigest()
-    profiles.write_text(re.sub(r'kubectl_sha256 = "[0-9a-f]*"', f'kubectl_sha256 = "{pin}"', g.EXAMPLE.read_text() + g.EXTRA_PROFILE))
+    text = re.sub(r'kubectl_sha256 = "[0-9a-f]*"', f'kubectl_sha256 = "{pin}"', g.EXAMPLE.read_text() + g.EXTRA_PROFILE)
+    if getattr(g, 'PREMADE', None):
+        # The pre-made namespace a claim names (the guard's tests call it PREMADE).
+        text = text.replace(f'namespace_prefix = "{g.PREFIX}"', f'namespace_prefix = "{g.PREFIX}"\npremade_namespace = "{g.PREMADE}"', 1)
+    profiles.write_text(text)
     save({'namespaces': {}, 'objects': {}, 'pods': {}})
     print(json.dumps({
         'env': {
@@ -82,7 +86,26 @@ os.execv(sys.executable, [sys.executable, {str(bin_dir / 'kubectl-fake')!r}, *sy
         'bin': str(bin_dir), 'guard': str(bin_dir / 'k8s-guard'), 'kubeconfig': str(bot),
         'check': str(repo / 'dot_agents/skills/k8s-clusters/scripts/executable_k8s-check'),
         'ctx': g.CTX, 'profile': g.PROFILE, 'prefix': g.PREFIX, 'me': g.ME, 'other': g.OTHER,
+        'premade': getattr(g, 'PREMADE', None),
     }))
+elif command == 'add-premade':
+    # The namespace ops made for the bot: both labels, no thread label, no expiry.
+    st = load()
+    ns = g.namespace(g.PREMADE, None, args['uid'])
+    del ns['metadata']['labels']['wcep.agent/thread']
+    del ns['metadata']['annotations']
+    st['namespaces'][g.PREMADE] = ns
+    st['objects'].setdefault(g.PREMADE, {})
+    st['pods'].setdefault(g.PREMADE, [])
+    save(st)
+elif command == 'land-pending':
+    # A write that reached the server and whose reply never came lands now.
+    st = load()
+    for item in st.pop('pending', []):
+        obj = item['object']
+        obj['metadata'].update(uid='uid-landed-' + obj['metadata']['name'], resourceVersion='900')
+        st['objects'][item['ns']][obj['kind'] + '/' + obj['metadata']['name']] = obj
+    save(st)
 elif command == 'add-ns':
     st = load()
     st['namespaces'][args['name']] = g.namespace(args['name'], args['thread'], args['uid'], args.get('expires_at'))
