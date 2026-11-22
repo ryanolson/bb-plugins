@@ -36,7 +36,7 @@ import {
   type ThreadRowView,
   type ThreadsView,
 } from "./lib/threads-view.ts";
-import { ARCHIVE_CHANNEL, parentText, type ArchiveRowView, type ArchiveView } from "./lib/archive-view.ts";
+import { ARCHIVE_CHANNEL, coverageText, parentText, startedText, type ArchiveRowView, type ArchiveView } from "./lib/archive-view.ts";
 import {
   announcement,
   askAnswerInput,
@@ -1223,12 +1223,13 @@ function ArchiveRow({ row }: { row: ArchiveRowView }) {
         )}
       </td>
       <td className="whitespace-nowrap px-2 py-1.5 text-xs tabular-nums">
-        <div>{record.startedAt === null ? "?" : new Date(record.startedAt).toLocaleString()}</div>
-        <div>{new Date(record.archivedAt).toLocaleString()}</div>
+        <div>{startedText(record)}</div>
+        <div>archived {new Date(record.archivedAt).toLocaleString()}</div>
       </td>
       <td className="max-w-64 px-2 py-1.5 text-xs">{row.why}</td>
       <td className="max-w-72 px-2 py-1.5 text-xs">
         <div>{row.summary}</div>
+        {row.note === null ? null : <div className="text-amber-700 dark:text-amber-400">{row.note}</div>}
         {row.children.length === 0 ? null : (
           <div className="mt-1 flex flex-wrap gap-x-2 text-muted-foreground">
             {row.children.map((child) => (
@@ -1256,6 +1257,7 @@ function Archive({ view, error }: { view: ArchiveView | null; error: string | nu
       <div className="text-sm text-muted-foreground">
         {view === null ? "Loading…" : view.total > view.rows.length ? `The newest ${view.rows.length} of ${view.total} archived threads.` : `${view.total} archived threads.`}
       </div>
+      {view === null || coverageText(view) === null ? null : <div className="text-xs text-muted-foreground">{coverageText(view)}</div>}
       {error === null ? null : <Notice tone="error">Could not read the archive: {error}</Notice>}
       {view !== null && view.rows.length === 0 ? <Notice>No archived threads recorded yet. Each archive from now on gets a row.</Notice> : null}
       {view === null || view.rows.length === 0 ? null : (
@@ -1263,7 +1265,7 @@ function Archive({ view, error }: { view: ArchiveView | null; error: string | nu
           <table className="w-full text-left text-sm">
             <thead className="text-xs text-muted-foreground">
               <tr>
-                {["Thread", "Started / archived", "Why", "What happened", "Tokens (approximate: context size when archived; children by phase)"].map((title) => (
+                {["Thread", "Started (or created) / archived", "Why", "What happened", "Tokens (approximate: context size when archived; children by phase)"].map((title) => (
                   <th key={title} scope="col" className="px-2 py-1.5 font-medium">
                     {title}
                   </th>

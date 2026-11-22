@@ -26,8 +26,9 @@ export interface ArchiveRecord {
   parentThreadId: string | null;
   provider: string | null;
   model: string | null;
-  /** Epoch ms bb created the thread. */
+  /** Epoch ms of the thread's first turn, or of its creation when bb had no turn for it; `startedFrom` says which. */
   startedAt: number | null;
+  startedFrom: "first-turn" | "created";
   /** Epoch ms of the latest archive. */
   archivedAt: number;
   source: ArchiveSource;
@@ -72,31 +73,44 @@ export interface ArchiveRowView {
   tokens: string;
   /** A driver's children's tokens by phase, `plan 41k, impl 210k, review 66k`; null for a thread that drove none. */
   phaseTokens: string | null;
+  /** Set when the thread started before recording began, so its roll-up may miss children archived before then. */
+  note: string | null;
 }
 
 export interface ArchiveView {
   rows: ArchiveRowView[];
   /** Archived threads recorded in all, of which `rows` holds the newest. */
   total: number;
+  /** Epoch ms of the first recorded archive: nothing archived before it, or while the plugin was stopped, is in the rows or their roll-ups. Null before any. */
+  recordedSince: number | null;
 }
 
-const PHASE_WORDS: ReadonlyArray<{ phase: Exclude<Phase, "other">; pattern: RegExp }> = [
-  { phase: "plan", pattern: /\b(plan|plans|planner|planning)\b/i },
-  { phase: "impl", pattern: /\b(impl|implement|implementation|implementer|coder|coding)\b/i },
-  { phase: "review", pattern: /\b(review|reviews|reviewer|reviewing)\b/i },
-];
+const ROLE_WORDS: Readonly<Record<string, Exclude<Phase, "other">>> = {
+  plan: "plan",
+  planner: "plan",
+  planning: "plan",
+  impl: "impl",
+  implement: "impl",
+  implementation: "impl",
+  implementer: "impl",
+  coder: "impl",
+  review: "review",
+  reviewer: "review",
+  reviewing: "review",
+};
+
+/** An optional issue number at the start of a title: `1844:`, `1844`, `TEAM-1844:`. */
+const ISSUE_PREFIX = /^\s*(?:[A-Za-z][A-Za-z0-9]*-)?\d+\s*:?\s*/;
 
 /**
- * A child's phase from its title. The role word that comes first wins, since a
- * brief's title leads with the role: "review the plan for X" is a review.
+ * A child's phase from its title. The role is the first word after the issue
+ * number, where a brief puts it: `1844: review impl round 2` is a review. A
+ * role word anywhere else is not a role: `1844: fix review links` is other.
  */
 export function phaseOf(title: string): Phase {
-  let best: { phase: Phase; at: number } | null = null;
-  for (const { phase, pattern } of PHASE_WORDS) {
-    const match = pattern.exec(title);
-    if (match !== null && (best === null || match.index < best.at)) best = { phase, at: match.index };
-  }
-  return best?.phase ?? "other";
+  const rest = title.replace(ISSUE_PREFIX, "");
+  const first = /^([A-Za-z]+)\b/.exec(rest)?.[1]?.toLowerCase();
+  return (first === undefined ? undefined : ROLE_WORDS[first]) ?? "other";
 }
 
 /** Who did the work: the model, else the provider, else the thread id. */
@@ -187,7 +201,13 @@ export function phaseTokensText(children: readonly ArchiveChildView[]): string {
  * in the last lifecycle snapshot to their titles, for a parent that is not
  * archived.
  */
-export function composeArchive(shown: readonly string[], records: readonly ArchiveRecord[], open: ReadonlyMap<string, string>, total: number): ArchiveView {
+export function composeArchive(
+  shown: readonly string[],
+  records: readonly ArchiveRecord[],
+  open: ReadonlyMap<string, string>,
+  total: number,
+  recordedSince: number | null,
+): ArchiveView {
   const byId = new Map(records.map((record) => [record.threadId, record]));
   const childrenOf = new Map<string, ArchiveRecord[]>();
   for (const record of records) {
@@ -229,9 +249,10 @@ export function composeArchive(shown: readonly string[], records: readonly Archi
         summary: children.length === 0 ? `${capital(fateText(record))}.` : capital(rollupText(record, children)),
         tokens: tokensOf(record.usedTokens),
         phaseTokens: children.length === 0 ? null : phaseTokensText(children),
+        note: recordedSince !== null && record.startedAt !== null && record.startedAt < recordedSince ? EARLY_NOTE : null,
       };
     });
-  return { rows, total };
+  return { rows, total, recordedSince };
 }
 
 function parentOf(record: ArchiveRecord, byId: ReadonlyMap<string, ArchiveRecord>, open: ReadonlyMap<string, string>): ParentView | null {
@@ -243,6 +264,8 @@ function parentOf(record: ArchiveRecord, byId: ReadonlyMap<string, ArchiveRecord
   return title === undefined ? { threadId: id, status: "missing" } : { threadId: id, status: "open", title };
 }
 
+const EARLY_NOTE = "Started before recording began: children archived before then are not counted.";
+
 /** What a row says about its parent, or null for a thread with none. */
 export function parentText(parent: ParentView | null): string | null {
   if (parent === null) return null;
@@ -253,3 +276,15 @@ export function parentText(parent: ParentView | null): string | null {
 
 /** The realtime channel the server publishes on after it writes an archive row, so an open Archive tab reads it at once. */
 export const ARCHIVE_CHANNEL = "archive";
+
+/** The tab's one line on what it covers. */
+export function coverageText(view: Pick<ArchiveView, "recordedSince">): string | null {
+  if (view.recordedSince === null) return null;
+  return `Covers archives recorded since ${new Date(view.recordedSince).toLocaleString()}. Earlier archives, and any while the plugin was stopped, are not in these rows or roll-ups.`;
+}
+
+/** `started 10:02`, or `created 10:02` when bb had no first turn; `?` when neither is known. */
+export function startedText(record: Pick<ArchiveRecord, "startedAt" | "startedFrom">): string {
+  if (record.startedAt === null) return "started ?";
+  return `${record.startedFrom === "first-turn" ? "started" : "created"} ${new Date(record.startedAt).toLocaleString()}`;
+}

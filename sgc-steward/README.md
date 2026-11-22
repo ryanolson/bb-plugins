@@ -191,22 +191,24 @@ The service keeps its last snapshot and the decision log in the plugin's SQLite 
 
 ### Archive
 
-**The Archive tab** and `bb sgc threads archive` list each archived thread the plugin recorded, newest archive first. Each row shows:
+**The Archive tab** and `bb sgc threads archive` list each archived thread the plugin recorded, newest archive first. A line on top says which archives the tab covers: those recorded since its first row. Earlier archives, and any while the plugin was stopped, are not in the rows or the roll-ups, because nothing backfills them. Each row shows:
 
 - the title (a link to the thread), its issue, and its parent: `Child of <title>`, `..., which is still open`, or `Parent <id> is missing` when the parent has no archive row and was not open at the last check;
-- when it started (bb's creation time) and when it was archived;
+- when it started and when bb archived it. Started is the thread's first turn. A thread bb has no first turn for shows `created` and its creation time instead;
 - why: who archived it and the reason they had. `Archived by the lifecycle as done: TEAM-12 is Done.`, `Archived from the page (Archive now) ...`, or `Archived outside the plugin; last seen idle-active: TEAM-12 is In Progress.` for an archive by another thread, by the owner in bb, or by bb cascading a parent's archive. A thread archived more than once says how many times;
-- what happened. A thread that drove others gets a roll-up of every recorded thread below it, oldest first: `Planned with fable; 4 rounds of impl (a, b, c, d); reviews by e, f, g; other: h. TEAM-12 Done.` Each child is named by its model, else its provider. A thread that drove none shows its own fate: `TEAM-12 Done; archived by the lifecycle.`;
-- tokens, approximate, as the column header says once: the thread's context size when it was archived, and for a driver its children summed by phase, `plan 41k, impl 210k, review 66k`. The phase comes from the first role word in a child's title (`plan`, `impl` or `coder`, `review`, and their forms such as `planner`); a title with none counts as `other`. A thread with no recorded usage shows `-`, never 0, and a phase where only some threads have usage shows the known sum with `+?`.
+- what happened. A thread that drove others gets a roll-up of every recorded thread below it, oldest first: `Planned with fable; 4 rounds of impl (a, b, c, d); reviews by e, f, g; other: h. TEAM-12 Done.` Each child is named by its model, else its provider. A thread that drove none shows its own fate: `TEAM-12 Done; archived by the lifecycle.` A thread that started before recording began says that its roll-up may miss children archived before then;
+- tokens, approximate, as the column header says once: the thread's context size when it was archived, and for a driver its children summed by phase, `plan 41k, impl 210k, review 66k`. The phase is the first word of a child's title after its issue number: `plan`, `planner`, `impl`, `implementer`, `coder`, `review`, `reviewer` and their forms. `1844: review impl round 2` is a review; `1844: fix review links` names no role, so it counts as `other`. A thread with no recorded usage shows `-`, never 0, and a phase where only some threads have usage shows the known sum with `+?`.
 
 A row is written when the thread is archived, never on render:
 
-- The lifecycle's own archive, and Archive now, write the row after bb accepts the archive, with the state, reason, issue and tokens the decision used.
-- Every other archive arrives as bb's `thread.archived` event. Its row takes the title, parent and start time from the event, and the state, issue, model and tokens from the last snapshot. A thread the snapshot never held gets one context read for its tokens, and no model.
-- bb sends the event for the plugin's own archives too, before or after the plugin's write. The plugin's write always wins, and the event writes only when the thread has no row, was unarchived, or has a row older than this archive.
+- Only bb's `thread.archived` event writes a row, and it awaits nothing before the write. bb dispatches its events in order without waiting for a handler, so a write after an await, or a write on the plugin's own archive reply, could land after a later unarchive and bring the row back, or overwrite a later archive. The time is bb's archive time.
+- The event writes a new archive only: no row, a row that was unarchived, or a row older than this archive (an unarchive the plugin missed). The same archive announced twice, or an older one announced late, changes nothing.
+- For its own archives, the lifecycle and Archive now note why, in memory, just before they ask bb. bb's event for an archive at or after that note takes it, with the state, reason, issue and tokens the decision used. Any other archive takes the state, issue, model and tokens the last snapshot held.
+- bb's reply only settles the note. When `archivedThreadIds` leaves the thread out, someone else archived it: the note goes, and a row that took it is put back to what an outside archive says.
+- After the write the event reads the first turn, and the usage of a thread the snapshot never held. Each read fills in only the archive it was read for. A new archive never carries the last archive's usage over.
 - `thread.unarchived` takes the row off the tab. A later archive updates the same row, keyed by thread id, and counts it.
 
-Opening the tab reads only the plugin's own table and the last snapshot: the roll-up is a join over the rows already recorded, not a read of each thread. A row keeps what it recorded: a later change to the issue, or its deletion, does not change it. The page reads the rows when the tab opens, and again on the `archive` realtime channel, which the server signals after each write. The RPC is `archive.list`: the newest 200 rows and the total.
+Opening the tab reads only the plugin's own table and the last snapshot: the roll-up is a join over the rows already recorded, not a read of each thread. A row keeps what it recorded: a later change to the issue, or its deletion, does not change it. The page reads the rows when the tab opens, and again on the `archive` realtime channel, which the server signals after each write. The RPC is `archive.list`: the newest 200 rows, the total, and when recording began.
 
 ## How it works
 

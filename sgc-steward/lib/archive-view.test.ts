@@ -10,6 +10,7 @@ function record(id: string, extra: Partial<ArchiveRecord> = {}): ArchiveRecord {
     provider: "claude-code",
     model: null,
     startedAt: 1,
+    startedFrom: "created",
     archivedAt: 10,
     source: "lifecycle",
     state: "done",
@@ -32,12 +33,16 @@ test("a child's phase comes from the first role word in its title; a title with 
   assert.equal(phaseOf("1844: impl round 3"), "impl");
   assert.equal(phaseOf("1844: review impl round 2"), "review");
   assert.equal(phaseOf("reviewer for 1844"), "review");
-  // Two role words: the first one wins.
+  // Only the first word counts.
   assert.equal(phaseOf("review the plan"), "review");
   assert.equal(phaseOf("plan the review"), "plan");
   // A word inside another word is not a role.
   assert.equal(phaseOf("explanation of the airplane"), "other");
   assert.equal(phaseOf("fix the flaky test"), "other");
+  // A role word after the first word names no role.
+  assert.equal(phaseOf("1844: fix review links"), "other");
+  assert.equal(phaseOf("TEAM-1844: planner for the cut"), "plan");
+  assert.equal(phaseOf("1844 coder"), "impl");
 });
 
 test("phase tokens: a phase with no usage shows -, never 0, and a partly known phase shows +?", () => {
@@ -68,7 +73,7 @@ test("compose: newest first, every recorded thread below a driver, and where eac
     record("thr_kid", { parentThreadId: "thr_open", title: "plan", archivedAt: 20 }),
     record("thr_lost", { parentThreadId: "thr_gone", title: "plan", archivedAt: 60 }),
   ];
-  const view = composeArchive(["thr_rev", "thr_drv", "thr_kid", "thr_lost", "thr_coder"], records, new Map([["thr_open", "open driver"]]), 5);
+  const view = composeArchive(["thr_rev", "thr_drv", "thr_kid", "thr_lost", "thr_coder"], records, new Map([["thr_open", "open driver"]]), 5, null);
   assert.deepEqual(view.rows.map((row) => row.record.threadId), ["thr_lost", "thr_drv", "thr_coder", "thr_rev", "thr_kid"]);
   const driver = view.rows[1]!;
   assert.deepEqual(driver.children.map((entry) => [entry.threadId, entry.phase, entry.name]), [["thr_coder", "impl", "codex"], ["thr_rev", "review", "fable"]]);
@@ -81,6 +86,6 @@ test("compose: newest first, every recorded thread below a driver, and where eac
 
 test("compose survives a parent loop in recorded rows", () => {
   const records = [record("thr_a", { parentThreadId: "thr_b" }), record("thr_b", { parentThreadId: "thr_a" })];
-  const view = composeArchive(["thr_a", "thr_b"], records, new Map(), 2);
+  const view = composeArchive(["thr_a", "thr_b"], records, new Map(), 2, null);
   assert.deepEqual(view.rows.map((row) => row.children.map((entry) => entry.threadId)), [["thr_b"], ["thr_a"]]);
 });

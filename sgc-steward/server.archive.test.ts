@@ -114,7 +114,7 @@ test("an unarchive takes the row off the tab, and each re-archive updates the sa
 
   await t.emitUnarchived("thr_solo");
   t.state.archived.delete("thr_solo");
-  assert.deepEqual(await t.archive(), { rows: [], total: 0 });
+  assert.deepEqual(await t.archive(), { rows: [], total: 0, recordedSince: START });
 
   // Archived again from the page: the same row, counted twice.
   t.clock.now += 60 * MINUTE;
@@ -137,7 +137,8 @@ test("bb's archive event for the plugin's own archive never adds a second row or
   for (const order of ["event first", "event last"] as const) {
     const t = await lifecycleSetup([{ id: "thr_done", title: "1: finished" }], { settings: ACT });
     t.issue("TEAM-1", "state-done");
-    if (order === "event first") t.state.onArchive = (id) => t.emitArchived(id, t.clock.now);
+    // bb sends its event inside the archive call by default; "event last" sends it after the reply.
+    if (order === "event last") t.state.onArchive = null;
     await t.pass();
     if (order === "event last") await t.emitArchived("thr_done", t.clock.now);
     const view = await t.archive();
@@ -214,4 +215,169 @@ test("bb sgc threads archive prints the rows, and says once that tokens are appr
   assert.equal((JSON.parse(json.stdout) as ArchiveView).rows.length, 1);
   const bad = await t.harness.behavior.runCli(["threads", "archive", "--limit", "0"], { threadId: "thr_steward" });
   assert.notEqual(bad.exitCode, 0);
+});
+
+// --- overlaps: bb dispatches its events without waiting for a handler, and the plugin's archive reply can come back at any point among them.
+
+function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => (release = resolve));
+  return { promise, release };
+}
+
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+async function until(check: () => Promise<boolean>, what: string): Promise<void> {
+  for (let tries = 0; tries < 200; tries += 1) {
+    if (await check()) return;
+    await turn();
+  }
+  assert.fail(`never: ${what}`);
+}
+
+/** Archive now, with bb's reply held after bb archived the thread and sent its event. */
+async function heldArchiveNow(t: Awaited<ReturnType<typeof lifecycleSetup>>, id: string) {
+  const hold = gate();
+  t.state.onArchive = async (threadId) => {
+    await t.emitArchived(threadId, t.clock.now);
+    await hold.promise;
+  };
+  const acting = t.act(id, "archive");
+  await until(async () => (await t.archive()).total > 0, "the event's row");
+  return { release: hold.release, acting };
+}
+
+test("overlap: a held context read cannot bring back a row that an unarchive took off", async () => {
+  // Never listed, so the snapshot does not hold it and its archive reads its usage.
+  const t = await lifecycleSetup([{ id: "thr_new", title: "1844: impl later", tokens: 5_000 }]);
+  const hold = gate();
+  t.state.contextGate = hold.promise;
+  const archiving = t.emitArchived("thr_new", START);
+  await turn();
+  await t.emitUnarchived("thr_new");
+  hold.release();
+  await archiving;
+  const view = await t.archive();
+  assert.deepEqual([view.total, view.rows], [0, []]);
+});
+
+test("overlap: a held Archive now reply after an unarchive neither brings the row back nor counts it twice", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  const { release, acting } = await heldArchiveNow(t, "thr_solo");
+  await t.emitUnarchived("thr_solo");
+  release();
+  await acting;
+  assert.deepEqual((await t.archive()).total, 0);
+  await t.emitArchived("thr_solo", START + 30 * MINUTE);
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.archiveCount, row.record.source], [2, "outside"]);
+});
+
+test("overlap: an unarchive and an outside re-archive while Archive now's reply is held keep the latest archive's facts", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  const { release, acting } = await heldArchiveNow(t, "thr_solo");
+  await t.emitUnarchived("thr_solo");
+  await t.emitArchived("thr_solo", START + 10 * MINUTE);
+  release();
+  await acting;
+  const view = await t.archive();
+  assert.equal(view.total, 1);
+  const row = rowOf(view, "thr_solo");
+  assert.deepEqual([row.record.source, row.record.archiveCount, row.record.archivedAt], ["outside", 2, START + 10 * MINUTE]);
+});
+
+test("overlap: a reply whose archivedThreadIds leaves the thread out writes none of the plugin's reasons", async () => {
+  // Someone else archived it just before the plugin asked, or just after: either way bb's reply names no thread.
+  for (const offset of [-MINUTE, 0]) {
+    const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+    t.issue("TEAM-3", "state-done");
+    await t.list();
+    t.state.archiveReply = () => [];
+    t.state.onArchive = (id) => t.emitArchived(id, t.clock.now + offset);
+    await t.act("thr_solo", "archive");
+    const row = rowOf(await t.archive(), "thr_solo");
+    assert.deepEqual([row.record.source, row.record.archivedAt, row.record.archiveCount], ["outside", START + offset, 1], `offset ${offset}`);
+    assert.equal(row.why, "Archived outside the plugin; last seen done: TEAM-3 is Done.", `offset ${offset}`);
+  }
+});
+
+test("overlap: a held reply across another thread's archive keeps bb's archive times and their order", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_a", title: "3: first" },
+    { id: "thr_b", title: "free work" },
+  ]);
+  t.issue("TEAM-3", "state-done");
+  const { release, acting } = await heldArchiveNow(t, "thr_a");
+  t.clock.now += MINUTE;
+  t.state.archived.add("thr_b");
+  await t.emitArchived("thr_b", t.clock.now);
+  t.clock.now += MINUTE;
+  release();
+  await acting;
+  const view = await t.archive();
+  assert.deepEqual(view.rows.map((row) => [row.record.threadId, row.record.archivedAt]), [
+    ["thr_b", START + MINUTE],
+    ["thr_a", START],
+  ]);
+  assert.equal(rowOf(view, "thr_a").record.source, "page");
+});
+
+test("a re-archive with no usage shows -, and its phase shows the known sum with +?", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_drv", title: "1844: drive" },
+    { id: "thr_c1", title: "1844: impl one", parentThreadId: "thr_drv", tokens: 210_000 },
+    { id: "thr_c2", title: "1844: impl two", parentThreadId: "thr_drv", tokens: 5_000 },
+  ]);
+  await t.emitArchived("thr_c1", START);
+  await t.emitArchived("thr_c2", START);
+  await t.emitUnarchived("thr_c1");
+  t.state.threads[1]!.tokens = null;
+  await t.emitArchived("thr_c1", START + 5 * MINUTE);
+  await t.emitArchived("thr_drv", START + 6 * MINUTE);
+  const view = await t.archive();
+  assert.equal(rowOf(view, "thr_c1").tokens, "-");
+  assert.equal(rowOf(view, "thr_drv").phaseTokens, "impl 5k+?");
+});
+
+test("started is the first turn when bb has one, and the creation time, labeled so, when it has none", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_ran", title: "ran", createdAt: START - 2 * 60 * MINUTE, firstTurnAt: START - 30 * MINUTE },
+    { id: "thr_quiet", title: "never ran", createdAt: START - 60 * MINUTE },
+  ]);
+  await t.emitArchived("thr_ran", START);
+  await t.emitArchived("thr_quiet", START);
+  const view = await t.archive();
+  assert.deepEqual([rowOf(view, "thr_ran").record.startedAt, rowOf(view, "thr_ran").record.startedFrom], [START - 30 * MINUTE, "first-turn"]);
+  assert.deepEqual([rowOf(view, "thr_quiet").record.startedAt, rowOf(view, "thr_quiet").record.startedFrom], [START - 60 * MINUTE, "created"]);
+});
+
+test("the tab says which archives it covers: those recorded since the first row", async () => {
+  const t = await lifecycleSetup([{ id: "thr_x", title: "free work" }]);
+  assert.equal((await t.archive()).recordedSince, null);
+  await t.emitArchived("thr_x", START);
+  assert.equal((await t.archive()).recordedSince, START);
+});
+
+test("the same archive announced twice counts once, and an older archive announced late changes nothing", async () => {
+  const t = await lifecycleSetup([{ id: "thr_x", title: "free work" }]);
+  await t.emitArchived("thr_x", START + 10 * MINUTE);
+  await t.emitArchived("thr_x", START + 10 * MINUTE);
+  await t.emitArchived("thr_x", START);
+  const row = rowOf(await t.archive(), "thr_x");
+  assert.deepEqual([row.record.archiveCount, row.record.archivedAt], [1, START + 10 * MINUTE]);
+});
+
+test("an archive from before the plugin asked is someone else's, even when the plugin's call then fails", async () => {
+  const t = await lifecycleSetup([{ id: "thr_solo", title: "3: solo fix" }]);
+  t.issue("TEAM-3", "state-done");
+  await t.list();
+  t.state.onArchive = async (id) => {
+    await t.emitArchived(id, t.clock.now - MINUTE);
+    throw new Error("the reply was lost");
+  };
+  await assert.rejects(t.act("thr_solo", "archive"));
+  const row = rowOf(await t.archive(), "thr_solo");
+  assert.deepEqual([row.record.source, row.record.archivedAt], ["outside", START - MINUTE]);
 });

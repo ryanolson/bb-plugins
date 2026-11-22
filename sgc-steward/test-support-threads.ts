@@ -27,7 +27,10 @@ export interface FakeThread {
   queuedMessageCount?: number;
   environmentId?: string | null;
   environmentHostId?: string | null;
-  tokens?: number;
+  /** Context size; null for a thread bb has no usage for. */
+  tokens?: number | null;
+  /** Epoch ms of its first turn, as `threads.events.list` returns it. */
+  firstTurnAt?: number;
   offerAt?: string;
   model?: string;
   queuedAt?: number;
@@ -50,8 +53,16 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
     remote: new Map<string, string[]>(),
     listFails: false,
     archived: new Set<string>(),
-    /** Runs inside bb's archive call, after the thread is archived: a test emits bb's archive event here to land it before the call returns. */
-    onArchive: null as ((threadId: string) => Promise<void>) | null,
+    /**
+     * Runs inside bb's archive call, after the thread is archived. By default it
+     * sends bb's archive event, as bb does; a test replaces it to hold the reply
+     * or to send the event later, or sets it to null to send none.
+     */
+    onArchive: ((threadId: string) => emitArchived(threadId, clock.now)) as ((threadId: string) => Promise<void>) | null,
+    /** The ids bb's archive reply names; by default the thread archived. */
+    archiveReply: null as ((threadId: string) => string[]) | null,
+    /** Awaited by every context read, so a test can hold one. */
+    contextGate: null as Promise<void> | null,
   };
   const row = (thread: FakeThread) => ({
     id: thread.id,
@@ -88,12 +99,14 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
         state.archived.add(threadId);
         await state.onArchive?.(threadId);
       }
-      return action === "archive" ? { archived: [threadId] } : { ok: true };
+      return action === "archive" ? { archivedThreadIds: state.archiveReply?.(threadId) ?? [threadId] } : { ok: true };
     });
   }
   const find = (args: unknown) => state.threads.find((thread) => thread.id === (args as { threadId: string }).threadId)!;
   sdk.stub("threads.context", async (args: unknown) => {
+    await state.contextGate;
     const thread = find(args);
+    if (thread.tokens === null) return { usage: null };
     return {
       usage: { estimated: false, modelContextWindow: 1_000_000, usedTokens: thread.tokens ?? 150_000, ...(thread.offerAt === undefined ? {} : { compactionOfferAt: thread.offerAt }) },
     };
@@ -105,14 +118,14 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
   });
   sdk.stub("threads.events.list", async (args: unknown) => {
     const thread = find(args);
-    if (thread.brief === undefined) return [];
+    if (thread.brief === undefined && thread.firstTurnAt === undefined) return [];
     return [
       {
         id: `evt_${thread.id}`,
         scope: { kind: "thread" },
         threadId: thread.id,
         seq: 1,
-        createdAt: START,
+        createdAt: thread.firstTurnAt ?? START,
         type: "client/turn/requested",
         data: {
           direction: "outbound",
@@ -122,7 +135,7 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
           senderThreadId: null,
           systemMessageKind: "unlabeled",
           systemMessageSubject: null,
-          input: [{ type: "text", text: thread.brief }],
+          input: [{ type: "text", text: thread.brief ?? "" }],
         },
       },
     ];
@@ -174,7 +187,7 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
   /** The Archive tab, as the page reads it. */
   const archive = async () => (await kit.harness.behavior.callRpc("archive.list", null)) as ArchiveView;
   /** bb announcing an archive, as it does for any archive: the plugin's own, another thread's, or a cascade. */
-  const emitArchived = async (id: string, archivedAt: number, overrides: Partial<ThreadResponse> = {}) => {
+  async function emitArchived(id: string, archivedAt: number, overrides: Partial<ThreadResponse> = {}): Promise<void> {
     const thread = state.threads.find((candidate) => candidate.id === id);
     const { errors } = await kit.harness.emitThreadEvent("thread.archived", {
       thread: makeThreadResponse({
@@ -188,7 +201,7 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
       }),
     });
     assert.deepEqual(errors, []);
-  };
+  }
   const emitUnarchived = async (id: string) => {
     const { errors } = await kit.harness.emitThreadEvent("thread.unarchived", { thread: makeThreadResponse({ id, archivedAt: null }) });
     assert.deepEqual(errors, []);

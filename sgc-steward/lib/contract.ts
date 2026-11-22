@@ -242,6 +242,7 @@ const threadsViewSchema = z.object({
 const phaseSchema = z.enum(["plan", "impl", "review", "other"]);
 const archiveViewSchema = z.object({
   total: z.number().int(),
+  recordedSince: z.number().nullable(),
   rows: z.array(
     z.object({
       record: z.object({
@@ -251,6 +252,7 @@ const archiveViewSchema = z.object({
         provider: z.string().nullable(),
         model: z.string().nullable(),
         startedAt: z.number().nullable(),
+        startedFrom: z.enum(["first-turn", "created"]),
         archivedAt: z.number(),
         source: z.enum(["lifecycle", "page", "outside"]),
         state: z.string().nullable(),
@@ -273,6 +275,7 @@ const archiveViewSchema = z.object({
       summary: z.string(),
       tokens: z.string(),
       phaseTokens: z.string().nullable(),
+      note: z.string().nullable(),
     }),
   ),
 });
