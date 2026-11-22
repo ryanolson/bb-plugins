@@ -94,11 +94,8 @@ export interface DescendantFacts {
   title?: string;
   /** Why it is protected, or null. */
   protectedBy: string | null;
-  environmentId?: string | null;
   /** What keeps it from being archived with its parent: queued work or work in the background; null when idle. */
   busy?: string | null;
-  /** Its checkout, as for the thread: null for none, absent when not read. */
-  env?: EnvFacts | null;
 }
 
 export interface ThreadFacts {
@@ -123,6 +120,8 @@ export interface ThreadFacts {
   oldestQueuedAt: number | null;
   /** Some descendant thread is running a turn. */
   childWorking: boolean;
+  /** False when `threads.list` stopped at its page cap, so a child may be unseen. Absent means complete. */
+  graphComplete?: boolean;
   /** Every unarchived thread below this one: archiving the parent archives them too. */
   descendants?: DescendantFacts[];
   environmentId: string | null;
@@ -211,12 +210,15 @@ export function classify(facts: ThreadFacts, ctx: LifecycleContext): Classificat
       ? { state: "orphan", reason: `no issue, idle ${Math.floor(idleMs / HOUR)} h` }
       : { state: "idle-active", reason: "no issue yet" };
   }
-  const completion = completionOf(issue);
-  if (completion.done) return { state: "done", reason: completion.why };
+  if (issue.stateType === "completed" || issue.stateType === "canceled") return { state: "done", reason: `${issue.identifier} is ${issue.stateName}` };
+  // The owner's or a reviewer's park wins over a closure comment: the archive it allows is `archive-parked`.
   if (issue.stateType === "backlog" && hasLabel(issue, (name) => name === "paused")) {
     return { state: "parked", reason: `${issue.identifier} is paused in the backlog` };
   }
   if (hasLabel(issue, (name) => name.startsWith("waiting:"))) return { state: "parked", reason: `${issue.identifier} is waiting on someone` };
+  const completion = completionOf(issue);
+  if (completion.done) return { state: "done", reason: completion.why };
+  // A long, quiet review is only a guess at a park, so a closure comment beats it: the archive stays `archive-done`.
   if (/review/i.test(issue.stateName) && ctx.now - Math.max(issue.updatedAt, facts.lastActivityAt) >= REVIEW_PARKED_MS) {
     return { state: "parked", reason: `${issue.identifier} has been in review for 48 hours with nothing to do` };
   }
@@ -231,23 +233,30 @@ function envBlockers(env: EnvFacts | null | undefined, who: string): string[] {
 }
 
 /**
- * What stops an archive: empty when it is safe. A live child always stops it,
- * because an archive takes the thread's descendants with it and a child may be
- * doing work of its own. Each child's protection and checkout are named too.
+ * The blockers that need no environment read: protection, a working child,
+ * and every live child. `collect` checks these before it reads any checkout.
  */
-export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
+export function envlessBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
   const blockers: string[] = [];
   const guarded = isProtected(facts, ctx);
   if (guarded !== null) blockers.push(`the thread is protected: ${guarded}`);
   if (facts.childWorking) blockers.push("a child thread is working");
-  blockers.push(...envBlockers(facts.env, "the"));
+  if (facts.graphComplete === false) blockers.push("bb's thread list was cut off, so a child may be unseen");
   for (const child of facts.descendants ?? []) {
     blockers.push(`child ${child.id} is still live${child.title === undefined || child.title === "" ? "" : ` (${child.title.length > 60 ? `${child.title.slice(0, 59)}…` : child.title})`}`);
     if (child.protectedBy !== null) blockers.push(`child ${child.id} is protected: ${child.protectedBy}`);
     if (child.busy) blockers.push(`child ${child.id} ${child.busy}`);
-    blockers.push(...envBlockers(child.env, `child ${child.id}'s`));
   }
   return blockers;
+}
+
+/**
+ * What stops an archive: empty when it is safe. A live child always stops it,
+ * because an archive takes the thread's descendants with it and a child may be
+ * doing work of its own. Its checkout is not read: the archive cannot happen.
+ */
+export function safetyBlockers(facts: ThreadFacts, ctx: LifecycleContext): string[] {
+  return [...envlessBlockers(facts, ctx), ...envBlockers(facts.env, "the")];
 }
 
 /**
@@ -311,8 +320,15 @@ export interface IssueWithComments extends Omit<IssueFacts, "link" | "closureAt"
   comments: Array<{ body: string; createdAt: number }>;
 }
 
+/** A signed comment that opens as an indented or fenced code block is an example, not a signature. */
+function isExample(body: string): boolean {
+  const first = body.split("\n").find((line) => line.trim() !== "") ?? "";
+  return /^\s*(```|~~~)/.test(first) || /^(\t| {4,})/.test(first);
+}
+
 /** The thread id a signed `claim:` comment names, or null. */
 export function claimThread(body: string): string | null {
+  if (isExample(body)) return null;
   const match = /^\[agent:[^\s\]]+[ \t]+(thr_[a-z0-9]+)[ \t]*\]\s*claim:/i.exec(body.trim());
   return match === null ? null : match[1]!.toLowerCase();
 }
@@ -323,6 +339,7 @@ export function claimThread(body: string): string | null {
  * that comment must not become the evidence for the archive it announces.
  */
 export function closureThread(body: string): string | null {
+  if (isExample(body)) return null;
   const match = /^\[agent:(?!sgc-steward\b)[^\s\]]+[ \t]+(thr_[a-z0-9]+)[ \t]*\]\s*(?:done|closed|superseded):/i.exec(body.trim());
   return match === null ? null : match[1]!.toLowerCase();
 }

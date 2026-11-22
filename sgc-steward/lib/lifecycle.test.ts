@@ -9,6 +9,7 @@ import {
   claimThread,
   classify,
   closureAt,
+  closureThread,
   completionOf,
   decide,
   formatExpiresIn,
@@ -104,6 +105,23 @@ test("completion: a closed issue, or a signed closure comment on this thread, an
   assert.equal(completionOf(issue("Done", "completed", { link: "brief" })).done, false, "a brief link cannot finish a thread");
   assert.equal(completionOf(null).done, false);
   assert.equal(completionOf(undefined).done, false);
+});
+
+test("an indented or fenced code sample is not a signed claim or closure", () => {
+  assert.equal(closureThread("    [agent:codex thr_a] done: copy this format"), null);
+  assert.equal(closureThread("```\n[agent:codex thr_a] done: x\n```"), null);
+  assert.equal(claimThread("    [agent:codex thr_a] claim: an example"), null);
+  assert.equal(closureThread("[agent:codex thr_a] done: real"), "thr_a");
+});
+
+test("a paused or waiting issue with a closure comment stays parked, so archive-parked can act on it", () => {
+  const paused = issue("Backlog", "backlog", { labels: ["paused"], closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread(), context({ issue: paused })), "parked");
+  const waiting = issue("In Progress", "started", { labels: ["waiting:owner"], closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread(), context({ issue: waiting })), "parked");
+  // A quiet review with a closure is done, not parked: the park there is only a guess.
+  const review = issue("In Review", "started", { updatedAt: NOW - 49 * HOUR, closureAt: NOW - HOUR });
+  assert.equal(stateOf(thread({ lastActivityAt: NOW - 49 * HOUR }), context({ issue: review })), "done");
 });
 
 test("a signed done comment names the thread it closes; the steward's archived comment does not", () => {
@@ -337,21 +355,26 @@ for (const [name, change, pattern] of UNSAFE) {
   });
 }
 
-// Archiving a parent archives its children, so any live child stops it, and its checkout and protection are named too.
-test("any live child blocks an archive of its parent; protection, checkout and queue are named", () => {
+// Archiving a parent archives its children, so any live child stops it; its protection and queue are named too.
+test("any live child blocks an archive of its parent; protection and queue are named, its checkout is not read", () => {
   const ctx = context({ issue: issue("Done", "completed") });
-  const child = (extra: object) => ({ id: "thr_kid", protectedBy: null, env: CLEAN, ...extra });
+  const child = (extra: object) => ({ id: "thr_kid", protectedBy: null, ...extra });
   const blockers = (descendants: object[]) => safetyBlockers(expiringIn(10 * MINUTE, { descendants } as Partial<ThreadFacts>), ctx).join(";");
   assert.match(blockers([child({})]), /child thr_kid is still live/);
+  assert.match(blockers([child({ title: "Planner: x" })]), /child thr_kid is still live \(Planner: x\)/);
   assert.match(blockers([child({ protectedBy: "pinned in bb" })]), /child thr_kid is protected: pinned in bb/);
-  assert.match(blockers([child({ env: { ...CLEAN, clean: false } })]), /child thr_kid.*uncommitted/);
-  assert.match(blockers([child({ env: { ...CLEAN, ahead: true } })]), /child thr_kid.*commits not on its base/);
-  assert.match(blockers([child({ env: { ...CLEAN, known: false, detail: "gone" } })]), /child thr_kid.*could not be read: gone/);
-  assert.match(blockers([child({ env: undefined })]), /child thr_kid.*not checked/);
-  assert.match(blockers([child({ env: null })]), /child thr_kid is still live/);
   assert.match(blockers([child({ busy: "has a queued message" })]), /child thr_kid has a queued message/);
+  // A child's checkout never matters: the archive cannot happen while the child is live.
+  assert.doesNotMatch(blockers([child({})]), /environment/);
   const facts = expiringIn(10 * MINUTE, { descendants: [child({})] } as Partial<ThreadFacts>);
   assert.equal(decide(facts, { state: "done", reason: "x" }, ctx).decision, "flag");
+});
+
+test("an incomplete thread list blocks an archive, because a child may be unseen", () => {
+  const ctx = context({ issue: issue("Done", "completed") });
+  const facts = expiringIn(10 * MINUTE, { graphComplete: false });
+  assert.match(safetyBlockers(facts, ctx).join(";"), /thread list was cut off/);
+  assert.equal(decide(facts, classify(facts, ctx), ctx).decision, "flag");
 });
 
 test("a thread with no environment is safe to archive", () => {
