@@ -251,7 +251,7 @@ export function composeArchive(
         summary: children.length === 0 ? `${capital(fateText(record))}.` : capital(rollupText(record, children)),
         tokens: tokensOf(record.usedTokens),
         phaseTokens: children.length === 0 ? null : phaseTokensText(children),
-        note: recordedSince !== null && record.startedAt !== null && record.startedAt < recordedSince ? EARLY_NOTE : null,
+        note: recordedSince !== null && record.startedAt !== null && record.startedAt < recordedSince ? (record.startedFrom === "first-turn" ? EARLY_NOTE : EARLY_CREATED_NOTE) : null,
       };
     });
   return { rows, total, recordedSince };
@@ -267,6 +267,8 @@ function parentOf(record: ArchiveRecord, byId: ReadonlyMap<string, ArchiveRecord
 }
 
 const EARLY_NOTE = "Started before recording began: children archived before then are not counted.";
+/** The same, for a row whose only known time is its creation: its start is not known, so the note claims only the creation. */
+const EARLY_CREATED_NOTE = "Created before recording began: children archived before then are not counted.";
 
 /** What a row says about its parent, or null for a thread with none. */
 export function parentText(parent: ParentView | null): string | null {
@@ -302,4 +304,4 @@ export function startedText(record: Pick<ArchiveRecord, "startedAt" | "startedFr
 /** Started-turn events read per page, and the most pages read, when an archive looks for the first turn of its own. */
 export const TURN_PAGE = 100;
 export const TURN_PAGES = 20;
-export const START_UNKNOWN = `start not found: more than ${(TURN_PAGE * TURN_PAGES).toLocaleString("en-US")} turns inherited from its source`;
+export const START_UNKNOWN = `start not found: the first ${(TURN_PAGE * TURN_PAGES).toLocaleString("en-US")} turn starts read were all inherited from its source`;

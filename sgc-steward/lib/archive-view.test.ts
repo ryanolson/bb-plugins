@@ -97,6 +97,19 @@ test("the start reads started, created, or created with a + when the start was n
   const at = (time: number) => `t${time}`;
   assert.equal(startedText({ startedAt: 5, startedFrom: "first-turn" }, at), "started t5");
   assert.equal(startedText({ startedAt: 5, startedFrom: "created" }, at), "created t5");
-  assert.equal(startedText({ startedAt: 5, startedFrom: "unknown" }, at), "created t5+ (start not found: more than 2,000 turns inherited from its source)");
+  assert.equal(startedText({ startedAt: 5, startedFrom: "unknown" }, at), "created t5+ (start not found: the first 2,000 turn starts read were all inherited from its source)");
   assert.equal(startedText({ startedAt: null, startedFrom: "created" }, at), "started ?");
+});
+
+test("a row whose start is not known says it was created, not started, before recording began", () => {
+  const view = composeArchive(
+    ["thr_unknown", "thr_ran"],
+    [record("thr_unknown", { startedAt: 1, startedFrom: "unknown" }), record("thr_ran", { startedAt: 1, startedFrom: "first-turn" })],
+    new Map(),
+    2,
+    5,
+  );
+  const note = (id: string) => view.rows.find((row) => row.record.threadId === id)!.note;
+  assert.equal(note("thr_unknown"), "Created before recording began: children archived before then are not counted.");
+  assert.equal(note("thr_ran"), "Started before recording began: children archived before then are not counted.");
 });
