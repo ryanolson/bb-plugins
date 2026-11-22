@@ -30,6 +30,7 @@ test("a child's phase comes from the first role word in its title; a title with 
   assert.equal(phaseOf("1844 planner"), "plan");
   assert.equal(phaseOf("coder: archive tab"), "impl");
   assert.equal(phaseOf("1844: impl round 3"), "impl");
+  assert.equal(phaseOf("1844: review impl round 2"), "review");
   assert.equal(phaseOf("reviewer for 1844"), "review");
   // Two role words: the first one wins.
   assert.equal(phaseOf("review the plan"), "review");

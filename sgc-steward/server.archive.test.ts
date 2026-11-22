@@ -156,18 +156,36 @@ test("a missed unarchive: a later archive event over a current row is a new arch
   assert.deepEqual([rowOf(view, "thr_x").record.archiveCount, rowOf(view, "thr_x").record.archivedAt], [2, START + 30 * MINUTE]);
 });
 
-test("a row keeps the issue it recorded after the issue is deleted in Linear", async () => {
-  const t = await lifecycleSetup([{ id: "thr_gone", title: "4: since deleted" }], { settings: ACT });
-  const issue = t.issue("TEAM-4", "state-done");
+test("a deleted Linear issue: a row keeps what it recorded, and a later archive records no issue", async () => {
+  const t = await lifecycleSetup(
+    [
+      { id: "thr_gone", title: "4: since deleted" },
+      { id: "thr_left", title: "5: left behind", tokens: 20_000 },
+    ],
+    { settings: ACT },
+  );
+  const done = t.issue("TEAM-4", "state-done");
+  const open = t.issue("TEAM-5", "state-started");
   await t.pass();
+  assert.deepEqual(t.acted, ["archive thr_gone"]);
   const before = rowOf(await t.archive(), "thr_gone");
-  t.linear.issues = t.linear.issues.filter((candidate) => candidate !== issue);
+
+  t.linear.issues = t.linear.issues.filter((candidate) => candidate !== done && candidate !== open);
   t.clock.now += 5 * MINUTE;
   await t.pass();
-  const after = rowOf(await t.archive(), "thr_gone");
-  assert.deepEqual(after, before);
-  assert.deepEqual(after.record.issue, { identifier: "TEAM-4", url: issue.url, stateName: "Done" });
-  assert.equal(after.summary, "TEAM-4 Done; archived by the lifecycle.");
+  // The archived thread's row is never read again: it still names the issue as it was.
+  const kept = rowOf(await t.archive(), "thr_gone");
+  assert.deepEqual(kept, before);
+  assert.deepEqual(kept.record.issue, { identifier: "TEAM-4", url: done.url, stateName: "Done" });
+  assert.equal(kept.summary, "TEAM-4 Done; archived by the lifecycle.");
+
+  // The open thread's issue is gone by the time it is archived, so its row records none.
+  t.state.archived.add("thr_left");
+  await t.emitArchived("thr_left", t.clock.now);
+  const left = rowOf(await t.archive(), "thr_left");
+  assert.equal(left.record.issue, null);
+  assert.equal(left.summary, "No issue recorded; archived outside the plugin.");
+  assert.equal(left.why, "Archived outside the plugin; last seen idle-active: no issue yet.");
 });
 
 test("a row whose parent has no archive record and is not open says so plainly", async () => {
