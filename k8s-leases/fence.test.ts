@@ -8,7 +8,9 @@
 // - a claimed teardown completes only when the guard reports its own gate
 //   closed for this lease and seq, a drain of at least the plugin's own W, and
 //   a fence armed throughout (or retired, with a recorded proof);
-// - the enforcer probes each live claimed lease every fifth tick.
+// - the enforcer probes each live claimed lease every fifth tick;
+// - the cause the guard gives for a fence not armed travels with the charge:
+//   in the claim's refusal, in the fence_disarmed flag, and in the lease's note.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Database from "better-sqlite3";
@@ -27,6 +29,7 @@ import {
   HOUR,
   MIN,
   PREMADE,
+  SCALED_TO_ZERO,
   SHARED,
   T0,
   THREAD_A,
@@ -80,6 +83,11 @@ for (const [name, answer] of REFUSED) {
       assert.match(got.json.error, new RegExp(`canary ${answer.canary}, mode ${answer.mode}, scope ${answer.scope}`));
       assert.match(got.json.error, new RegExp(`canary: ${answer.canary} \\(server text\\)`));
       assert.deepEqual([got.json.canary, got.json.mode, got.json.scope], [answer.canary, answer.mode, answer.scope]);
+      if (answer.cause !== undefined) {
+        // The cause travels with the refusal, in its words and as a field.
+        assert.equal(got.json.cause, answer.cause);
+        assert.ok(got.json.error.includes(answer.cause), got.json.error);
+      }
     }
     assert.equal(await w.used(), 0);
     assert.equal((await w.cli(["leases", "--all", "--json"])).json.length, 0);
@@ -302,11 +310,26 @@ test("a claimed teardown that finds the fence disarmed flags fence_disarmed once
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.lease_id, id);
   assert.match(flags[0]!.detail, /canary disarmed/);
+  // The guard's cause is in the flag, and in the note a stuck lease shows.
+  assert.ok(flags[0]!.detail.includes(SCALED_TO_ZERO), flags[0]!.detail);
+  const shown = await w.show(id);
+  assert.ok(String(shown.last_error).includes(SCALED_TO_ZERO), String(shown.last_error));
   // Exit 1: ops re-arm the fence; the next teardown completes.
   w.guard.setProbe(w.ns, ARMED);
   assert.ok((await ticksUntil(w, () => w.guard.calls.some((c) => c.method === "down" && c.outcome === "complete"), 2)) > 0);
   assert.equal((await w.show(id)).state, "released");
   assert.equal(await w.used(), 0);
+});
+
+test("a teardown whose probe gives no cause says so: the fence was not armed (no cause given)", async () => {
+  const w = await world();
+  const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
+  w.guard.setProbe(w.ns, verdict("disarmed", "absent", null));
+  await w.cli(["lease", "release", id], THREAD_A);
+  const flags = await w.flags("fence_disarmed");
+  assert.equal(flags.length, 1);
+  assert.match(flags[0]!.detail, /the fence was not armed \(no cause given\)/);
+  assert.match(String((await w.show(id)).last_error), /the fence was not armed \(no cause given\)/);
 });
 
 test("a complete teardown whose report misses a condition frees nothing and keeps a note", async () => {
@@ -343,6 +366,7 @@ test("the tick probes each live claimed lease only every fifth tick, and raises 
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.lease_id, id);
   assert.match(flags[0]!.detail, /mode audit/);
+  assert.match(flags[0]!.detail, /fake cause: canary finegrained, mode audit/);
   await ticksUntil(w, () => false, 5);
   assert.equal(w.probes(), 4);
   assert.equal((await w.flags("fence_disarmed")).length, 1, "flagged once");
@@ -397,8 +421,19 @@ test("fence-retired refuses from a bb thread, records a proof for a claimed leas
   assert.equal(retiredDowns().at(-1)!.outcome, "refused:fence_not_retired");
   assert.equal((await w.show(id)).state, "releasing");
   assert.equal(await w.used(), 2);
-  // Ops remove the label (and the policy): the retired teardown completes, and the digest hears of it.
+  // The refused proof is cleared and flagged, so the next teardown runs the normal armed path.
+  assert.equal((await w.show(id)).fence_retired_proof, null);
+  const refused = await w.flags("fence_retired_refused");
+  assert.equal(refused.length, 1);
+  assert.match(refused[0]!.detail, /still carries the fence label/);
+  const downs = retiredDowns().length;
+  await ticksUntil(w, () => false, 1);
+  assert.equal(retiredDowns().length, downs, "a cleared proof was sent again");
+  assert.equal(w.guard.calls.filter((c) => c.method === "down" && c.leaseId === id).at(-1)!.outcome, "incomplete:fence_disarmed");
+  // Ops remove the label (and the policy), and a person records the proof again: the retired teardown
+  // completes, and the digest hears of it.
   delete w.ns.labels[FENCE_LABEL];
+  assert.equal((await w.cli(["lease", "fence-retired", id, "--proof", PROOF])).code, 0);
   await ticksUntil(w, () => false, 1);
   assert.equal(retiredDowns().at(-1)!.outcome, "complete");
   assert.equal((await w.show(id)).state, "released");
@@ -416,4 +451,77 @@ test("fence-retired refuses a lease that is not claimed", async () => {
   const { id } = await w.lease(THREAD_B, "dyntest-made-two", 1);
   await w.cli(["lease", "release", id], THREAD_B);
   assert.equal((await w.cli(["lease", "fence-retired", id, "--proof", PROOF])).json.code, "lease_not_claimed");
+});
+
+test("a proof recorded too early does not strand the lease: refused, it is cleared, and a re-armed fence completes", async () => {
+  const w = await world();
+  const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
+  w.guard.setProbe(w.ns, DISARMED);
+  await w.cli(["lease", "release", id], THREAD_A);
+  assert.equal((await w.cli(["lease", "fence-retired", id, "--proof", PROOF])).code, 0);
+  // Ops re-arm instead of retiring.
+  w.guard.setProbe(w.ns, ARMED);
+  await ticksUntil(w, () => false, 1);
+  assert.equal(w.guard.calls.filter((c) => c.method === "down" && c.leaseId === id).at(-1)!.outcome, "refused:fence_not_retired");
+  assert.equal((await w.show(id)).fence_retired_proof, null);
+  assert.equal((await w.flags("fence_retired_refused")).length, 1);
+  await ticksUntil(w, () => false, 1);
+  assert.equal((await w.show(id)).state, "released");
+  assert.equal(await w.used(), 0);
+  assert.equal((await w.flags("fence_retired_completion")).length, 0);
+});
+
+test("a refusal of an older proof never clears a newer one", () => {
+  const { store, row } = closing();
+  store.recordFenceRetired(row.id, PROOF);
+  const newer = "https://example.test/incidents/fence-retired-2";
+  store.recordFenceRetired(row.id, newer);
+  assert.equal(store.fenceRetiredRefused(row.id, PROOF, "refused: still labelled"), false);
+  assert.equal(store.find(row.id)!.fence_retired_proof, newer);
+  assert.equal(store.fenceRetiredRefused(row.id, newer, "refused: still labelled"), true);
+  assert.equal(store.find(row.id)!.fence_retired_proof, null);
+  assert.equal(store.flags().filter((f) => f.kind === "fence_retired_refused").length, 1);
+});
+
+// --- a trial lease ---
+
+test("armed: trial completes only a trial lease, under the same gate, seq and drain conditions", () => {
+  const { store, cfg, ask } = storeWorld();
+  const trial = store.claim({ ...ask, gpus: 1, trial: true, id: "lse_trialstore01", request: "req_trialstore001", replaces: null }, cfg, 10 * MIN).row;
+  store.release(trial.id, THREAD_A, cfg);
+  const report = (row: { id: string; claim_seq: number | null }): FenceReport => ({ fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, armed: "trial", lease_fence: "true" });
+  const complete = (row: { id: string; uid: string }, r: FenceReport) => store.completeClaimed(row.id, row.uid, store.find(row.id)!.attempt_epoch, [], r);
+  assert.equal(complete(trial, { ...report(trial), drain_monotonic_seconds: 60 }).freed, 0, "a short drain");
+  assert.equal(complete(trial, { ...report(trial), fence: { lease_id: trial.id, seq: 9, state: "closing" } }).freed, 0, "a wrong seq");
+  assert.deepEqual(complete(trial, report(trial)), { completed: true, freed: 1 });
+  // A lease that is not a trial frees nothing on a trial report.
+  const normal = store.claim({ ...ask, id: "lse_normalstore1", request: "req_normalstore01", replaces: trial.id }, cfg, 10 * MIN).row;
+  store.release(normal.id, THREAD_A, cfg);
+  const refused = complete(normal, report(normal));
+  assert.deepEqual([refused.completed, refused.freed], [false, 0]);
+  assert.match(refused.why!, /trial/);
+  assert.equal(complete(normal, { ...report(normal), armed: "continuous" }).freed, 2);
+});
+
+test("a trial lease: the live probe does not flag Audit with a fine-grained webhook, flags anything else, and its teardown completes as a trial", async () => {
+  const w = await world({ fence: AUDIT });
+  const id = (await w.claim(THREAD_A, w.ns, 1, { trial: true })).json.lease_id;
+  await ticksUntil(w, () => false, 5);
+  assert.equal(w.probes(), 2, "the fifth tick probed");
+  assert.equal((await w.flags("fence_disarmed")).length, 0, "a trial under Audit is as expected");
+  // The trial teardown completes, as a trial.
+  assert.equal((await w.cli(["lease", "release", id], THREAD_A)).json.state, "released");
+  assert.equal(await w.used(), 0);
+  assert.equal((await w.flags("fence_disarmed")).length, 0);
+});
+
+test("a trial lease whose fence disarms is still flagged by the live probe", async () => {
+  const w = await world({ fence: AUDIT });
+  const id = (await w.claim(THREAD_A, w.ns, 1, { trial: true })).json.lease_id;
+  w.guard.setProbe(w.ns, DISARMED);
+  await ticksUntil(w, () => false, 5);
+  const flags = await w.flags("fence_disarmed");
+  assert.equal(flags.length, 1);
+  assert.equal(flags[0]!.lease_id, id);
+  assert.ok(flags[0]!.detail.includes(SCALED_TO_ZERO), flags[0]!.detail);
 });

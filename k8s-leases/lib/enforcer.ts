@@ -23,7 +23,7 @@
 // `down` runs once per lease, on one host at a time, on its own lane.
 // `extend` runs one at a time per lease. After the plugin unloads, nothing
 // touches the database, and every promise has a handler from the start.
-import { UID, allocationOf, type FenceProbe, type GuardFailure, type Inspect } from "./contract.ts";
+import { UID, allocationOf, type FenceProbe, type FenceVerdict, type GuardFailure, type Inspect } from "./contract.ts";
 import type { HostAnswer, Hosts } from "./hosts.ts";
 import type { FenceReport, LeaseRow, Resolution, Store } from "./store.ts";
 import type { Config } from "./settings.ts";
@@ -36,14 +36,28 @@ type InspectResult = { ok: true; value: Inspect } | GuardFailure;
 type ProbeResult = { ok: true; value: FenceProbe } | GuardFailure;
 type WriteResult =
   | ({ ok: true; gpu_pods_left?: number; terminating?: boolean; complete?: boolean; resolutions?: Resolution[] } & FenceReport)
-  | (GuardFailure & { resolutions?: Resolution[]; fence_disarmed?: true; probe?: FenceProbe });
+  | (GuardFailure & { resolutions?: Resolution[]; fence_disarmed?: true; probe?: FenceVerdict });
 
 /** The live probe runs on every this-many-th dispatch of an active claimed lease: every 5 minutes at one tick a minute. */
 export const PROBE_EVERY = 5;
 
-/** A probe in words, for a flag or a refusal: the verdicts, then the server texts they matched. */
-export function probeWords(probe: FenceProbe): string {
-  return `canary ${probe.canary}, mode ${probe.mode}, scope ${probe.scope}, ${probe.armed ? "armed" : "not armed"}. Canary: "${probe.canary_text}". Mode: "${probe.mode_text}".`;
+/** The words when the guard names no cause for a fence not armed. */
+export const NO_CAUSE = "the fence was not armed (no cause given)";
+
+/** Why the fence is not armed, in the guard's words; a probe without them says so. */
+export function causeOf(probe: FenceVerdict | undefined): string {
+  return probe?.cause ?? NO_CAUSE;
+}
+
+/** A probe in words, for a flag, a note or a refusal: the cause first, then the verdicts and the server texts they matched. */
+export function probeWords(probe: FenceVerdict): string {
+  const cause = probe.cause === undefined ? (probe.armed ? "" : `${NO_CAUSE}; `) : `${probe.cause}; `;
+  return `${cause}canary ${probe.canary}, mode ${probe.mode}, scope ${probe.scope}, ${probe.armed ? "armed" : "not armed"}. Canary: "${probe.canary_text}". Mode: "${probe.mode_text}".`;
+}
+
+/** A trial lease runs under Audit through the policy's own webhook: that is its fence as granted, not a disarmed one. */
+function trialAsGranted(lease: LeaseRow, probe: FenceProbe): boolean {
+  return lease.trial === 1 && probe.mode === "audit" && probe.scope === "finegrained";
 }
 
 export interface EnforcerDeps {
@@ -200,15 +214,26 @@ export function createEnforcer(deps: EnforcerDeps) {
     }
     if (!result.ok && result.code === "teardown_incomplete") {
       db().resolveAttempts(lease.id, resolutions);
-      db().noteReport(lease.id, `k8s-guard down: ${result.error}`);
-      if (result.fence_disarmed === true) {
-        // A disarmed fence keeps the GPUs charged until a person re-arms it or retires it with a proof.
-        db().flagOnce(
-          lease.id,
-          "fence_disarmed",
-          `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): its teardown found the fence not armed (${result.probe === undefined ? result.error : probeWords(result.probe)}). Its GPUs stay charged until ops re-arm the fence, or retire it and record the proof with \`bb k8s lease fence-retired ${lease.id} --proof <url>\`.`,
-        );
+      if (result.fence_disarmed !== true) {
+        db().noteReport(lease.id, `k8s-guard down: ${result.error}`);
+        return false;
       }
+      // A disarmed fence keeps the GPUs charged until a person re-arms it or retires it with a proof.
+      // The cause goes on the lease's note too, so a stuck lease shows why.
+      const words = result.probe === undefined ? `${NO_CAUSE}.` : probeWords(result.probe);
+      db().noteReport(lease.id, `k8s-guard down: ${result.error}: ${causeOf(result.probe)}`);
+      db().flagOnce(
+        lease.id,
+        "fence_disarmed",
+        `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): its teardown found the fence not armed: ${words} Its GPUs stay charged until ops re-arm the fence, or retire it and record the proof with \`bb k8s lease fence-retired ${lease.id} --proof <url>\`.`,
+      );
+      return false;
+    }
+    if (!result.ok && result.code === "fence_not_retired") {
+      // A proof the cluster does not bear out must not strand the lease: clear it, so the next teardown
+      // runs the armed path, and a re-armed fence completes.
+      db().fenceRetiredRefused(lease.id, lease.fence_retired_proof, result.error);
+      db().noteReport(lease.id, `k8s-guard down --fence-retired: ${result.error}; the proof is cleared`);
       return false;
     }
     if (!result.ok) fail(lease, `k8s-guard down failed (${result.code}): ${result.error}`);
@@ -367,7 +392,7 @@ export function createEnforcer(deps: EnforcerDeps) {
           return;
         }
         if (!reply.result.ok) disarmed(`failed on ${reply.hostId} (${reply.result.code}): ${reply.result.error}`);
-        else if (!reply.result.value.armed) disarmed(`reads the fence not armed: ${probeWords(reply.result.value)}`);
+        else if (!reply.result.value.armed && !trialAsGranted(lease, reply.result.value)) disarmed(`reads the fence not armed: ${probeWords(reply.result.value)}`);
       })().finally(() => fenceProbes.delete(lease.id)),
       `lease ${lease.id}: fence probe`,
     );

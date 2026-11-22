@@ -189,7 +189,7 @@ export interface FenceReport {
   /** The gate as read back after the teardown wrote `closing`. */
   fence?: { lease_id: string; seq: number; state: string };
   drain_monotonic_seconds?: number;
-  armed?: "continuous" | "retired";
+  armed?: "continuous" | "retired" | "trial";
   /** The namespace's enrollment label at the end of the teardown, or null. */
   lease_fence?: string | null;
 }
@@ -297,8 +297,9 @@ export function createStore(db: Db, now: () => number, options: StoreOptions = {
 
   /**
    * Why a claimed teardown's fence report cannot complete this lease, or null when it can: its own gate
-   * read back `closing` for this lease and seq, a drain of at least W, and a fence armed throughout, or
-   * retired with a recorded proof and the namespace no longer enrolled.
+   * read back `closing` for this lease and seq, a drain of at least W, and a fence armed throughout; or,
+   * for a trial lease, in Audit through its own webhook throughout; or retired with a recorded proof and
+   * the namespace no longer enrolled.
    */
   function fenceRefusal(row: LeaseRow, report: FenceReport): string | null {
     const fence = report.fence;
@@ -309,6 +310,8 @@ export function createStore(db: Db, now: () => number, options: StoreOptions = {
     const drain = report.drain_monotonic_seconds;
     if (drain === undefined || !(drain * 1000 >= drainMs)) return `the drain was ${drain ?? "not reported"} s, less than ${drainMs / 1000} s`;
     if (report.armed === "continuous") return null;
+    // Under Audit nothing is denied, so this holds only for the trial it was granted to: one GPU, no GPU work.
+    if (report.armed === "trial") return row.trial === 1 ? null : "the fence reads trial (Audit), but this lease is not a trial";
     if (report.armed === "retired") {
       if (row.fence_retired_proof === null) return "the fence reads retired, but nobody recorded a proof with lease fence-retired";
       if (report.lease_fence === undefined || report.lease_fence === "true") return `the fence reads retired, but the namespace's enrollment label reads ${report.lease_fence ?? "unknown"}`;
@@ -589,6 +592,28 @@ export function createStore(db: Db, now: () => number, options: StoreOptions = {
           );
         }
         return { completed: true, freed: row.gpus };
+      }).immediate();
+    },
+
+    /**
+     * The guard refused a retired fence's proof (`fence_not_retired`): clear it and flag it once, in one
+     * transaction, so the next teardown runs the armed path and a re-armed fence can complete. Only the
+     * proof that teardown carried is cleared; a newer one stays. True when it cleared.
+     */
+    fenceRetiredRefused(id: string, proof: string | null, error: string): boolean {
+      return db.transaction(() => {
+        const row = q.get.get(id);
+        if (row === undefined || proof === null || row.fence_retired_proof !== proof) return false;
+        db.prepare("UPDATE leases SET fence_retired_proof = NULL WHERE id = ?").run(id);
+        const raised = db.prepare<[string], { id: number }>("SELECT id FROM flags WHERE lease_id = ? AND kind = 'fence_retired_refused'").get(id);
+        if (raised === undefined) {
+          addFlag(
+            id,
+            "fence_retired_refused",
+            `Lease ${id} (${row.namespace} on ${row.cluster}): k8s-guard refused the retired fence's proof (${proof}): ${error}. The proof is cleared; teardown goes back to the armed path. Re-arm the fence, or retire it and record the proof again.`,
+          );
+        }
+        return true;
       }).immediate();
     },
 

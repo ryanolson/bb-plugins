@@ -51,14 +51,16 @@ if (mode === "garbage") { process.stdout.write("not json"); process.exit(0); }
 if (mode === "hang") { setTimeout(() => {}, 60000); return; }
 if (process.argv[2] === "fence" && mode === "probe_bad") {
   process.stdout.write(JSON.stringify({ namespace: "dyntest-a", canary: "maybe", mode: "enforcing", scope: "finegrained", armed: true, lease_fence: "true", canary_text: "x", mode_text: "y" }));
+} else if (process.argv[2] === "fence" && mode === "probe_off") {
+  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", canary: "disarmed", mode: "absent", mode_entry: null, scope: "unknown", armed: false, cause: "no fence webhook answered", lease_fence: "true", canary_text: "created (dry run)", mode_text: "created (dry run)" }));
 } else if (process.argv[2] === "fence") {
-  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", canary: "finegrained", mode: "enforcing", scope: "finegrained", armed: true, lease_fence: "true", canary_text: "denied by validate.kyverno.svc-fail-finegrained-agent-lease-fence", mode_text: "pods-need-the-open-lease", extra: 1 }));
+  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", canary: "finegrained", mode: "enforcing", mode_entry: "finegrained", scope: "finegrained", armed: true, lease_fence: "true", canary_text: "denied by validate.kyverno.svc-fail-finegrained-agent-lease-fence-canary", mode_text: "pods-need-the-open-lease", extra: 1 }));
 } else if (process.argv[2] === "down" && mode === "claimed_complete") {
   process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, namespace_kept: true, deleted: [], resolutions: [], fence: { lease_id: "lse_test000001", seq: 7, state: "closing" }, drain_monotonic_seconds: 120.5, armed: "continuous", lease_fence: "true", probes: 26 }));
 } else if (process.argv[2] === "down" && mode === "claimed_malformed") {
   process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, resolutions: [], fence: { lease_id: "lse_test000001", seq: "7", state: "closing" }, drain_monotonic_seconds: "120", armed: "always", lease_fence: 1 }));
 } else if (process.argv[2] === "down" && mode === "claimed_disarmed") {
-  process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", resolutions: [], fence_disarmed: true, probe: { namespace: "dyntest-a", canary: "disarmed", mode: "absent", scope: "unknown", armed: false, lease_fence: null, canary_text: "created (dry run)", mode_text: "created (dry run)" } }));
+  process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", resolutions: [], fence_disarmed: true, probe: { canary: "disarmed", mode: "absent", scope: "unknown", armed: false, cause: "no fence webhook answered", canary_text: "created (dry run)", mode_text: "created (dry run)", extra: 1 } }));
   process.exit(4);
 } else if (process.argv[2] === "down" && mode === "claimed_disarmed_bad") {
   process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", fence_disarmed: "yes", probe: { canary: "disarmed" } }));
@@ -227,14 +229,19 @@ test("probe-fence runs `fence probe` with the context and the namespace, and no 
       namespace: "dyntest-a",
       canary: "finegrained",
       mode: "enforcing",
+      mode_entry: "finegrained",
       scope: "finegrained",
       armed: true,
       lease_fence: "true",
-      canary_text: "denied by validate.kyverno.svc-fail-finegrained-agent-lease-fence",
+      canary_text: "denied by validate.kyverno.svc-fail-finegrained-agent-lease-fence-canary",
       mode_text: "pods-need-the-open-lease",
     },
   });
-  assert.deepEqual(calls().map((c) => c.argv), [["fence", "probe", "--context", "test-context-a", "dyntest-a"]]);
+  // A fence not armed carries its cause.
+  process.env.FAKE_MODE = "probe_off";
+  const off = (await harness.experimental_call("probe-fence", target)) as { ok: true; value: { armed: boolean; cause?: string; mode_entry: unknown } };
+  assert.deepEqual([off.value.armed, off.value.cause, off.value.mode_entry], [false, "no fence webhook answered", null]);
+  assert.deepEqual(calls().map((c) => c.argv), [["fence", "probe", "--context", "test-context-a", "dyntest-a"], ["fence", "probe", "--context", "test-context-a", "dyntest-a"]]);
   // A verdict outside the contract is no answer.
   process.env.FAKE_MODE = "probe_bad";
   const bad = (await harness.experimental_call("probe-fence", target)) as { ok: boolean; code: string };
@@ -275,7 +282,7 @@ test("a claimed down passes the fence report through; malformed fence fields are
     error: "a probe in the drain read disarmed",
     resolutions: [],
     fence_disarmed: true,
-    probe: { namespace: "dyntest-a", canary: "disarmed", mode: "absent", scope: "unknown", armed: false, lease_fence: null, canary_text: "created (dry run)", mode_text: "created (dry run)" },
+    probe: { canary: "disarmed", mode: "absent", scope: "unknown", armed: false, cause: "no fence webhook answered", canary_text: "created (dry run)", mode_text: "created (dry run)" },
   });
   process.env.FAKE_MODE = "claimed_disarmed_bad";
   assert.deepEqual(await harness.experimental_call("down", leaseTarget), { ok: false, code: "teardown_incomplete", error: "a probe in the drain read disarmed" });

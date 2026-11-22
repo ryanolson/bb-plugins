@@ -37,7 +37,7 @@ bb k8s lease attempt resolve <lease_id> <att_...> --outcome committed|failed|sup
 bb k8s lease op end <lease_id> <token>
 ```
 
-A claim's owner is the calling thread. The pre-made namespace must carry `dynamo.nvidia.com/agent-lease-fence: "true"`. Before every new claim, a host runs `k8s-guard fence probe`. A claim needs the fence policy enforcing through its own webhook (mode `enforcing`, scope `finegrained`). Otherwise it refuses `enforcement_unhealthy` and quotes the probe. A trial (`--audit-trial`) is for a cluster's first run while the policy is in Audit: it needs `--gpus 1`, Ryan's first-run approval, and mode `audit` with scope `finegrained`. A claim's reply carries `seq`, which only rises on the namespace, and `trial`.
+A claim's owner is the calling thread. The pre-made namespace must carry `dynamo.nvidia.com/agent-lease-fence: "true"`. The fence is two Kyverno policies: `agent-lease-fence` (Pods only under the open lease) and `agent-lease-fence-canary` (refuses one probe Pod, to show which webhook answered). Before every new claim, a host runs `k8s-guard fence probe`. A claim needs the fence enforcing through its own webhook (mode `enforcing`, scope `finegrained`). Otherwise it refuses `enforcement_unhealthy`, quotes the probe and gives its `cause`. A trial (`--audit-trial`) is for a cluster's first run while the policy is in Audit: it needs `--gpus 1`, Ryan's first-run approval, and mode `audit` with scope `finegrained`. A claim's reply carries `seq`, which only rises on the namespace, and `trial`.
 
 A person on a host, never a thread, records the proof that a stranded claim's fence is retired for good:
 
@@ -56,11 +56,14 @@ Every lease command prints JSON on stdout. A refusal exits 1 with `{"error": "..
 | `releasing` | Its thread returned it. The namespace is being deleted. |
 | `released`, `torn-down` | The namespace is gone (a claimed one: the lease's objects are gone), and its GPUs are free. |
 
-A lease frees its GPUs only when a host reports its namespace gone. A claimed lease (the pre-made namespace) frees them only when a teardown on a host reports nothing of the lease left and no write attempt open. Its namespace is never deleted. The teardown must also report its gate closed for this lease and `seq`, a drain of at least 120 s, and the fence armed throughout (or retired, with a recorded proof).
+A lease frees its GPUs only when a host reports its namespace gone. A claimed lease (the pre-made namespace) frees them only when a teardown on a host reports nothing of the lease left and no write attempt open. Its namespace is never deleted. The teardown must also report its gate closed for this lease and `seq`, a drain of at least 120 s, and the fence armed throughout (for a trial lease, Audit through its own webhook; or retired, with a recorded proof).
+
+In Audit the canary proves only its own entry. During a Kyverno outage, a refused create proves one of the two entries, not both. Scaling the Kyverno admission controller to 0 deletes every Kyverno webhook: the probe reads not armed, the GPUs stay charged, and the cause says so.
 
 ## Flags of the fence
 
-- `fence_disarmed`: a teardown or the live probe (every 5 minutes) found the fence not armed. The GPUs stay charged until ops re-arm it, or retire it and a person records the proof.
+- `fence_disarmed`: a teardown or the live probe (every 5 minutes) found the fence not armed, with the guard's cause. A trial under Audit is not flagged. The GPUs stay charged until ops re-arm it, or retire it and a person records the proof. A stuck lease's `last_error` in `bb k8s lease show` carries the cause too.
+- `fence_retired_refused`: the guard refused a recorded proof (the namespace is still labelled, or the canary still refused). The proof is cleared, and teardown takes the armed path again.
 - `fence_retired_completion`: a claimed lease completed under a retired fence.
 
 ## Refusal codes of acquire

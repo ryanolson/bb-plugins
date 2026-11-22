@@ -60,19 +60,28 @@ export const INSPECT = z.object({
 export type Inspect = z.infer<typeof INSPECT>;
 
 /**
- * What `k8s-guard fence probe` reports: two server dry-run Pod creates, read only. The canary says which
- * webhook answered (finegrained: the policy's own entry, so its match condition is in place); the mode Pod
- * says whether the policy enforces. Extra fields are ignored; a verdict outside these is no answer.
+ * A fence probe's verdict: two server dry-run Pod creates, read only. The canary Pod goes to the
+ * agent-lease-fence-canary policy and says which webhook answered (finegrained: that policy's own entry);
+ * the mode Pod goes to agent-lease-fence and says whether it enforces. `scope` is the guard's reading of
+ * both. A fence not armed carries `cause`, the guard's words for why. Extra fields are stripped; a verdict
+ * outside these is no answer. A claimed teardown's `teardown_incomplete` carries this shape as `probe`.
  */
-export const FENCE_PROBE = z.object({
-  namespace: z.string(),
+export const FENCE_VERDICT = z.object({
   canary: z.enum(["finegrained", "shared", "engine_unavailable", "disarmed", "probe_failed"]),
   mode: z.enum(["enforcing", "audit", "absent", "engine_unavailable", "probe_failed"]),
   scope: z.enum(["finegrained", "shared", "unknown"]),
   armed: z.boolean(),
-  lease_fence: z.string().nullable(),
+  cause: z.string().max(2000).optional(),
   canary_text: z.string().max(2000),
   mode_text: z.string().max(2000),
+});
+export type FenceVerdict = z.infer<typeof FENCE_VERDICT>;
+
+/** What `k8s-guard fence probe` reports: the verdict, the namespace, which entry answered the mode Pod, and its enrollment label. */
+export const FENCE_PROBE = FENCE_VERDICT.extend({
+  namespace: z.string(),
+  mode_entry: z.enum(["finegrained", "shared"]).nullable().optional(),
+  lease_fence: z.string().nullable(),
 });
 export type FenceProbe = z.infer<typeof FENCE_PROBE>;
 
@@ -82,7 +91,7 @@ export const FENCE_READ = z.object({ lease_id: z.string(), seq: z.number().int()
 export const FENCE_REPORT = {
   fence: FENCE_READ,
   drain_monotonic_seconds: z.number().finite().min(0),
-  armed: z.enum(["continuous", "retired"]),
+  armed: z.enum(["continuous", "retired", "trial"]),
   lease_fence: z.string().nullable(),
 };
 
@@ -161,7 +170,7 @@ export const hostContract = defineRpcContract({
           lease_fence: FENCE_REPORT.lease_fence.optional(),
         })
         .strict(),
-      FAILURE.extend({ resolutions: z.array(RESOLUTION).optional(), fence_disarmed: z.literal(true).optional(), probe: FENCE_PROBE.optional() }).strict(),
+      FAILURE.extend({ resolutions: z.array(RESOLUTION).optional(), fence_disarmed: z.literal(true).optional(), probe: FENCE_VERDICT.optional() }).strict(),
     ]),
   },
   /** `k8s-guard fence probe`: whether the fence policy is armed in the namespace. Read only. */

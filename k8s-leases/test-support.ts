@@ -66,16 +66,24 @@ export const CLAIM_PROFILES = {
   },
 };
 
-/** A fence verdict as `k8s-guard fence probe` derives it: scope and armed follow from the canary and the mode. */
-export type Verdict = Pick<FenceProbe, "canary" | "mode" | "scope" | "armed">;
-export function verdict(canary: FenceProbe["canary"], mode: FenceProbe["mode"]): Verdict {
+/**
+ * A fence verdict as `k8s-guard fence probe` derives it: scope and armed follow from the canary and the
+ * mode, and a fence not armed carries its cause. `cause: null` models a guard that gives none.
+ */
+export type Verdict = Pick<FenceProbe, "canary" | "mode" | "scope" | "armed" | "mode_entry" | "cause">;
+export function verdict(canary: FenceProbe["canary"], mode: FenceProbe["mode"], cause?: string | null): Verdict {
   const scope = canary === "finegrained" || canary === "engine_unavailable" ? "finegrained" : canary === "shared" ? "shared" : "unknown";
   const armed = (canary === "finegrained" || canary === "engine_unavailable") && (mode === "enforcing" || mode === "engine_unavailable");
-  return { canary, mode, scope, armed };
+  const modeEntry = mode === "enforcing" || mode === "audit" ? (scope === "shared" ? "shared" : "finegrained") : null;
+  const given = cause === null ? {} : armed && cause === undefined ? {} : { cause: cause ?? `fake cause: canary ${canary}, mode ${mode}` };
+  return { canary, mode, scope, armed, mode_entry: modeEntry, ...given };
 }
+/** The guard's cause when no fence webhook answers, as after the admission controller is scaled to 0. */
+export const SCALED_TO_ZERO =
+  "no fence webhook answered: the policies or the namespace label are gone, or Kyverno has no webhook entries (it deletes them all when its admission controller is scaled to 0 replicas, and empties them after a restart more than 100 s away)";
 export const ARMED = verdict("finegrained", "enforcing");
 export const AUDIT = verdict("finegrained", "audit");
-export const DISARMED = verdict("disarmed", "absent");
+export const DISARMED = verdict("disarmed", "absent", SCALED_TO_ZERO);
 export const SHARED = verdict("shared", "enforcing");
 export const ENGINE_DOWN = verdict("engine_unavailable", "engine_unavailable");
 /** A guard that predates `fence probe`: the call fails as a host fault. */
@@ -423,25 +431,26 @@ export class FakeGuard {
     // retired fence's proof, the label gone and the canary disarmed.
     const answer = this.probeOf(ns);
     const leaseFence = ns.labels[FENCE_LABEL] ?? null;
-    let armed: "continuous" | "retired";
+    let armed: "continuous" | "retired" | "trial";
     if (input.fenceRetired !== undefined) {
       if (leaseFence === "true" || answer === "fail" || answer.canary !== "disarmed") {
         record("refused:fence_not_retired");
         return { ok: false, code: "fence_not_retired", error: `${ns.name} still carries the fence label or its canary is not disarmed` };
       }
       armed = "retired";
-    } else if (answer === "fail" || !answer.armed) {
-      record("incomplete:fence_disarmed");
-      return {
-        ok: false,
-        code: "teardown_incomplete",
-        error: "a fence probe in the drain was not armed",
-        resolutions,
-        fence_disarmed: true,
-        ...(answer === "fail" ? {} : { probe: this.probeValue(ns, answer) }),
-      };
-    } else {
+    } else if (answer !== "fail" && answer.armed) {
       armed = "continuous";
+    } else if (answer !== "fail" && shown.trial === true && answer.canary === "finegrained" && answer.mode === "audit") {
+      // A trial lease's teardown under Audit, the canary answered by our entry throughout.
+      armed = "trial";
+    } else {
+      record("incomplete:fence_disarmed");
+      // The teardown's probe, as the guard prints it on teardown_incomplete; `extra` is stripped by the host entry.
+      const probe =
+        answer === "fail"
+          ? undefined
+          : { canary: answer.canary, mode: answer.mode, scope: answer.scope, armed: answer.armed, ...(answer.cause === undefined ? {} : { cause: answer.cause }), canary_text: `canary: ${answer.canary} (server text)`, mode_text: `mode: ${answer.mode} (server text)` };
+      return { ok: false, code: "teardown_incomplete", error: "a fence probe in the drain was not armed", resolutions, fence_disarmed: true, ...(probe === undefined ? {} : { probe }) };
     }
     record("complete");
     return {

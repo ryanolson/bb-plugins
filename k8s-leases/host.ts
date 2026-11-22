@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
-import { ATTEMPT_ID, FENCE_PROBE, FENCE_REPORT, HOST_TIMEOUTS, OUTCOME, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
+import { ATTEMPT_ID, FENCE_REPORT, FENCE_VERDICT, HOST_TIMEOUTS, OUTCOME, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
 import { guardArgv, guardEnv, readFenceProbe, readGuardOutput, readInspect, type GuardMethod, type GuardOutcome, type GuardTarget } from "./lib/guard.ts";
 
 const MAX_OUTPUT = 1024 * 1024;
@@ -47,7 +47,7 @@ function fenceFieldsIn(stdout: string, complete: boolean): Record<string, unknow
     for (const [key, schema] of Object.entries(FENCE_REPORT)) keep(key, schema);
   } else {
     if (body.fence_disarmed === true) kept.fence_disarmed = true;
-    keep("probe", FENCE_PROBE);
+    keep("probe", FENCE_VERDICT);
   }
   return kept;
 }

@@ -33,7 +33,7 @@ import {
   type Profiles,
   type Snapshot,
 } from "./lib/contract.ts";
-import { createEnforcer, probeWords, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
+import { NO_CAUSE, createEnforcer, probeWords, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
 import { createHosts } from "./lib/hosts.ts";
 import { own } from "./lib/own.ts";
 import { checkAsk } from "./lib/policy.ts";
@@ -516,10 +516,13 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const probe = result.value;
       if (fenceGate(probe, { trial })) return;
       const need = trial ? "a trial claim needs mode audit with scope finegrained" : "a claim needs mode enforcing with scope finegrained";
+      // The cause travels with the refusal: the guard's words for a fence not armed.
+      const cause = probe.cause ?? (probe.armed ? `the fence is armed, but mode ${probe.mode} with scope ${probe.scope} is not what this claim needs (no cause given)` : NO_CAUSE);
       throw new Refusal("enforcement_unhealthy", `The fence probe of ${namespace} on ${cluster} does not allow this claim (${need}): ${probeWords(probe)}`, {
         canary: probe.canary,
         mode: probe.mode,
         scope: probe.scope,
+        cause,
       });
     }
 
@@ -645,6 +648,8 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
                   claim_seq: row.claim_seq,
                   trial: row.trial === 1,
                   fence_retired_proof: row.fence_retired_proof,
+                  // What the last teardown or check reported; for a stuck claimed lease, why.
+                  last_error: row.last_error,
                 };
               }),
           }),
