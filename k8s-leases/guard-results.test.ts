@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { HOST_ONE, HOST_TWO, MIN, THREAD_A, setup } from "./test-support.ts";
 
 const HOST_FAULTS = ["guard_missing", "guard_timeout", "guard_output", "guard_error", "kubectl_error", "internal_error"];
-const REFUSALS = ["uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found", "lease_record_missing"];
+const REFUSALS = ["uid_mismatch", "lease_active", "lease_ended", "lease_mismatch", "not_expired", "record_conflict", "not_found", "lease_record_missing", "fence_mismatch", "fence_not_retired"];
 
 /** A released lease whose down, on host one, answers with `code`. */
 async function releasedWith(code: string | "throw") {

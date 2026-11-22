@@ -1,14 +1,15 @@
 // Fixtures for the server tests: a fake cluster, a fake `k8s-guard` that
 // follows the guard contract (lease commands in, inspect/expire/down/extend
-// out), and the guard rules the plugin relies on, fake bb threads, and the plugin on bb's fake host.
+// and the fence probe out), and the guard rules the plugin relies on, fake bb
+// threads, and the plugin on bb's fake host.
 //
 // The fake guard decides its authority the way the real one must: it asks
 // the plugin with `bb k8s lease show`, through the plugin's own CLI, and
 // falls back to the namespace's `expires-at` only when bb is unreachable.
 import assert from "node:assert/strict";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { createK8sLeasesPlugin } from "./server.ts";
-import type { Inspect } from "./lib/contract.ts";
+import { createK8sLeasesPlugin, type K8sLeasesOptions } from "./server.ts";
+import { hostContract, type FenceProbe, type Inspect } from "./lib/contract.ts";
 
 export const T0 = Date.parse("2026-11-05T10:00:00Z");
 export const MIN = 60_000;
@@ -53,6 +54,32 @@ interface Pod {
 /** The bot's developer, and the pre-made namespace's labels, as the cluster profiles name them. Made up. */
 export const DEVELOPER = "alice";
 export const PREMADE = "dyntest-alice-agent";
+/** The Namespace label ops set to enroll the pre-made namespace in the fence policy. */
+export const FENCE_LABEL = "dynamo.nvidia.com/agent-lease-fence";
+
+/** The cluster profiles a claim needs: the bot, its pre-made namespace, and one writable cluster. */
+export const CLAIM_PROFILES = {
+  schema_version: 1,
+  bot: { user: "bot-example", kubeconfig: "/home/test/kubeconfig.yaml", developer: DEVELOPER, namespace_prefix: "dyntest-alice-", premade_namespace: PREMADE },
+  clusters: {
+    [CLUSTER_A]: { context: CLUSTER_A, allowed: "first-choice", source: ["test"], bot_can_write: true, gpu_type: "gb300", gpus_per_node: 4 },
+  },
+};
+
+/** A fence verdict as `k8s-guard fence probe` derives it: scope and armed follow from the canary and the mode. */
+export type Verdict = Pick<FenceProbe, "canary" | "mode" | "scope" | "armed">;
+export function verdict(canary: FenceProbe["canary"], mode: FenceProbe["mode"]): Verdict {
+  const scope = canary === "finegrained" || canary === "engine_unavailable" ? "finegrained" : canary === "shared" ? "shared" : "unknown";
+  const armed = (canary === "finegrained" || canary === "engine_unavailable") && (mode === "enforcing" || mode === "engine_unavailable");
+  return { canary, mode, scope, armed };
+}
+export const ARMED = verdict("finegrained", "enforcing");
+export const AUDIT = verdict("finegrained", "audit");
+export const DISARMED = verdict("disarmed", "absent");
+export const SHARED = verdict("shared", "enforcing");
+export const ENGINE_DOWN = verdict("engine_unavailable", "engine_unavailable");
+/** A guard that predates `fence probe`: the call fails as a host fault. */
+export type ProbeAnswer = Verdict | "fail";
 
 /** A write the guard sent whose outcome nobody knows yet: it lands (or not) when a test says. */
 interface Pending {
@@ -125,7 +152,11 @@ export class FakeCluster {
   }
 
   /** The namespace ops made for the bot: both labels, no thread label, no expiry. */
-  premade(cluster: string, name = PREMADE, labels: Record<string, string> = { "dynamo.nvidia.com/developer": DEVELOPER, "dynamo.nvidia.com/developer-agent-rbac": "true" }): FakeNamespace {
+  premade(
+    cluster: string,
+    name = PREMADE,
+    labels: Record<string, string> = { "dynamo.nvidia.com/developer": DEVELOPER, "dynamo.nvidia.com/developer-agent-rbac": "true", [FENCE_LABEL]: "true" },
+  ): FakeNamespace {
     const ns = this.create(cluster, name, null);
     ns.labels = { ...labels };
     ns.premade = true;
@@ -206,6 +237,7 @@ export class FakeCluster {
       gpu_pods_left: ns.pods.length,
       developer: ns.labels["dynamo.nvidia.com/developer"] ?? null,
       agent_rbac: ns.labels["dynamo.nvidia.com/developer-agent-rbac"] ?? null,
+      lease_fence: ns.labels[FENCE_LABEL] ?? null,
     };
   }
 
@@ -222,6 +254,7 @@ export interface GuardCall {
   namespace: string;
   uid?: string;
   leaseId?: string;
+  fenceRetired?: string;
   outcome: string;
 }
 
@@ -242,6 +275,11 @@ export class FakeGuard {
   loseNextDownResponse = false;
   /** Every `down` fails before deleting. */
   failDown = false;
+  /** `fence probe`'s answer for a namespace (by cluster key); namespaces not named get `probeDefault`. */
+  readonly probes = new Map<string, ProbeAnswer>();
+  probeDefault: ProbeAnswer = "fail";
+  /** Fields that replace the fence report of a claimed `down` that completes: a wrong seq, a short drain. */
+  downReport: Record<string, unknown> = {};
   cli: Cli = async () => {
     throw new Error("cli not wired");
   };
@@ -268,6 +306,26 @@ export class FakeGuard {
     return lease.state === "revoking" || lease.state === "releasing" ? null : "lease_active";
   }
 
+  /** Set `fence probe`'s answer for one namespace. */
+  setProbe(ns: FakeNamespace, answer: ProbeAnswer): void {
+    this.probes.set(this.cluster.key(ns.cluster, ns.name), answer);
+  }
+
+  probeOf(ns: FakeNamespace): ProbeAnswer {
+    return this.probes.get(this.cluster.key(ns.cluster, ns.name)) ?? this.probeDefault;
+  }
+
+  /** The probe's stdout, as the guard prints it. */
+  probeValue(ns: FakeNamespace, answer: Verdict): FenceProbe {
+    return {
+      namespace: ns.name,
+      ...answer,
+      lease_fence: ns.labels[FENCE_LABEL] ?? null,
+      canary_text: `canary: ${answer.canary} (server text)`,
+      mode_text: `mode: ${answer.mode} (server text)`,
+    };
+  }
+
   async handle(method: string, input: any, hostId: string): Promise<unknown> {
     if (this.downHosts.has(hostId)) throw new Error(`host ${hostId} is unreachable`);
     if (method === "probe") return { ok: true, detail: "ok" };
@@ -276,7 +334,7 @@ export class FakeGuard {
     }
     const ns = this.cluster.get(input.context, input.namespace);
     const record = (outcome: string) =>
-      this.calls.push({ hostId, method, cluster: input.context, namespace: input.namespace, uid: input.uid, leaseId: input.leaseId, outcome });
+      this.calls.push({ hostId, method, cluster: input.context, namespace: input.namespace, uid: input.uid, leaseId: input.leaseId, ...(input.fenceRetired === undefined ? {} : { fenceRetired: input.fenceRetired }), outcome });
     if (ns === undefined) {
       record("not_found");
       return { ok: false, code: "not_found", error: `namespace ${input.namespace} not found` };
@@ -284,6 +342,12 @@ export class FakeGuard {
     if (method === "inspect") {
       record("ok");
       return { ok: true, value: this.cluster.inspect(ns) };
+    }
+    if (method === "probe-fence") {
+      const answer = this.probeOf(ns);
+      record(answer === "fail" ? "failed" : answer.canary);
+      if (answer === "fail") return { ok: false, code: "guard_error", error: "k8s-guard: unknown command 'fence'" };
+      return { ok: true, value: this.probeValue(ns, answer) };
     }
     const refused = await this.authority(method, input, ns);
     if (refused !== null) {
@@ -355,8 +419,41 @@ export class FakeGuard {
       record("incomplete");
       return { ok: false, code: "teardown_incomplete", error: `${unresolved} attempt(s) unresolved, ${held} leased pod(s) left`, resolutions };
     }
+    // The fence: armed before the close, through the drain and after the final read; or, with a
+    // retired fence's proof, the label gone and the canary disarmed.
+    const answer = this.probeOf(ns);
+    const leaseFence = ns.labels[FENCE_LABEL] ?? null;
+    let armed: "continuous" | "retired";
+    if (input.fenceRetired !== undefined) {
+      if (leaseFence === "true" || answer === "fail" || answer.canary !== "disarmed") {
+        record("refused:fence_not_retired");
+        return { ok: false, code: "fence_not_retired", error: `${ns.name} still carries the fence label or its canary is not disarmed` };
+      }
+      armed = "retired";
+    } else if (answer === "fail" || !answer.armed) {
+      record("incomplete:fence_disarmed");
+      return {
+        ok: false,
+        code: "teardown_incomplete",
+        error: "a fence probe in the drain was not armed",
+        resolutions,
+        fence_disarmed: true,
+        ...(answer === "fail" ? {} : { probe: this.probeValue(ns, answer) }),
+      };
+    } else {
+      armed = "continuous";
+    }
     record("complete");
-    return { ok: true, complete: true, resolutions };
+    return {
+      ok: true,
+      complete: true,
+      resolutions,
+      fence: { lease_id: input.leaseId, seq: shown.claim_seq, state: "closing" },
+      drain_monotonic_seconds: 120.4,
+      armed,
+      lease_fence: leaseFence,
+      ...this.downReport,
+    };
   }
 
   /**
@@ -455,16 +552,30 @@ export class FakeThreads {
 }
 
 export interface SetupOptions {
-  /** Whether the admission webhook (phase 2) is in place. Unset: the production default, absent. */
-  admission?: () => boolean;
+  /** `fence probe`'s answer for every namespace a test does not set. Unset: a guard without `fence probe`. */
+  fence?: ProbeAnswer;
+  /** The plugin's fence gate. Unset: the production default, the contract's rule. */
+  fenceGate?: K8sLeasesOptions["fenceGate"];
+  /** The plugin's drain minimum. Unset: the production constant. */
+  drainMs?: number;
   /** Fault injection for the claim transaction. */
   faults?: { claim?: (phase: "before-commit" | "after-commit") => void };
+}
+
+/** A call from the plugin to a host: the host entry's contract holds both ways, so a shape it would refuse fails the test. */
+async function hostCall(guard: FakeGuard, method: string, input: unknown, hostId: string): Promise<unknown> {
+  const contract = (hostContract as unknown as Record<string, { input: { parse(v: unknown): unknown }; output: { parse(v: unknown): unknown } }>)[method]!;
+  contract.input.parse(input);
+  const output = await guard.handle(method, input, hostId);
+  contract.output.parse(output);
+  return output;
 }
 
 export async function setup(settings: Record<string, string | number> = {}, options: SetupOptions = {}) {
   const clock = new Clock();
   const cluster = new FakeCluster();
   const guard = new FakeGuard(cluster, clock);
+  if (options.fence !== undefined) guard.probeDefault = options.fence;
   const threads = new FakeThreads();
   let ids = 0;
   const factory = createK8sLeasesPlugin({
@@ -473,14 +584,15 @@ export async function setup(settings: Record<string, string | number> = {}, opti
     newToken: () => `tok_${String(++ids).padStart(6, "0")}`,
     // Production ticks only start work; a test tick settles it, bounded so a stalled fake cannot hang the suite.
     tickWaitMs: 2_000,
-    ...(options.admission === undefined ? {} : { admissionHealthy: options.admission }),
+    ...(options.fenceGate === undefined ? {} : { fenceGate: options.fenceGate }),
+    ...(options.drainMs === undefined ? {} : { drainMs: options.drainMs }),
     ...(options.faults === undefined ? {} : { faults: options.faults }),
   });
   const created = createFakePluginHost({
     pluginId: "k8s-leases",
     settings: { ...BASE_SETTINGS, ...settings },
     sdk: { threads: { get: threads.get } as never },
-    experimental_callHostRpc: ({ method, input, hostId }) => guard.handle(method, input, hostId),
+    experimental_callHostRpc: ({ method, input, hostId }) => hostCall(guard, method, input, hostId),
   });
   await factory(created.bb);
   // A reload hands back a new host; every driver below goes through the current one.
@@ -549,7 +661,7 @@ export async function setup(settings: Record<string, string | number> = {}, opti
     thread: string,
     ns: FakeNamespace,
     gpus: number,
-    opts: { request?: string; replaces?: string; uid?: string; gpuType?: string; hours?: number; thread?: string } = {},
+    opts: { request?: string; replaces?: string; uid?: string; gpuType?: string; hours?: number; thread?: string; trial?: boolean } = {},
   ) {
     const argv = [
       "lease", "acquire", "--claim",
@@ -563,6 +675,7 @@ export async function setup(settings: Record<string, string | number> = {}, opti
       "--hours", String(opts.hours ?? 2),
     ];
     if (opts.thread !== undefined) argv.push("--thread", opts.thread);
+    if (opts.trial === true) argv.push("--audit-trial");
     return cli(argv, thread);
   }
 

@@ -92,6 +92,13 @@ CREATE TABLE attempts (
     outcome TEXT CHECK (outcome IN ('committed','failed','superseded'))
   );
 CREATE INDEX attempts_open ON attempts(lease_id) WHERE resolved_at IS NULL`,
+  // Version 3: the lease fence. `claim_seq` numbers each claim of a namespace, strictly rising and never
+  // reused, so the gate ConfigMap the guard writes can only move forward; `trial` marks an audit-mode trial
+  // claim; `fence_retired_proof` is the proof URL a person recorded for a fence retired for good.
+  `ALTER TABLE leases ADD COLUMN claim_seq INTEGER;
+ALTER TABLE leases ADD COLUMN trial INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE leases ADD COLUMN fence_retired_proof TEXT;
+CREATE UNIQUE INDEX leases_claim_seq ON leases(context, namespace, claim_seq) WHERE claim_seq IS NOT NULL`,
 ];
 
 export interface LeaseRow {
@@ -128,6 +135,12 @@ export interface LeaseRow {
   request_id: string | null;
   predecessor: string | null;
   attempt_epoch: number;
+  /** A claim's sequence number on its context and namespace; null for a created lease. */
+  claim_seq: number | null;
+  /** 1 for a trial claim under an audit-mode fence. */
+  trial: number;
+  /** The proof URL of a retired fence, recorded by a person; only then may a teardown complete as `retired`. */
+  fence_retired_proof: string | null;
 }
 
 export interface AttemptRow {
@@ -164,6 +177,21 @@ export interface ClaimRequest extends Omit<AcquireRequest, "thread"> {
   request: string;
   /** The lease this claim expects to replace, or null for none. */
   replaces: string | null;
+  /** A trial claim (`--audit-trial`); the caller has checked the fence allows one. */
+  trial: boolean;
+}
+
+/**
+ * What a claimed teardown reports about the fence, as the host entry passed it on: fields it could not
+ * read are absent.
+ */
+export interface FenceReport {
+  /** The gate as read back after the teardown wrote `closing`. */
+  fence?: { lease_id: string; seq: number; state: string };
+  drain_monotonic_seconds?: number;
+  armed?: "continuous" | "retired";
+  /** The namespace's enrollment label at the end of the teardown, or null. */
+  lease_fence?: string | null;
 }
 
 export interface ExtensionRow {
@@ -206,9 +234,17 @@ export interface AcquireRequest {
   approvals: string[] | null;
 }
 
-/** Why claims are refused in phase 1: the admission webhook that counts controller writes does not exist yet. */
-export const ADMISSION_ABSENT =
-  "Claims of a pre-made namespace stay off until the admission webhook that fences controller writes is installed; without it a controller write in flight is uncounted.";
+/**
+ * The least drain, W, a claimed teardown must report between reading its gate back as `closing` and its
+ * final inventory read: a Pod create admitted while the gate was open has this long to land and be seen.
+ * The plugin's own constant: a value the host reports is never the minimum.
+ */
+export const DRAIN_MS = 120_000;
+
+export interface StoreOptions {
+  /** Tests only: a shorter W. */
+  drainMs?: number;
+}
 
 /** Flags raised after this many failed reconciles in a row. */
 export const FAILURES_BEFORE_FLAG = 3;
@@ -220,7 +256,8 @@ export function wholeSecond(ms: number): number {
   return Math.floor(ms / 1000) * 1000;
 }
 
-export function createStore(db: Db, now: () => number) {
+export function createStore(db: Db, now: () => number, options: StoreOptions = {}) {
+  const drainMs = options.drainMs ?? DRAIN_MS;
   const q = {
     get: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE id = ?"),
     live: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE ${LIVE} ORDER BY created_at, id`),
@@ -254,7 +291,30 @@ export function createStore(db: Db, now: () => number) {
   }
 
   function terms(row: LeaseRow, req: ClaimRequest): boolean {
-    return row.gpu_type === req.gpuType && row.gpus === req.gpus && row.hours === req.hours && row.cluster === req.cluster;
+    // A trial is a term: the guard keeps a trial's limits only while the lease says trial.
+    return row.gpu_type === req.gpuType && row.gpus === req.gpus && row.hours === req.hours && row.cluster === req.cluster && (row.trial === 1) === req.trial;
+  }
+
+  /**
+   * Why a claimed teardown's fence report cannot complete this lease, or null when it can: its own gate
+   * read back `closing` for this lease and seq, a drain of at least W, and a fence armed throughout, or
+   * retired with a recorded proof and the namespace no longer enrolled.
+   */
+  function fenceRefusal(row: LeaseRow, report: FenceReport): string | null {
+    const fence = report.fence;
+    if (fence === undefined) return "the report has no gate read back";
+    if (fence.state !== "closing" || fence.lease_id !== row.id || row.claim_seq === null || fence.seq !== row.claim_seq) {
+      return `the gate read back ${fence.state}(${fence.lease_id}, ${fence.seq}), not closing(${row.id}, ${row.claim_seq ?? "no seq"})`;
+    }
+    const drain = report.drain_monotonic_seconds;
+    if (drain === undefined || !(drain * 1000 >= drainMs)) return `the drain was ${drain ?? "not reported"} s, less than ${drainMs / 1000} s`;
+    if (report.armed === "continuous") return null;
+    if (report.armed === "retired") {
+      if (row.fence_retired_proof === null) return "the fence reads retired, but nobody recorded a proof with lease fence-retired";
+      if (report.lease_fence === undefined || report.lease_fence === "true") return `the fence reads retired, but the namespace's enrollment label reads ${report.lease_fence ?? "unknown"}`;
+      return null;
+    }
+    return "the report does not say the fence was armed throughout";
   }
 
   /** Move every expired active lease to revoking; its grace runs from its expiry, as the offline timer's does. */
@@ -409,7 +469,7 @@ export function createStore(db: Db, now: () => number) {
      * health, exclusivity (the same owner adopts its matching active lease), the predecessor, the
      * budget, and the insert. The caller has confirmed the namespace on a host.
      */
-    claim(req: ClaimRequest, cfg: Config, heartbeatMs: number, admission: boolean, fault?: () => void): { row: LeaseRow; outcome: "granted" | "adopted" | "replayed" } {
+    claim(req: ClaimRequest, cfg: Config, heartbeatMs: number, fault?: () => void): { row: LeaseRow; outcome: "granted" | "adopted" | "replayed" } {
       return db.transaction(() => {
         const prior = q.byRequest.get(req.request);
         if (prior !== undefined) {
@@ -418,7 +478,6 @@ export function createStore(db: Db, now: () => number) {
         }
         const t = now();
         sweepExpired(cfg.graceMs);
-        if (!admission) throw new Refusal("enforcement_unhealthy", ADMISSION_ABSENT);
         if (!freshHeartbeat(heartbeatMs, cfg.hosts)) {
           throw new Refusal("enforcement_unhealthy", `No enforcement host has sent a heartbeat in ${heartbeatMs / 60_000} minutes.`);
         }
@@ -446,10 +505,12 @@ export function createStore(db: Db, now: () => number) {
           if (free === undefined) throw new Refusal("multi_node_unapproved", `Each multi-node approval for ${req.namespace} is used already; one approval covers one lease.`);
           db.prepare("INSERT INTO approvals_used (approval, lease_id, at) VALUES (?, ?, ?)").run(free, req.id, t);
         }
+        // Over every lease ever made on the namespace, in this transaction: never reused, and above every predecessor's.
+        const seq = (db.prepare<[string, string], { top: number }>("SELECT COALESCE(MAX(claim_seq), 0) AS top FROM leases WHERE context = ? AND namespace = ?").get(req.context, req.namespace)?.top ?? 0) + 1;
         db.prepare(
-          `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason, mode, request_id, predecessor)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, 'claimed', ?, ?)`,
-        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.approvals !== null ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000), req.request, req.replaces);
+          `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason, mode, request_id, predecessor, claim_seq, trial)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, 'claimed', ?, ?, ?, ?)`,
+        ).run(req.id, req.thread, req.cluster, req.context, req.namespace, req.uid, req.gpuType, req.gpus, req.hours, req.approvals !== null ? 1 : 0, t, wholeSecond(t + req.hours * 3_600_000), req.request, req.replaces, seq, req.trial ? 1 : 0);
         fault?.();
         return { row: mustGet(req.id), outcome: "granted" as const };
       }).immediate();
@@ -499,23 +560,51 @@ export function createStore(db: Db, now: () => number) {
     /**
      * Complete a claimed lease's teardown and return its GPUs, in one transaction, only when every
      * condition holds: it is this exact closing lease and namespace UID; nothing moved its attempt epoch
-     * since the teardown read it (no attempt opened or resolved but the ones this result reports); and
-     * after those resolutions no attempt is open. The teardown's inventory read came after its own
-     * resolution reads. Anything else frees nothing, so a stale or replayed result frees zero GPUs.
+     * since the teardown read it (no attempt opened or resolved but the ones this result reports); the
+     * fence report holds (see `fenceRefusal`); and after those resolutions no attempt is open. The
+     * teardown's inventory read came after its own resolution reads and after the drain. Anything else
+     * frees nothing, so a stale or replayed result frees zero GPUs. A completion under a retired fence is
+     * flagged for the digest in the same transaction.
      */
-    completeClaimed(id: string, uid: string, epoch: number, resolutions: readonly Resolution[]): { completed: boolean; freed: number } {
+    completeClaimed(id: string, uid: string, epoch: number, resolutions: readonly Resolution[], report: FenceReport): { completed: boolean; freed: number; why?: string } {
       return db.transaction(() => {
+        const refused = (why: string) => ({ completed: false, freed: 0, why });
         const row = q.get.get(id);
-        if (row === undefined || row.mode !== "claimed" || row.uid !== uid) return { completed: false, freed: 0 };
-        if (row.state !== "revoking" && row.state !== "releasing") return { completed: false, freed: 0 };
-        if (row.attempt_epoch !== epoch) return { completed: false, freed: 0 };
+        if (row === undefined || row.mode !== "claimed" || row.uid !== uid) return refused("not this claimed lease and namespace");
+        if (row.state !== "revoking" && row.state !== "releasing") return refused(`the lease is ${row.state}`);
+        if (row.attempt_epoch !== epoch) return refused("the lease changed since this teardown read it");
+        const fence = fenceRefusal(row, report);
+        if (fence !== null) return refused(fence);
         resolve(id, resolutions);
-        if (q.openAttempts.all(id).length > 0) return { completed: false, freed: 0 };
+        if (q.openAttempts.all(id).length > 0) return refused("a write attempt is still open");
         const final: LeaseState = row.state === "releasing" ? "released" : "torn-down";
         db.prepare(
           "UPDATE leases SET state = ?, reason = COALESCE(reason, 'teardown_complete'), ended_at = ?, op_token = NULL, op_deadline = NULL, failures = 0, last_error = NULL WHERE id = ?",
         ).run(final, now(), id);
+        if (report.armed === "retired") {
+          addFlag(
+            id,
+            "fence_retired_completion",
+            `Lease ${id} (${row.namespace} on ${row.cluster}) completed under a retired fence (proof: ${row.fence_retired_proof}): the namespace is unenrolled and no policy admits its Pods. A late Pod of this lease is caught only by k8s-sweep.`,
+          );
+        }
         return { completed: true, freed: row.gpus };
+      }).immediate();
+    },
+
+    /**
+     * Record the proof that a claimed lease's fence is retired for good (exit 2). Only for a claimed lease
+     * in teardown; the caller has checked it does not come from a thread.
+     */
+    recordFenceRetired(id: string, proof: string): LeaseRow {
+      return db.transaction(() => {
+        const row = mustGet(id);
+        if (row.mode !== "claimed") throw new Refusal("lease_not_claimed", `Lease ${id} is not a claim of a pre-made namespace; it has no fence.`);
+        if (row.state !== "revoking" && row.state !== "releasing") {
+          throw new Refusal("lease_not_in_teardown", `Lease ${id} is ${row.state}; a retired fence's proof is for a lease in teardown (revoking or releasing).`);
+        }
+        db.prepare("UPDATE leases SET fence_retired_proof = ? WHERE id = ?").run(proof, id);
+        return mustGet(id);
       }).immediate();
     },
 

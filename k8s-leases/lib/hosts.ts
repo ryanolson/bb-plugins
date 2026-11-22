@@ -28,6 +28,10 @@ export const REFUSALS: ReadonlySet<string> = new Set([
   // that changed hands): the cluster's state, not a broken host.
   "teardown_incomplete",
   "object_not_yours",
+  // The fence's gate holds a later claim than this teardown's, or a retired fence's proof does not
+  // match the cluster (still labelled, or the canary still refused): the cluster's state again.
+  "fence_mismatch",
+  "fence_not_retired",
 ]);
 
 /** No host could be reached, or none gave an answer. */

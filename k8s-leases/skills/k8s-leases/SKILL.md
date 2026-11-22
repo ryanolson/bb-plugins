@@ -29,7 +29,7 @@ k8s-guard calls these. Take a lease with `k8s-guard lease acquire`, which passes
 
 ```
 bb k8s lease acquire --cluster <c> --namespace <ns> --uid <uid> --thread <id> --gpu-type <t> --gpus <n> --hours <h>
-bb k8s lease acquire --claim --request <req_...> --replaces <lease_id|none> --cluster <c> --namespace <premade> --uid <uid> --gpu-type <t> --gpus <n> --hours <h>
+bb k8s lease acquire --claim --request <req_...> --replaces <lease_id|none> --cluster <c> --namespace <premade> --uid <uid> --gpu-type <t> --gpus <n> --hours <h> [--audit-trial]
 bb k8s lease latest --cluster <c> --namespace <ns>   # the latest lease on it, live or ended
 bb k8s lease op begin <lease_id>     # {token, deadline}; slot_busy while another write holds it
 bb k8s lease attempt begin <lease_id> <token> --attempt <att_...> --verb <v> --kind <k> --name <n> [--uid <u> --rv <v>]
@@ -37,7 +37,13 @@ bb k8s lease attempt resolve <lease_id> <att_...> --outcome committed|failed|sup
 bb k8s lease op end <lease_id> <token>
 ```
 
-A claim's owner is the calling thread. Claims refuse `enforcement_unhealthy` until the admission webhook that counts controller writes exists.
+A claim's owner is the calling thread. The pre-made namespace must carry `dynamo.nvidia.com/agent-lease-fence: "true"`. Before every new claim, a host runs `k8s-guard fence probe`. A claim needs the fence policy enforcing through its own webhook (mode `enforcing`, scope `finegrained`). Otherwise it refuses `enforcement_unhealthy` and quotes the probe. A trial (`--audit-trial`) is for a cluster's first run while the policy is in Audit: it needs `--gpus 1`, Ryan's first-run approval, and mode `audit` with scope `finegrained`. A claim's reply carries `seq`, which only rises on the namespace, and `trial`.
+
+A person on a host, never a thread, records the proof that a stranded claim's fence is retired for good:
+
+```
+bb k8s lease fence-retired <lease_id> --proof <url>
+```
 
 Every lease command prints JSON on stdout. A refusal exits 1 with `{"error": "...", "code": "..."}`.
 
@@ -50,10 +56,17 @@ Every lease command prints JSON on stdout. A refusal exits 1 with `{"error": "..
 | `releasing` | Its thread returned it. The namespace is being deleted. |
 | `released`, `torn-down` | The namespace is gone (a claimed one: the lease's objects are gone), and its GPUs are free. |
 
-A lease frees its GPUs only when a host reports its namespace gone. A claimed lease (the pre-made namespace) frees them only when a teardown on a host reports nothing of the lease left and no write attempt open; its namespace is never deleted.
+A lease frees its GPUs only when a host reports its namespace gone. A claimed lease (the pre-made namespace) frees them only when a teardown on a host reports nothing of the lease left and no write attempt open. Its namespace is never deleted. The teardown must also report its gate closed for this lease and `seq`, a drain of at least 120 s, and the fence armed throughout (or retired, with a recorded proof).
+
+## Flags of the fence
+
+- `fence_disarmed`: a teardown or the live probe (every 5 minutes) found the fence not armed. The GPUs stay charged until ops re-arm it, or retire it and a person records the proof.
+- `fence_retired_completion`: a claimed lease completed under a retired fence.
 
 ## Refusal codes of acquire
 
-`not_your_thread`, `cluster_not_allowed`, `cluster_never`, `cluster_read_only`, `cluster_profile_incomplete`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `gpu_type_no_limit`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`. With `--claim` also: `profiles_unavailable`, `namespace_not_premade`, `namespace_not_ours`, `predecessor_mismatch` (with `current`), `request_conflict`.
+`not_your_thread`, `cluster_not_allowed`, `cluster_never`, `cluster_read_only`, `cluster_profile_incomplete`, `first_run_unapproved`, `too_many_hours`, `gpu_type_not_on_cluster`, `gpu_type_no_limit`, `multi_node_unapproved`, `enforcement_unhealthy`, `namespace_leased`, `over_limit`, `thread_not_live`, `namespace_not_found`, `uid_mismatch`, `not_your_namespace`, `namespace_over_lease`, `gpu_type_mismatch`. With `--claim` also: `profiles_unavailable`, `namespace_not_premade`, `namespace_not_ours`, `namespace_not_enrolled`, `predecessor_mismatch` (with `current`), `request_conflict`, `invalid_argument` (`--audit-trial` without `--claim` or with more than 1 GPU). `enforcement_unhealthy` from the fence probe carries `canary`, `mode` and `scope`.
+
+`lease fence-retired` refuses `not_from_thread`, `lease_not_claimed` and `lease_not_in_teardown`.
 
 `op begin` and `attempt begin` refuse `attempt_unresolved` while an earlier write's outcome is unknown; `attempt begin` refuses `slot_lost` without the live slot's token.

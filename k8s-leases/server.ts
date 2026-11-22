@@ -26,19 +26,20 @@ import {
   allocationOf,
   hostContract,
   rpcContract,
+  type FenceProbe,
   type GuardFailure,
   type Inspect,
   type LeaseView,
   type Profiles,
   type Snapshot,
 } from "./lib/contract.ts";
-import { createEnforcer, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
+import { createEnforcer, probeWords, within, type GuardMethod, type ThreadFate } from "./lib/enforcer.ts";
 import { createHosts } from "./lib/hosts.ts";
 import { own } from "./lib/own.ts";
 import { checkAsk } from "./lib/policy.ts";
 import { Refusal } from "./lib/refusal.ts";
 import { SETTINGS, parseConfig, type Config } from "./lib/settings.ts";
-import { ADMISSION_ABSENT, MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
+import { MIGRATIONS, createStore, type LeaseRow } from "./lib/store.ts";
 
 /** `acquire` refuses unless some host sent a heartbeat this recently. */
 export const HEARTBEAT_WINDOW_MS = 10 * 60_000;
@@ -65,13 +66,24 @@ export interface K8sLeasesOptions {
   newToken?: () => string;
   tickWaitMs?: number;
   /**
-   * Whether the admission webhook that fences controller writes is in place. Claims of a pre-made
-   * namespace need it; it does not exist yet, so the default is false and claims refuse. Not a
-   * setting: any agent can change settings.
+   * Whether a fence probe allows a claim of a pre-made namespace. The default is `fenceAllows`, the
+   * contract's rule. A probe that could not run refuses whatever this says. Not a setting: any agent
+   * can change settings.
    */
-  admissionHealthy?: () => boolean;
+  fenceGate?: (probe: FenceProbe, claim: { trial: boolean }) => boolean;
+  /** Tests only: a shorter drain minimum W than the plugin's own `DRAIN_MS`. */
+  drainMs?: number;
   /** Test-only fault injection: a throw at a phase of the claim transaction models a killed plugin. */
   faults?: { claim?: (phase: "before-commit" | "after-commit") => void };
+}
+
+/**
+ * The contract's fence gate. A normal claim needs the policy enforcing through its own fine-grained
+ * webhook; a trial claim (the first run on a cluster, while the policy is in Audit) needs Audit through
+ * that webhook. Anything else, including a Kyverno that is down, refuses.
+ */
+export function fenceAllows(probe: FenceProbe, claim: { trial: boolean }): boolean {
+  return probe.scope === "finegrained" && probe.mode === (claim.trial ? "audit" : "enforcing");
 }
 
 function message(error: unknown): string {
@@ -156,7 +168,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
   const newLeaseId = options.newLeaseId ?? (() => `lse_${randomBytes(8).toString("hex")}`);
   const newToken = options.newToken ?? (() => `tok_${randomUUID()}`);
   const tickWaitMs = options.tickWaitMs ?? TICK_WAIT_MS;
-  const admissionHealthy = options.admissionHealthy ?? (() => false);
+  const fenceGate = options.fenceGate ?? fenceAllows;
   const faults = options.faults ?? {};
 
   return async function k8sLeases(bb: BbPluginApi): Promise<void> {
@@ -165,7 +177,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
 
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
-    const store = createStore(db, now);
+    const store = createStore(db, now, options.drainMs === undefined ? {} : { drainMs: options.drainMs });
     const host = bb.hosts.experimental_client({ contract: hostContract });
 
     // One abort signal for every host call of this plugin load; it fires on unload.
@@ -228,9 +240,13 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
     });
 
     /** The host entry's input for a guard call: always the kube context, never the profile name. */
-    function target(lease: Pick<LeaseRow, "context" | "namespace" | "uid" | "id">, cfg: Config, method: GuardMethod) {
+    function target(lease: Pick<LeaseRow, "context" | "namespace" | "uid" | "id"> & { fence_retired_proof?: string | null }, cfg: Config, method: GuardMethod) {
       const base = { run: cfg.run, context: lease.context, namespace: lease.namespace };
-      return method === "inspect" ? base : { ...base, uid: lease.uid, leaseId: lease.id };
+      if (method === "inspect" || method === "probe-fence") return base;
+      const leased = { ...base, uid: lease.uid, leaseId: lease.id };
+      // A retired fence's proof goes to every teardown run once a person recorded it.
+      const proof = lease.fence_retired_proof ?? null;
+      return method === "down" && proof !== null ? { ...leased, fenceRetired: proof } : leased;
     }
 
     /**
@@ -421,13 +437,15 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       const gpuType = parsed(GPU_TYPE, input.gpuType, "--gpu-type");
       const gpus = parsed(z.number().int().min(1), input.gpus, "--gpus");
       const hours = parsed(z.coerce.number().positive().finite(), input.hours, "--hours");
+      const trial = input.trial === true;
+      // A trial holds one GPU: the guard refuses every GPU request under it, so no more is ever charged.
+      if (trial && gpus !== 1) throw new Refusal("invalid_argument", `--audit-trial: a trial claim takes --gpus 1, not ${gpus}.`);
       // A retry of a request that was granted gets its recorded outcome, whatever has changed since.
       const prior = store.byRequest(request);
       if (prior !== undefined) {
         if (prior.thread_id !== owner) throw new Refusal("request_conflict", `Request ${request} belongs to another thread.`);
-        return { lease_id: prior.id, expires_at: iso(prior.expires_at), state: prior.state };
+        return claimJson(prior);
       }
-      if (!admissionHealthy()) throw new Refusal("enforcement_unhealthy", ADMISSION_ABSENT);
       const cfg = await current();
       // The pre-made namespace is named only by the profiles a host read; the clusters setting never names one.
       const profiles = currentProfiles() ?? (await refreshProfiles(cfg));
@@ -458,22 +476,56 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
       if (bot.developer === undefined || ns.developer !== bot.developer || ns.agent_rbac !== "true") {
         throw new Refusal("namespace_not_ours", `${namespace} lacks dynamo.nvidia.com/developer=${bot.developer} or dynamo.nvidia.com/developer-agent-rbac=true.`);
       }
+      // Before the probe: an unenrolled namespace has no fence to probe, and that is not a broken fence.
+      if (ns.lease_fence !== "true") {
+        throw new Refusal("namespace_not_enrolled", `${namespace} on ${cluster} is not enrolled in the lease fence: its label dynamo.nvidia.com/agent-lease-fence reads ${ns.lease_fence ?? "nothing"}, not true. Ops set it.`);
+      }
       const allocation = allocationOf(ns);
       if (allocation > gpus) throw new Refusal("namespace_over_lease", `${namespace} already holds ${allocation} GPUs, more than ${gpus}.`);
+      await checkFence(cluster, context, namespace, cfg, trial);
       const { row, outcome } = await withSettings((fresh) => {
         const recheck = checkAsk({ thread: owner, cluster, namespace, gpuType, gpus, hours }, fresh, currentProfiles() ?? profiles);
         if (recheck.context !== context) throw new Refusal("cluster_changed", `${cluster}'s kube context changed during the claim; try again.`);
         return store.claim(
-          { id: newLeaseId(), request, thread: owner, cluster, context, namespace, uid, gpuType, gpus, hours, approvals: recheck.approvals, replaces },
+          { id: newLeaseId(), request, thread: owner, cluster, context, namespace, uid, gpuType, gpus, hours, approvals: recheck.approvals, replaces, trial },
           fresh,
           HEARTBEAT_WINDOW_MS,
-          admissionHealthy(),
           () => faults.claim?.("before-commit"),
         );
       });
       faults.claim?.("after-commit");
       publish();
-      return { lease_id: row.id, expires_at: iso(row.expires_at), state: row.state, ...(outcome === "adopted" ? { adopted: true } : {}) };
+      return { ...claimJson(row), ...(outcome === "adopted" ? { adopted: true } : {}) };
+    }
+
+    /**
+     * Ask one host whether the fence is armed the way this claim needs, and refuse with the probe's own
+     * words unless the gate allows it. A probe that could not run refuses: no fence was shown.
+     */
+    async function checkFence(cluster: string, context: string, namespace: string, cfg: Config, trial: boolean): Promise<void> {
+      let probed;
+      try {
+        probed = await hosts.one<{ ok: true; value: FenceProbe } | GuardFailure>("probe-fence", target({ context, namespace, uid: "", id: "" }, cfg, "probe-fence"));
+      } catch (error) {
+        throw new Refusal("enforcement_unhealthy", `The fence probe of ${namespace} on ${cluster} could not run: ${message(error)}`);
+      }
+      const { result, hostId } = probed;
+      if (!result.ok) {
+        throw new Refusal("enforcement_unhealthy", `The fence probe of ${namespace} on ${cluster} failed on ${hostId} (${result.code}): ${result.error}`);
+      }
+      const probe = result.value;
+      if (fenceGate(probe, { trial })) return;
+      const need = trial ? "a trial claim needs mode audit with scope finegrained" : "a claim needs mode enforcing with scope finegrained";
+      throw new Refusal("enforcement_unhealthy", `The fence probe of ${namespace} on ${cluster} does not allow this claim (${need}): ${probeWords(probe)}`, {
+        canary: probe.canary,
+        mode: probe.mode,
+        scope: probe.scope,
+      });
+    }
+
+    /** A claim's reply: the lease, its seq on the namespace, and whether it is a trial. */
+    function claimJson(row: LeaseRow) {
+      return { lease_id: row.id, expires_at: iso(row.expires_at), state: row.state, seq: row.claim_seq, trial: row.trial === 1 };
     }
 
     const leaseArg = [{ name: "lease_id", description: "The lease, lse_...", required: true }] as const;
@@ -495,6 +547,7 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
               claim: { type: "boolean", description: "Claim the profiles' pre-made namespace (k8s-guard ns claim)" },
               request: { type: "string", description: "With --claim: the request id k8s-guard kept before the call; a retry returns its outcome" },
               replaces: { type: "string", description: "With --claim: the namespace's latest lease (lease latest), or none" },
+              "audit-trial": { type: "boolean", description: "With --claim and --gpus 1: a trial claim while the fence policy is in Audit (the cluster's first run)" },
               "gpu-type": { type: "string", required: true, description: "GPU type, such as gb300" },
               gpus: { type: "integer", min: 1, max: 4096, required: true, description: "GPUs to hold" },
               hours: { type: "string", required: true, description: "Hours, at most the plugin's limit (4 by default)" },
@@ -511,7 +564,12 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
                   gpus: input.options.gpus,
                   hours: input.options.hours,
                 };
-                return input.options.claim ? claim({ ...ask, request: input.options.request, replaces: input.options.replaces }, ctx) : acquire(ask, ctx);
+                if (input.options["audit-trial"] === true && input.options.claim !== true) {
+                  throw new Refusal("invalid_argument", "--audit-trial: only a claim (--claim) can be a trial.");
+                }
+                return input.options.claim
+                  ? claim({ ...ask, request: input.options.request, replaces: input.options.replaces, trial: input.options["audit-trial"] === true }, ctx)
+                  : acquire(ask, ctx);
               }),
           }),
           "lease latest": cliCommand({
@@ -580,7 +638,32 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
               json(async () => {
                 const row = store.get(parsed(LEASE_ID, input.positionals.lease_id, "lease_id"), await config());
                 const open = store.openAttempts(row.id).map((a) => ({ attempt: a.id, verb: a.verb, kind: a.kind, name: a.name, uid: a.target_uid, rv: a.target_rv }));
-                return { ...showJson(row), attempt_epoch: row.attempt_epoch, open_attempts: open };
+                return {
+                  ...showJson(row),
+                  attempt_epoch: row.attempt_epoch,
+                  open_attempts: open,
+                  claim_seq: row.claim_seq,
+                  trial: row.trial === 1,
+                  fence_retired_proof: row.fence_retired_proof,
+                };
+              }),
+          }),
+          "lease fence-retired": cliCommand({
+            summary: "Record the proof that a claimed lease's fence is retired for good (a person on a host, never a thread)",
+            positionals: leaseArg,
+            options: {
+              proof: { type: "string", required: true, description: "The URL of the proof: nothing of the lease left, the namespace unlabelled, the policy gone" },
+              ...jsonFlag,
+            },
+            run: (input, ctx) =>
+              json(() => {
+                // A thread must never end its own stranded lease: this path skips the armed fence.
+                if (ctx.threadId !== undefined) throw new Refusal("not_from_thread", "lease fence-retired is run by a person on a host, not from a bb thread.");
+                const id = parsed(LEASE_ID, input.positionals.lease_id, "lease_id");
+                const proof = parsed(z.string().url().max(2048), input.options.proof, "--proof");
+                const row = store.recordFenceRetired(id, proof);
+                publish();
+                return { lease_id: row.id, fence_retired_proof: row.fence_retired_proof };
               }),
           }),
           "lease op begin": cliCommand({

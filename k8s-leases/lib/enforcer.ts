@@ -16,23 +16,35 @@
 //   answer frees nothing.
 // - Thread check, for an active lease: bb's thread lookup, with its own
 //   timeout. Only when it finishes does it revoke a lease whose thread is gone.
+// - Fence probe, for an active claimed lease, every fifth dispatch: `fence
+//   probe` on one host. A fence not armed is flagged early, so a person can
+//   act before teardown; it frees nothing and revokes nothing.
 //
 // `down` runs once per lease, on one host at a time, on its own lane.
 // `extend` runs one at a time per lease. After the plugin unloads, nothing
 // touches the database, and every promise has a handler from the start.
-import { UID, allocationOf, type GuardFailure, type Inspect } from "./contract.ts";
+import { UID, allocationOf, type FenceProbe, type GuardFailure, type Inspect } from "./contract.ts";
 import type { HostAnswer, Hosts } from "./hosts.ts";
-import type { LeaseRow, Resolution, Store } from "./store.ts";
+import type { FenceReport, LeaseRow, Resolution, Store } from "./store.ts";
 import type { Config } from "./settings.ts";
 
 /** What bb says about a lease's thread. Only the first three revoke. */
 export type ThreadFate = "archived" | "deleted" | "missing" | "live" | "unknown";
 
-export type GuardMethod = "inspect" | "expire" | "down" | "extend";
+export type GuardMethod = "inspect" | "expire" | "down" | "extend" | "probe-fence";
 type InspectResult = { ok: true; value: Inspect } | GuardFailure;
+type ProbeResult = { ok: true; value: FenceProbe } | GuardFailure;
 type WriteResult =
-  | { ok: true; gpu_pods_left?: number; terminating?: boolean; complete?: boolean; resolutions?: Resolution[] }
-  | (GuardFailure & { resolutions?: Resolution[] });
+  | ({ ok: true; gpu_pods_left?: number; terminating?: boolean; complete?: boolean; resolutions?: Resolution[] } & FenceReport)
+  | (GuardFailure & { resolutions?: Resolution[]; fence_disarmed?: true; probe?: FenceProbe });
+
+/** The live probe runs on every this-many-th dispatch of an active claimed lease: every 5 minutes at one tick a minute. */
+export const PROBE_EVERY = 5;
+
+/** A probe in words, for a flag or a refusal: the verdicts, then the server texts they matched. */
+export function probeWords(probe: FenceProbe): string {
+  return `canary ${probe.canary}, mode ${probe.mode}, scope ${probe.scope}, ${probe.armed ? "armed" : "not armed"}. Canary: "${probe.canary_text}". Mode: "${probe.mode_text}".`;
+}
 
 export interface EnforcerDeps {
   store: Store;
@@ -92,6 +104,10 @@ export function createEnforcer(deps: EnforcerDeps) {
   const lastSeen = new Map<string, number>();
   /** Inspect fan-outs still running, by lease. */
   const inspecting = new Map<string, number>();
+  /** Dispatches of each active claimed lease since its last live fence probe. */
+  const sinceProbe = new Map<string, number>();
+  /** The live fence probe in flight for each lease. */
+  const fenceProbes = new Map<string, Promise<void>>();
 
   /** The store, only while the plugin is loaded. */
   function db(): Store {
@@ -168,10 +184,16 @@ export function createEnforcer(deps: EnforcerDeps) {
   function claimedDown(lease: LeaseRow, result: WriteResult): boolean {
     const resolutions = result.resolutions ?? [];
     if (result.ok && result.complete === true) {
-      const done = db().completeClaimed(lease.id, lease.uid, lease.attempt_epoch, resolutions);
+      const report: FenceReport = {
+        ...(result.fence === undefined ? {} : { fence: result.fence }),
+        ...(result.drain_monotonic_seconds === undefined ? {} : { drain_monotonic_seconds: result.drain_monotonic_seconds }),
+        ...(result.armed === undefined ? {} : { armed: result.armed }),
+        ...(result.lease_fence === undefined ? {} : { lease_fence: result.lease_fence }),
+      };
+      const done = db().completeClaimed(lease.id, lease.uid, lease.attempt_epoch, resolutions, report);
       if (!done.completed) {
         db().resolveAttempts(lease.id, resolutions);
-        db().noteReport(lease.id, "k8s-guard down: complete, but the lease changed since this teardown read it; the next one decides");
+        db().noteReport(lease.id, `k8s-guard down: complete, but it frees nothing: ${done.why ?? "refused"}; the next teardown decides`);
       }
       deps.changed();
       return done.completed;
@@ -179,6 +201,14 @@ export function createEnforcer(deps: EnforcerDeps) {
     if (!result.ok && result.code === "teardown_incomplete") {
       db().resolveAttempts(lease.id, resolutions);
       db().noteReport(lease.id, `k8s-guard down: ${result.error}`);
+      if (result.fence_disarmed === true) {
+        // A disarmed fence keeps the GPUs charged until a person re-arms it or retires it with a proof.
+        db().flagOnce(
+          lease.id,
+          "fence_disarmed",
+          `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): its teardown found the fence not armed (${result.probe === undefined ? result.error : probeWords(result.probe)}). Its GPUs stay charged until ops re-arm the fence, or retire it and record the proof with \`bb k8s lease fence-retired ${lease.id} --proof <url>\`.`,
+        );
+      }
       return false;
     }
     if (!result.ok) fail(lease, `k8s-guard down failed (${result.code}): ${result.error}`);
@@ -313,6 +343,38 @@ export function createEnforcer(deps: EnforcerDeps) {
     if (synced && !revokedHere) db().clearFailures(id);
   }
 
+  /**
+   * The live fence probe of an active claimed lease, on every `PROBE_EVERY`-th dispatch: one host,
+   * read only. A fence not armed, or a probe that cannot run, is flagged once. It frees nothing.
+   */
+  function probeFence(lease: LeaseRow, cfg: Config): Promise<void> | null {
+    const count = (sinceProbe.get(lease.id) ?? 0) + 1;
+    if (count < PROBE_EVERY || fenceProbes.has(lease.id)) {
+      sinceProbe.set(lease.id, Math.min(count, PROBE_EVERY));
+      return null;
+    }
+    sinceProbe.set(lease.id, 0);
+    const disarmed = (what: string) =>
+      db().flagOnce(lease.id, "fence_disarmed", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the live fence probe ${what}. A teardown now cannot complete; its GPUs stay charged until the fence is armed again.`);
+    const probe = observed(
+      (async () => {
+        let reply;
+        try {
+          reply = await deps.hosts.one<ProbeResult>("probe-fence", deps.target(lease, cfg, "probe-fence"));
+        } catch (error) {
+          if (deps.disposed()) throw new Unloaded();
+          disarmed(`could not run: ${message(error)}`);
+          return;
+        }
+        if (!reply.result.ok) disarmed(`failed on ${reply.hostId} (${reply.result.code}): ${reply.result.error}`);
+        else if (!reply.result.value.armed) disarmed(`reads the fence not armed: ${probeWords(reply.result.value)}`);
+      })().finally(() => fenceProbes.delete(lease.id)),
+      `lease ${lease.id}: fence probe`,
+    );
+    fenceProbes.set(lease.id, probe);
+    return probe;
+  }
+
   /** bb's thread lookup, with its own timeout; revokes only when it finishes. */
   function checkThread(lease: LeaseRow, cfg: Config): Promise<void> {
     const running = threadChecks.get(lease.id);
@@ -351,6 +413,12 @@ export function createEnforcer(deps: EnforcerDeps) {
       }
       parts.push(observed(observe(lease, cfg), `lease ${id}: observe`));
       if (lease.state === "active") parts.push(checkThread(lease, cfg));
+      if (lease.state === "active" && lease.mode === "claimed") {
+        const probe = probeFence(lease, cfg);
+        if (probe !== null) parts.push(probe);
+      } else {
+        sinceProbe.delete(id);
+      }
     } catch (error) {
       if (!(error instanceof Unloaded) && !deps.disposed()) deps.log(`lease ${id}: dispatch failed: ${message(error)}`);
     }

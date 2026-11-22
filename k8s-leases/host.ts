@@ -7,9 +7,8 @@ import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
-import { ATTEMPT_ID, HOST_TIMEOUTS, OUTCOME, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
-import { guardArgv, guardEnv, readGuardOutput, readInspect, type GuardMethod, type GuardOutcome, type GuardTarget } from "./lib/guard.ts";
-
+import { ATTEMPT_ID, FENCE_PROBE, FENCE_REPORT, HOST_TIMEOUTS, OUTCOME, PROFILES, hostContract, type GuardRun, type HostTimeouts } from "./lib/contract.ts";
+import { guardArgv, guardEnv, readFenceProbe, readGuardOutput, readInspect, type GuardMethod, type GuardOutcome, type GuardTarget } from "./lib/guard.ts";
 
 const MAX_OUTPUT = 1024 * 1024;
 
@@ -23,6 +22,34 @@ function resolutionsIn(stdout: string): Array<{ attempt: string; outcome: "commi
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The fence fields of a claimed teardown's output, each checked on its own. A malformed field is dropped,
+ * and the plugin's completion then refuses: it needs every one of them.
+ */
+function fenceFieldsIn(stdout: string, complete: boolean): Record<string, unknown> {
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+  const kept: Record<string, unknown> = {};
+  const keep = (key: string, schema: { safeParse(v: unknown): { success: boolean; data?: unknown } }) => {
+    if (!(key in body)) return;
+    const parsed = schema.safeParse(body[key]);
+    if (parsed.success) kept[key] = parsed.data;
+  };
+  if (complete) {
+    for (const [key, schema] of Object.entries(FENCE_REPORT)) keep(key, schema);
+  } else {
+    if (body.fence_disarmed === true) kept.fence_disarmed = true;
+    keep("probe", FENCE_PROBE);
+  }
+  return kept;
 }
 
 interface Ran {
@@ -126,11 +153,12 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
         return { ok: true, detail: "ok" };
       },
       inspect: async (input, context) => readInspect(await guard("inspect", input, context.signal)),
+      "probe-fence": async (input, context) => readFenceProbe(await guard("probe-fence", input, context.signal)),
       expire: (input, context) => write("expire", input, context.signal),
       down: async (input, context) => {
         const { outcome, stdout } = await guardRun("down", input, context.signal);
         const resolutions = resolutionsIn(stdout);
-        if (!outcome.ok) return resolutions === undefined ? outcome : { ...outcome, resolutions };
+        if (!outcome.ok) return { ...outcome, ...(resolutions === undefined ? {} : { resolutions }), ...fenceFieldsIn(stdout, false) };
         // The deletion started. Pass on what the guard says is still terminating, and in a claimed
         // namespace whether nothing of the lease is left.
         const value = (typeof outcome.value === "object" && outcome.value !== null ? outcome.value : {}) as { terminating?: unknown; gpu_pods_left?: unknown; complete?: unknown };
@@ -140,6 +168,7 @@ export function createHostEntry(options: { timeoutMs?: Partial<HostTimeouts> } =
           ...(Number.isInteger(value.gpu_pods_left) && (value.gpu_pods_left as number) >= 0 ? { gpu_pods_left: value.gpu_pods_left as number } : {}),
           ...(value.complete === true ? { complete: true } : {}),
           ...(resolutions === undefined ? {} : { resolutions }),
+          ...fenceFieldsIn(stdout, true),
         };
       },
       extend: (input, context) => write("extend", input, context.signal),

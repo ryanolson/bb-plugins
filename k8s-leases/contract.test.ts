@@ -113,7 +113,7 @@ async function plugin(options: { hostCall?: (method: string, input: any, hostId:
       return options.hostCall ? options.hostCall(method, input, hostId, real) : real();
     },
   });
-  const factory = createK8sLeasesPlugin({ now: clock.now, tickWaitMs: 60_000, admissionHealthy: () => options.admission === true });
+  const factory = createK8sLeasesPlugin({ now: clock.now, tickWaitMs: 60_000, fenceGate: () => options.admission === true });
   await factory(bb);
   let current = harness;
   const wire = () => {

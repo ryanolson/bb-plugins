@@ -54,8 +54,37 @@ export const INSPECT = z.object({
   /** The Namespace's dynamo.nvidia.com/developer and developer-agent-rbac labels: a claim checks both. */
   developer: z.string().nullable().optional(),
   agent_rbac: z.string().nullable().optional(),
+  /** The Namespace's dynamo.nvidia.com/agent-lease-fence label: a claim needs "true" (enrolled in the fence policy). */
+  lease_fence: z.string().nullable().optional(),
 });
 export type Inspect = z.infer<typeof INSPECT>;
+
+/**
+ * What `k8s-guard fence probe` reports: two server dry-run Pod creates, read only. The canary says which
+ * webhook answered (finegrained: the policy's own entry, so its match condition is in place); the mode Pod
+ * says whether the policy enforces. Extra fields are ignored; a verdict outside these is no answer.
+ */
+export const FENCE_PROBE = z.object({
+  namespace: z.string(),
+  canary: z.enum(["finegrained", "shared", "engine_unavailable", "disarmed", "probe_failed"]),
+  mode: z.enum(["enforcing", "audit", "absent", "engine_unavailable", "probe_failed"]),
+  scope: z.enum(["finegrained", "shared", "unknown"]),
+  armed: z.boolean(),
+  lease_fence: z.string().nullable(),
+  canary_text: z.string().max(2000),
+  mode_text: z.string().max(2000),
+});
+export type FenceProbe = z.infer<typeof FENCE_PROBE>;
+
+/** The gate ConfigMap's state as a claimed teardown read it back after writing `closing`. */
+export const FENCE_READ = z.object({ lease_id: z.string(), seq: z.number().int(), state: z.string() }).strip();
+/** A claimed teardown's fence report; each field is checked on its own, and a malformed one is dropped. */
+export const FENCE_REPORT = {
+  fence: FENCE_READ,
+  drain_monotonic_seconds: z.number().finite().min(0),
+  armed: z.enum(["continuous", "retired"]),
+  lease_fence: z.string().nullable(),
+};
 
 /** The GPUs a namespace holds: the largest of the guard's allocation, the DGD specs and the pods. */
 export function allocationOf(ns: Inspect): number {
@@ -116,7 +145,8 @@ export const hostContract = defineRpcContract({
    * resolved; `teardown_incomplete` carries the resolutions it could make.
    */
   down: {
-    input: z.object(LEASE_TARGET).strict(),
+    /** `fenceRetired`: the proof URL of a retired fence (exit 2), recorded by a person with `lease fence-retired`. */
+    input: z.object({ ...LEASE_TARGET, fenceRetired: z.string().url().optional() }).strict(),
     output: z.union([
       z
         .object({
@@ -125,10 +155,20 @@ export const hostContract = defineRpcContract({
           gpu_pods_left: z.number().int().min(0).optional(),
           complete: z.boolean().optional(),
           resolutions: z.array(RESOLUTION).optional(),
+          fence: FENCE_REPORT.fence.optional(),
+          drain_monotonic_seconds: FENCE_REPORT.drain_monotonic_seconds.optional(),
+          armed: FENCE_REPORT.armed.optional(),
+          lease_fence: FENCE_REPORT.lease_fence.optional(),
         })
         .strict(),
-      FAILURE.extend({ resolutions: z.array(RESOLUTION).optional() }).strict(),
+      FAILURE.extend({ resolutions: z.array(RESOLUTION).optional(), fence_disarmed: z.literal(true).optional(), probe: FENCE_PROBE.optional() }).strict(),
     ]),
+  },
+  /** `k8s-guard fence probe`: whether the fence policy is armed in the namespace. Read only. */
+  "probe-fence": {
+    input: z.object(TARGET).strict(),
+    output: z.union([z.object({ ok: z.literal(true), value: FENCE_PROBE }).strict(), FAILURE]),
+    experimental_retryable: true,
   },
   extend: {
     input: z.object(LEASE_TARGET).strict(),
@@ -139,7 +179,8 @@ export type HostMethod = keyof typeof hostContract;
 
 export type HostTimeouts = Record<HostMethod, number>;
 /** How long each guard run may take on the host. `down` runs the runbook's teardown section, then deletes. */
-export const HOST_TIMEOUTS: HostTimeouts = { profiles: 20_000, probe: 20_000, inspect: 60_000, expire: 120_000, extend: 60_000, down: 600_000 };
+/** `down` covers a claimed teardown's 120 s drain, its probes and its deletes. */
+export const HOST_TIMEOUTS: HostTimeouts = { profiles: 20_000, probe: 20_000, inspect: 60_000, expire: 120_000, extend: 60_000, down: 600_000, "probe-fence": 30_000 };
 /** The server waits this much longer than the host, so the host's own timeout reports first. */
 export const HOST_CALL_MARGIN_MS = 15_000;
 export type WriteMethod = "expire" | "down" | "extend";

@@ -4,23 +4,22 @@
 // live UID; reclaim is adopt-or-replace; a write's attempt is recorded before
 // it is sent; and a claimed lease frees its GPUs only through one conditional
 // completion, never because its namespace looks gone. Claims stay off until
-// the admission webhook exists: the production default refuses them.
+// the fence probe reads an enforcing, fine-grained fence: without one the
+// production default refuses them. The fence itself is tested in fence.test.ts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Database from "better-sqlite3";
 import type { Config } from "./lib/settings.ts";
-import { MIGRATIONS, createStore } from "./lib/store.ts";
-import { CLUSTER_A, DEVELOPER, HOST_ONE, HOUR, MIN, PREMADE, T0, THREAD_A, THREAD_B, setup, ticksUntil, type SetupOptions } from "./test-support.ts";
+import { MIGRATIONS, createStore, type FenceReport, type LeaseRow } from "./lib/store.ts";
+import { ARMED, CLAIM_PROFILES as PROFILES, CLUSTER_A, DEVELOPER, DISARMED, HOST_ONE, HOUR, MIN, PREMADE, T0, THREAD_A, THREAD_B, setup, ticksUntil, type SetupOptions } from "./test-support.ts";
 
-const PROFILES = {
-  schema_version: 1,
-  bot: { user: "bot-example", kubeconfig: "/home/test/kubeconfig.yaml", developer: DEVELOPER, namespace_prefix: "dyntest-alice-", premade_namespace: PREMADE },
-  clusters: {
-    [CLUSTER_A]: { context: CLUSTER_A, allowed: "first-choice", source: ["test"], bot_can_write: true, gpu_type: "gb300", gpus_per_node: 4 },
-  },
-};
+/** The fence report of a teardown that closed this lease's gate and drained, armed throughout. */
+function closed(row: LeaseRow): FenceReport {
+  return { fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, armed: "continuous", lease_fence: "true" };
+}
 
-async function world(options: SetupOptions = { admission: () => true }) {
+/** Phase-1 worlds turn claims on with an armed fence: enforcing, fine-grained. */
+async function world(options: SetupOptions = { fence: ARMED }) {
   const w = await setup({}, options);
   w.guard.profiles = PROFILES;
   await w.tick(); // heartbeats and the profile read
@@ -41,12 +40,19 @@ async function used(w: World): Promise<number> {
   return live.reduce((sum, row) => sum + row.gpus, 0);
 }
 
-test("claims stay off by default: without the admission webhook acquire refuses enforcement_unhealthy", async () => {
+test("claims stay off by default: without an armed fence the fence probe refuses enforcement_unhealthy", async () => {
+  // A guard that predates `fence probe`: the probe cannot run, so no claim.
   const w = await world({});
   const got = await w.claim(THREAD_A, w.ns, 2);
   assert.equal(got.code, 1, JSON.stringify(got.json));
   assert.equal(got.json.code, "enforcement_unhealthy");
-  assert.match(got.json.error, /admission/);
+  assert.match(got.json.error, /fence probe/);
+  // No policy installed: the canary is admitted, and the probe's words say so.
+  w.guard.setProbe(w.ns, DISARMED);
+  const off = await w.claim(THREAD_A, w.ns, 2);
+  assert.equal(off.json.code, "enforcement_unhealthy");
+  assert.match(off.json.error, /fence probe/);
+  assert.match(off.json.error, /canary disarmed/);
   assert.equal(await used(w), 0);
 });
 
@@ -96,7 +102,7 @@ test("two simultaneous claims: one lease, one charge", async () => {
 
 test("the plugin killed before commit restarts with zero claims and zero charge", async () => {
   let crash = true;
-  const w = await world({ admission: () => true, faults: { claim: (phase) => { if (crash && phase === "before-commit") throw new Error("killed"); } } });
+  const w = await world({ fence: ARMED, faults: { claim: (phase) => { if (crash && phase === "before-commit") throw new Error("killed"); } } });
   const got = await w.claim(THREAD_A, w.ns, 2, { request: "req_killedbefore1" });
   assert.notEqual(got.code, 0);
   crash = false;
@@ -107,7 +113,7 @@ test("the plugin killed before commit restarts with zero claims and zero charge"
 
 test("the plugin killed after commit restarts with exactly one recoverable claim and one charge", async () => {
   let crash = true;
-  const w = await world({ admission: () => true, faults: { claim: (phase) => { if (crash && phase === "after-commit") throw new Error("killed"); } } });
+  const w = await world({ fence: ARMED, faults: { claim: (phase) => { if (crash && phase === "after-commit") throw new Error("killed"); } } });
   const lost = await w.claim(THREAD_A, w.ns, 2, { request: "req_killedafter01" });
   assert.notEqual(lost.code, 0, "the reply was lost");
   crash = false;
@@ -255,14 +261,14 @@ test("a stale completion replay frees zero GPUs", () => {
   store.heartbeat(HOST_ONE, true, "ok");
   const uid = "00000000-0000-4000-8000-0000000000aa";
   const ask = { cluster: CLUSTER_A, context: CLUSTER_A, namespace: PREMADE, uid, gpuType: "gb300", gpus: 2, hours: 2, approvals: null };
-  const first = store.claim({ ...ask, id: "lse_first00001", request: "req_storefirst01", thread: THREAD_A, replaces: null }, cfg, 10 * MIN, true).row;
+  const first = store.claim({ ...ask, trial: false, id: "lse_first00001", request: "req_storefirst01", thread: THREAD_A, replaces: null }, cfg, 10 * MIN).row;
   const epoch = first.attempt_epoch;
   store.release(first.id, THREAD_A, cfg);
-  assert.equal(store.completeClaimed(first.id, uid, epoch, []).freed, 2);
-  const second = store.claim({ ...ask, id: "lse_second0002", request: "req_storesecond1", thread: THREAD_B, replaces: first.id }, cfg, 10 * MIN, true).row;
+  assert.equal(store.completeClaimed(first.id, uid, epoch, [], closed(first)).freed, 2);
+  const second = store.claim({ ...ask, id: "lse_second0002", request: "req_storesecond1", thread: THREAD_B, replaces: first.id, trial: false }, cfg, 10 * MIN).row;
   assert.equal(store.used("gb300"), 2);
   // The first completion, replayed: nothing changes.
-  assert.equal(store.completeClaimed(first.id, uid, epoch, []).freed, 0);
+  assert.equal(store.completeClaimed(first.id, uid, epoch, [], closed(first)).freed, 0);
   assert.equal(store.find(second.id)!.state, "active");
   assert.equal(store.used("gb300"), 2);
   // The successor's completion with an epoch from before its last attempt moved: nothing either.
@@ -271,15 +277,15 @@ test("a stale completion replay frees zero GPUs", () => {
   store.attemptBegin(second.id, THREAD_B, slot.token, { attempt: "att_storeattmpt1", verb: "create", kind: "ConfigMap", name: "c", uid: null, rv: null }, cfg);
   store.release(second.id, THREAD_B, cfg);
   t += MIN;
-  assert.equal(store.completeClaimed(second.id, uid, stale, [{ attempt: "att_storeattmpt1", outcome: "failed" }]).freed, 0);
+  assert.equal(store.completeClaimed(second.id, uid, stale, [{ attempt: "att_storeattmpt1", outcome: "failed" }], closed(second)).freed, 0);
   assert.equal(store.used("gb300"), 2);
   // A refused completion applies nothing; the enforcer keeps the resolutions it was given.
   assert.equal(store.openAttempts(second.id).length, 1);
   store.resolveAttempts(second.id, [{ attempt: "att_storeattmpt1", outcome: "failed" }]);
   // With the epoch read after the resolution, it completes once.
   const fresh = store.find(second.id)!.attempt_epoch;
-  assert.equal(store.completeClaimed(second.id, uid, fresh, []).freed, 2);
-  assert.equal(store.completeClaimed(second.id, uid, fresh, []).freed, 0);
+  assert.equal(store.completeClaimed(second.id, uid, fresh, [], closed(second)).freed, 2);
+  assert.equal(store.completeClaimed(second.id, uid, fresh, [], closed(second)).freed, 0);
   assert.equal(store.used("gb300"), 0);
 });
 
@@ -294,15 +300,15 @@ test("a completion while a write attempt is still open frees nothing", () => {
   };
   store.heartbeat(HOST_ONE, true, "ok");
   const uid = "00000000-0000-4000-8000-0000000000bb";
-  const row = store.claim({ cluster: CLUSTER_A, context: CLUSTER_A, namespace: PREMADE, uid, gpuType: "gb300", gpus: 2, hours: 2, approvals: null, id: "lse_openatt0001", request: "req_openattempt1", thread: THREAD_A, replaces: null }, cfg, 10 * MIN, true).row;
+  const row = store.claim({ cluster: CLUSTER_A, context: CLUSTER_A, namespace: PREMADE, uid, gpuType: "gb300", gpus: 2, hours: 2, approvals: null, id: "lse_openatt0001", request: "req_openattempt1", thread: THREAD_A, replaces: null, trial: false }, cfg, 10 * MIN).row;
   const slot = store.opBegin(row.id, THREAD_A, "tok_openatt0001", 2 * MIN, cfg);
   store.attemptBegin(row.id, THREAD_A, slot.token, { attempt: "att_stillopen001", verb: "create", kind: "DynamoGraphDeployment", name: "w", uid: null, rv: null }, cfg);
   store.release(row.id, THREAD_A, cfg);
   // The epoch is current, so only the open attempt stands in the way.
   const epoch = store.find(row.id)!.attempt_epoch;
-  assert.equal(store.completeClaimed(row.id, uid, epoch, []).freed, 0);
+  assert.equal(store.completeClaimed(row.id, uid, epoch, [], closed(row)).freed, 0);
   assert.equal(store.find(row.id)!.state, "releasing");
   assert.equal(store.used("gb300"), 2);
   store.resolveAttempts(row.id, [{ attempt: "att_stillopen001", outcome: "committed" }]);
-  assert.equal(store.completeClaimed(row.id, uid, store.find(row.id)!.attempt_epoch, []).freed, 2);
+  assert.equal(store.completeClaimed(row.id, uid, store.find(row.id)!.attempt_epoch, [], closed(row)).freed, 2);
 });
