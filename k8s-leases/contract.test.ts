@@ -24,7 +24,7 @@ import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
 /** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol, the build Jobs and the lease fence (gate, probe, drain). */
-export const GUARD_COMMIT = "5c6b3543ac28b95f46dd39f26bf230c90930d10e";
+export const GUARD_COMMIT = "70fcc2dfd6d5c7b6b336b6eeb3e59c25d43214ef";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
