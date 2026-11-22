@@ -459,6 +459,7 @@ export class FakeGuard {
       resolutions,
       fence: { lease_id: input.leaseId, seq: shown.claim_seq, state: "closing" },
       drain_monotonic_seconds: 120.4,
+      ...(armed === "retired" ? {} : { max_probe_gap_seconds: 5.2 }),
       armed,
       lease_fence: leaseFence,
       ...this.downReport,

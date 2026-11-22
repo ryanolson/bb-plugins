@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Database from "better-sqlite3";
 import type { Config } from "./lib/settings.ts";
-import { DRAIN_MS, MIGRATIONS, createStore, type FenceReport } from "./lib/store.ts";
+import { DRAIN_MS, MAX_PROBE_GAP_MS, MIGRATIONS, createStore, type FenceReport } from "./lib/store.ts";
 import {
   ARMED,
   AUDIT,
@@ -66,6 +66,10 @@ const REFUSED: Array<[string, ProbeAnswer]> = [
   ["shared", SHARED],
   ["audit, for a normal claim", AUDIT],
   ["engine_unavailable mode", ENGINE_DOWN],
+  // The mode Pod is refused by our entry, but the canary is admitted: the canary policy is gone.
+  ["canary_absent", { canary: "disarmed", mode: "enforcing", scope: "finegrained", armed: false, mode_entry: "finegrained", cause: "canary_absent: the canary policy's entry did not answer" }],
+  // Kyverno is down: our entry refuses by name, so the fence holds, but an outage is no time to claim.
+  ["canary engine_unavailable with mode enforcing", verdict("engine_unavailable", "enforcing")],
   ["probe failure", "fail"],
 ];
 
@@ -206,22 +210,26 @@ test("seq rises across a replace, an adopt keeps its seq, and a replay returns i
   assert.equal(third.json.seq, 3);
 });
 
-test("seq is per kube context and namespace, and is never reused", () => {
+test("seq is per namespace name, across kube contexts, and is never reused", () => {
   const { store, cfg, ask } = storeWorld();
   const a = store.claim({ ...ask, id: "lse_seqstore0001", request: "req_seqstore00001", replaces: null }, cfg, 10 * MIN).row;
   const other = store.claim({ ...ask, namespace: "dyntest-alice-two", uid: "00000000-0000-4000-8000-0000000000c2", id: "lse_seqstore0002", request: "req_seqstore00002", replaces: null }, cfg, 10 * MIN).row;
   assert.deepEqual([a.claim_seq, other.claim_seq], [1, 1]);
-  // The unique index holds even across states.
   store.release(a.id, THREAD_A, cfg);
-  assert.throws(() => store.db.prepare("INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, mode, claim_seq) VALUES ('lse_dupseq00001', ?, ?, ?, ?, 'u', 'gb300', 1, 1, 0, 0, 1, 'released', 'claimed', 1)").run(THREAD_B, CLUSTER_A, CLUSTER_A, PREMADE));
+  assert.equal(store.completeClaimed(a.id, ask.uid, store.find(a.id)!.attempt_epoch, [], { fence: { lease_id: a.id, seq: 1, state: "closing" }, drain_monotonic_seconds: 120, max_probe_gap_seconds: 5, armed: "continuous", lease_fence: "true" }).freed, 2);
+  // The cluster's kube context is renamed: the next claim of the same namespace still counts on from 1.
+  const renamed = store.claim({ ...ask, context: "renamed-context-a", id: "lse_seqstore0003", request: "req_seqstore00003", replaces: null }, cfg, 10 * MIN).row;
+  assert.equal(renamed.claim_seq, 2);
+  // The unique index holds across contexts and states.
+  assert.throws(() => store.db.prepare("INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, mode, claim_seq) VALUES ('lse_dupseq00001', ?, ?, 'another-context', ?, 'u', 'gb300', 1, 1, 0, 0, 1, 'released', 'claimed', 1)").run(THREAD_B, CLUSTER_A, PREMADE), /UNIQUE/);
 });
 
 // --- completion ---
 
-function storeWorld(drainMs?: number) {
+function storeWorld(drainMs?: number, maxProbeGapMs?: number) {
   const db = new Database(":memory:");
   for (const statement of MIGRATIONS) db.exec(statement);
-  const store = Object.assign(createStore(db, () => T0, drainMs === undefined ? {} : { drainMs }), { db });
+  const store = Object.assign(createStore(db, () => T0, { ...(drainMs === undefined ? {} : { drainMs }), ...(maxProbeGapMs === undefined ? {} : { maxProbeGapMs }) }), { db });
   const cfg: Config = {
     limits: { gb300: 8 }, maxLeaseMs: 4 * HOUR, maxRenewals: 1, graceMs: 60 * MIN, maxExtendMs: 24 * HOUR, clusters: {},
     firstRuns: {}, multiNode: [], hosts: [HOST_ONE], profilesCommand: "k8s-check",
@@ -233,12 +241,12 @@ function storeWorld(drainMs?: number) {
 }
 
 /** A released claimed lease and the report of a teardown that did everything right. */
-function closing(drainMs?: number) {
-  const { store, cfg, ask } = storeWorld(drainMs);
+function closing(drainMs?: number, maxProbeGapMs?: number) {
+  const { store, cfg, ask } = storeWorld(drainMs, maxProbeGapMs);
   // A predecessor, so the lease under test has seq 2 and a seq of 1 is stale.
   const before = store.claim({ ...ask, id: "lse_before000001", request: "req_before0000001", replaces: null }, cfg, 10 * MIN).row;
   store.release(before.id, THREAD_A, cfg);
-  const good = (id: string, seq: number): FenceReport => ({ fence: { lease_id: id, seq, state: "closing" }, drain_monotonic_seconds: 120, armed: "continuous", lease_fence: "true" });
+  const good = (id: string, seq: number): FenceReport => ({ fence: { lease_id: id, seq, state: "closing" }, drain_monotonic_seconds: 120, max_probe_gap_seconds: 5, armed: "continuous", lease_fence: "true" });
   assert.equal(store.completeClaimed(before.id, ask.uid, store.find(before.id)!.attempt_epoch, [], good(before.id, 1)).freed, 2);
   const row = store.claim({ ...ask, id: "lse_closing00001", request: "req_closing000001", replaces: before.id }, cfg, 10 * MIN).row;
   assert.equal(row.claim_seq, 2);
@@ -258,6 +266,8 @@ const MISSING: Array<[string, (r: FenceReport) => FenceReport]> = [
   ["a host-reported short drain (the guard's drain set to 30 s)", (r) => ({ ...r, drain_monotonic_seconds: 30 })],
   ["no armed", ({ armed: _, ...rest }) => rest],
   ["armed: retired without a recorded proof", (r) => ({ ...r, armed: "retired", lease_fence: null })],
+  ["no probe gap reported", ({ max_probe_gap_seconds: _, ...rest }) => rest],
+  ["a probe gap of 8.1 s", (r) => ({ ...r, max_probe_gap_seconds: 8.1 })],
 ];
 
 for (const [name, spoil] of MISSING) {
@@ -278,6 +288,21 @@ test("W is the plugin's own constant, 120 s; only a code option moves it", () =>
   assert.equal(DRAIN_MS, 120_000);
   const { complete, report } = closing(30_000);
   assert.equal(complete({ ...report, drain_monotonic_seconds: 30 }).freed, 2);
+});
+
+test("the probe gap is the plugin's own limit, 8 s: 8.0 completes; only a code option moves it", () => {
+  assert.equal(MAX_PROBE_GAP_MS, 8_000);
+  const { complete, report } = closing();
+  assert.deepEqual(complete({ ...report, max_probe_gap_seconds: 8.0 }), { completed: true, freed: 2 });
+  const loose = closing(undefined, 20_000);
+  assert.equal(loose.complete({ ...loose.report, max_probe_gap_seconds: 15 }).freed, 2);
+});
+
+test("armed: retired takes no probes: it completes without a probe gap", () => {
+  const { store, row, report, complete } = closing();
+  store.recordFenceRetired(row.id, PROOF);
+  const { max_probe_gap_seconds: _, ...rest } = report;
+  assert.deepEqual(complete({ ...rest, armed: "retired", lease_fence: null }), { completed: true, freed: 2 });
 });
 
 test("armed: retired completes only with a recorded proof and an unenrolled lease_fence, and flags fence_retired_completion", () => {
@@ -348,7 +373,7 @@ test("a complete teardown whose report misses a condition frees nothing and keep
   assert.equal((await w.show(id)).state, "released");
 });
 
-test("the tick probes each live claimed lease only every fifth tick, and raises fence_disarmed once", async () => {
+test("the tick probes each live claimed lease only every fifth tick, and raises fence_disarmed_live once", async () => {
   const w = await world();
   const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
   assert.equal(w.probes(), 1, "the claim's own probe");
@@ -356,20 +381,21 @@ test("the tick probes each live claimed lease only every fifth tick, and raises 
   assert.equal(w.probes(), 1);
   await ticksUntil(w, () => false, 1);
   assert.equal(w.probes(), 2, "the fifth tick probes");
-  assert.equal((await w.flags("fence_disarmed")).length, 0);
+  assert.equal((await w.flags("fence_disarmed_live")).length, 0);
   w.guard.setProbe(w.ns, verdict("finegrained", "audit"));
   await ticksUntil(w, () => false, 4);
   assert.equal(w.probes(), 2);
   await ticksUntil(w, () => false, 1);
   assert.equal(w.probes(), 3);
-  const flags = await w.flags("fence_disarmed");
+  const flags = await w.flags("fence_disarmed_live");
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.lease_id, id);
   assert.match(flags[0]!.detail, /mode audit/);
   assert.match(flags[0]!.detail, /fake cause: canary finegrained, mode audit/);
   await ticksUntil(w, () => false, 5);
   assert.equal(w.probes(), 4);
-  assert.equal((await w.flags("fence_disarmed")).length, 1, "flagged once");
+  assert.equal((await w.flags("fence_disarmed_live")).length, 1, "flagged once");
+  assert.equal((await w.flags("fence_disarmed")).length, 0, "the live probe keeps its own kind");
   // It frees nothing: the lease stays active and charged.
   assert.equal((await w.show(id)).state, "active");
   assert.equal(await w.used(), 2);
@@ -380,12 +406,28 @@ test("the tick probes each live claimed lease only every fifth tick, and raises 
   assert.equal(w.probes(), before + 1);
 });
 
-test("a live probe that cannot run raises fence_disarmed with its error", async () => {
+test("a live probe's flag never hides the teardown's: fence_disarmed is raised at teardown after fence_disarmed_live", async () => {
+  const w = await world();
+  const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
+  w.guard.setProbe(w.ns, DISARMED);
+  await ticksUntil(w, () => false, 5);
+  assert.equal((await w.flags("fence_disarmed_live")).length, 1);
+  await w.cli(["lease", "release", id], THREAD_A);
+  const teardown = await w.flags("fence_disarmed");
+  assert.equal(teardown.length, 1);
+  assert.equal(teardown[0]!.lease_id, id);
+  assert.match(teardown[0]!.detail, /its teardown found the fence not armed/);
+  assert.ok(teardown[0]!.detail.includes(SCALED_TO_ZERO));
+});
+
+test("a live probe that cannot run raises fence_probe_failed with its error, not a disarmed flag", async () => {
   const w = await world();
   const id = (await w.claim(THREAD_A, w.ns, 2)).json.lease_id;
   w.guard.setProbe(w.ns, "fail");
   await ticksUntil(w, () => false, 5);
-  const flags = await w.flags("fence_disarmed");
+  assert.equal((await w.flags("fence_disarmed_live")).length, 0);
+  assert.equal((await w.flags("fence_disarmed")).length, 0);
+  const flags = await w.flags("fence_probe_failed");
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.lease_id, id);
   assert.match(flags[0]!.detail, /unknown command 'fence'/);
@@ -489,10 +531,13 @@ test("armed: trial completes only a trial lease, under the same gate, seq and dr
   const { store, cfg, ask } = storeWorld();
   const trial = store.claim({ ...ask, gpus: 1, trial: true, id: "lse_trialstore01", request: "req_trialstore001", replaces: null }, cfg, 10 * MIN).row;
   store.release(trial.id, THREAD_A, cfg);
-  const report = (row: { id: string; claim_seq: number | null }): FenceReport => ({ fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, armed: "trial", lease_fence: "true" });
+  const report = (row: { id: string; claim_seq: number | null }): FenceReport => ({ fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, max_probe_gap_seconds: 5, armed: "trial", lease_fence: "true" });
   const complete = (row: { id: string; uid: string }, r: FenceReport) => store.completeClaimed(row.id, row.uid, store.find(row.id)!.attempt_epoch, [], r);
   assert.equal(complete(trial, { ...report(trial), drain_monotonic_seconds: 60 }).freed, 0, "a short drain");
   assert.equal(complete(trial, { ...report(trial), fence: { lease_id: trial.id, seq: 9, state: "closing" } }).freed, 0, "a wrong seq");
+  assert.equal(complete(trial, { ...report(trial), max_probe_gap_seconds: 8.1 }).freed, 0, "a probe gap past the limit");
+  const { max_probe_gap_seconds: _, ...noGap } = report(trial);
+  assert.equal(complete(trial, noGap).freed, 0, "no probe gap");
   assert.deepEqual(complete(trial, report(trial)), { completed: true, freed: 1 });
   // A lease that is not a trial frees nothing on a trial report.
   const normal = store.claim({ ...ask, id: "lse_normalstore1", request: "req_normalstore01", replaces: trial.id }, cfg, 10 * MIN).row;
@@ -508,7 +553,7 @@ test("a trial lease: the live probe does not flag Audit with a fine-grained webh
   const id = (await w.claim(THREAD_A, w.ns, 1, { trial: true })).json.lease_id;
   await ticksUntil(w, () => false, 5);
   assert.equal(w.probes(), 2, "the fifth tick probed");
-  assert.equal((await w.flags("fence_disarmed")).length, 0, "a trial under Audit is as expected");
+  assert.equal((await w.flags("fence_disarmed_live")).length, 0, "a trial under Audit is as expected");
   // The trial teardown completes, as a trial.
   assert.equal((await w.cli(["lease", "release", id], THREAD_A)).json.state, "released");
   assert.equal(await w.used(), 0);
@@ -520,7 +565,7 @@ test("a trial lease whose fence disarms is still flagged by the live probe", asy
   const id = (await w.claim(THREAD_A, w.ns, 1, { trial: true })).json.lease_id;
   w.guard.setProbe(w.ns, DISARMED);
   await ticksUntil(w, () => false, 5);
-  const flags = await w.flags("fence_disarmed");
+  const flags = await w.flags("fence_disarmed_live");
   assert.equal(flags.length, 1);
   assert.equal(flags[0]!.lease_id, id);
   assert.ok(flags[0]!.detail.includes(SCALED_TO_ZERO), flags[0]!.detail);

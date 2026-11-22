@@ -15,7 +15,7 @@ import { ARMED, CLAIM_PROFILES as PROFILES, CLUSTER_A, DEVELOPER, DISARMED, HOST
 
 /** The fence report of a teardown that closed this lease's gate and drained, armed throughout. */
 function closed(row: LeaseRow): FenceReport {
-  return { fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, armed: "continuous", lease_fence: "true" };
+  return { fence: { lease_id: row.id, seq: row.claim_seq!, state: "closing" }, drain_monotonic_seconds: 120, max_probe_gap_seconds: 5, armed: "continuous", lease_fence: "true" };
 }
 
 /** Phase-1 worlds turn claims on with an armed fence: enforcing, fine-grained. */

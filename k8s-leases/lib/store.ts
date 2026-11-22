@@ -99,6 +99,10 @@ CREATE INDEX attempts_open ON attempts(lease_id) WHERE resolved_at IS NULL`,
 ALTER TABLE leases ADD COLUMN trial INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE leases ADD COLUMN fence_retired_proof TEXT;
 CREATE UNIQUE INDEX leases_claim_seq ON leases(context, namespace, claim_seq) WHERE claim_seq IS NOT NULL`,
+  // Version 4: `claim_seq` counts per namespace name, over every kube context, so a renamed context cannot
+  // start it again at 1 below the seq the gate already holds.
+  `DROP INDEX leases_claim_seq;
+CREATE UNIQUE INDEX leases_claim_seq_namespace ON leases(namespace, claim_seq) WHERE claim_seq IS NOT NULL`,
 ];
 
 export interface LeaseRow {
@@ -189,6 +193,8 @@ export interface FenceReport {
   /** The gate as read back after the teardown wrote `closing`. */
   fence?: { lease_id: string; seq: number; state: string };
   drain_monotonic_seconds?: number;
+  /** The longest span between one fence probe's start and the next probe's end, in seconds. */
+  max_probe_gap_seconds?: number;
   armed?: "continuous" | "retired" | "trial";
   /** The namespace's enrollment label at the end of the teardown, or null. */
   lease_fence?: string | null;
@@ -241,9 +247,17 @@ export interface AcquireRequest {
  */
 export const DRAIN_MS = 120_000;
 
+/**
+ * The longest span a claimed teardown may report between one fence probe's start and the next probe's
+ * end. A fence emptied and restored inside a longer span could go unseen. The plugin's own constant.
+ */
+export const MAX_PROBE_GAP_MS = 8_000;
+
 export interface StoreOptions {
   /** Tests only: a shorter W. */
   drainMs?: number;
+  /** Tests only: another probe gap limit. */
+  maxProbeGapMs?: number;
 }
 
 /** Flags raised after this many failed reconciles in a row. */
@@ -258,6 +272,7 @@ export function wholeSecond(ms: number): number {
 
 export function createStore(db: Db, now: () => number, options: StoreOptions = {}) {
   const drainMs = options.drainMs ?? DRAIN_MS;
+  const maxProbeGapMs = options.maxProbeGapMs ?? MAX_PROBE_GAP_MS;
   const q = {
     get: db.prepare<[string], LeaseRow>("SELECT * FROM leases WHERE id = ?"),
     live: db.prepare<[], LeaseRow>(`SELECT * FROM leases WHERE ${LIVE} ORDER BY created_at, id`),
@@ -309,6 +324,11 @@ export function createStore(db: Db, now: () => number, options: StoreOptions = {
     }
     const drain = report.drain_monotonic_seconds;
     if (drain === undefined || !(drain * 1000 >= drainMs)) return `the drain was ${drain ?? "not reported"} s, less than ${drainMs / 1000} s`;
+    if (report.armed === "continuous" || report.armed === "trial") {
+      // Armed throughout means probes close enough together that no emptied fence fits between them.
+      const gap = report.max_probe_gap_seconds;
+      if (gap === undefined || !(gap * 1000 <= maxProbeGapMs)) return `the longest gap between fence probes was ${gap ?? "not reported"} s, more than ${maxProbeGapMs / 1000} s`;
+    }
     if (report.armed === "continuous") return null;
     // Under Audit nothing is denied, so this holds only for the trial it was granted to: one GPU, no GPU work.
     if (report.armed === "trial") return row.trial === 1 ? null : "the fence reads trial (Audit), but this lease is not a trial";
@@ -508,8 +528,9 @@ export function createStore(db: Db, now: () => number, options: StoreOptions = {
           if (free === undefined) throw new Refusal("multi_node_unapproved", `Each multi-node approval for ${req.namespace} is used already; one approval covers one lease.`);
           db.prepare("INSERT INTO approvals_used (approval, lease_id, at) VALUES (?, ?, ?)").run(free, req.id, t);
         }
-        // Over every lease ever made on the namespace, in this transaction: never reused, and above every predecessor's.
-        const seq = (db.prepare<[string, string], { top: number }>("SELECT COALESCE(MAX(claim_seq), 0) AS top FROM leases WHERE context = ? AND namespace = ?").get(req.context, req.namespace)?.top ?? 0) + 1;
+        // Over every lease ever made on a namespace of this name, under any kube context, in this transaction:
+        // never reused, and above every predecessor's, even across a context rename.
+        const seq = (db.prepare<[string], { top: number }>("SELECT COALESCE(MAX(claim_seq), 0) AS top FROM leases WHERE namespace = ?").get(req.namespace)?.top ?? 0) + 1;
         db.prepare(
           `INSERT INTO leases (id, thread_id, cluster, context, namespace, uid, gpu_type, gpus, hours, multi_node, created_at, expires_at, state, reason, mode, request_id, predecessor, claim_seq, trial)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, 'claimed', ?, ?, ?, ?)`,

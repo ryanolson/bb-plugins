@@ -10,8 +10,8 @@ import { createK8sLeasesPlugin } from "./server.ts";
 import { BASE_SETTINGS, CLUSTER_A, HOUR, T0, THREAD_A, newUid } from "./test-support.ts";
 
 test("a v1 database migrates to the current schema, keeps its live leases across a reload, and registers enforcement", async () => {
-  // Append-only: v1 is the one statement first installed; v2 (claims) and v3 (the fence) come after it.
-  assert.equal(MIGRATIONS.length, 3);
+  // Append-only: v1 is the one statement first installed; v2 (claims), v3 (the fence) and v4 (seq per namespace name) come after it.
+  assert.equal(MIGRATIONS.length, 4);
   let loaded = createFakePluginHost({ pluginId: "k8s-leases", settings: BASE_SETTINGS });
   try {
     const db = loaded.bb.storage.database();

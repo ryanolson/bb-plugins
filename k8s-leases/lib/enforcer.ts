@@ -17,8 +17,9 @@
 // - Thread check, for an active lease: bb's thread lookup, with its own
 //   timeout. Only when it finishes does it revoke a lease whose thread is gone.
 // - Fence probe, for an active claimed lease, every fifth dispatch: `fence
-//   probe` on one host. A fence not armed is flagged early, so a person can
-//   act before teardown; it frees nothing and revokes nothing.
+//   probe` on one host. A fence not armed is flagged early
+//   (`fence_disarmed_live`), so a person can act before teardown; a probe that
+//   cannot run is `fence_probe_failed`. It frees nothing and revokes nothing.
 //
 // `down` runs once per lease, on one host at a time, on its own lane.
 // `extend` runs one at a time per lease. After the plugin unloads, nothing
@@ -201,6 +202,7 @@ export function createEnforcer(deps: EnforcerDeps) {
       const report: FenceReport = {
         ...(result.fence === undefined ? {} : { fence: result.fence }),
         ...(result.drain_monotonic_seconds === undefined ? {} : { drain_monotonic_seconds: result.drain_monotonic_seconds }),
+        ...(result.max_probe_gap_seconds === undefined ? {} : { max_probe_gap_seconds: result.max_probe_gap_seconds }),
         ...(result.armed === undefined ? {} : { armed: result.armed }),
         ...(result.lease_fence === undefined ? {} : { lease_fence: result.lease_fence }),
       };
@@ -370,7 +372,7 @@ export function createEnforcer(deps: EnforcerDeps) {
 
   /**
    * The live fence probe of an active claimed lease, on every `PROBE_EVERY`-th dispatch: one host,
-   * read only. A fence not armed, or a probe that cannot run, is flagged once. It frees nothing.
+   * read only. A fence not armed, and a probe that cannot run, are each flagged once. It frees nothing.
    */
   function probeFence(lease: LeaseRow, cfg: Config): Promise<void> | null {
     const count = (sinceProbe.get(lease.id) ?? 0) + 1;
@@ -379,8 +381,11 @@ export function createEnforcer(deps: EnforcerDeps) {
       return null;
     }
     sinceProbe.set(lease.id, 0);
+    // Kinds of their own, so a live flag never hides the teardown's `fence_disarmed` (each is raised once).
     const disarmed = (what: string) =>
-      db().flagOnce(lease.id, "fence_disarmed", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the live fence probe ${what}. A teardown now cannot complete; its GPUs stay charged until the fence is armed again.`);
+      db().flagOnce(lease.id, "fence_disarmed_live", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the live fence probe ${what}. A teardown now cannot complete; its GPUs stay charged until the fence is armed again.`);
+    const failed = (what: string) =>
+      db().flagOnce(lease.id, "fence_probe_failed", `Lease ${lease.id} (${lease.namespace} on ${lease.cluster}): the live fence probe ${what}. That says nothing about the fence; the next probe tries again.`);
     const probe = observed(
       (async () => {
         let reply;
@@ -388,10 +393,10 @@ export function createEnforcer(deps: EnforcerDeps) {
           reply = await deps.hosts.one<ProbeResult>("probe-fence", deps.target(lease, cfg, "probe-fence"));
         } catch (error) {
           if (deps.disposed()) throw new Unloaded();
-          disarmed(`could not run: ${message(error)}`);
+          failed(`could not run: ${message(error)}`);
           return;
         }
-        if (!reply.result.ok) disarmed(`failed on ${reply.hostId} (${reply.result.code}): ${reply.result.error}`);
+        if (!reply.result.ok) failed(`failed on ${reply.hostId} (${reply.result.code}): ${reply.result.error}`);
         else if (!reply.result.value.armed && !trialAsGranted(lease, reply.result.value)) disarmed(`reads the fence not armed: ${probeWords(reply.result.value)}`);
       })().finally(() => fenceProbes.delete(lease.id)),
       `lease ${lease.id}: fence probe`,

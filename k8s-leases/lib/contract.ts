@@ -91,6 +91,8 @@ export const FENCE_READ = z.object({ lease_id: z.string(), seq: z.number().int()
 export const FENCE_REPORT = {
   fence: FENCE_READ,
   drain_monotonic_seconds: z.number().finite().min(0),
+  /** The longest span from one fence probe's start to the next probe's end, from before the close through the final probe. */
+  max_probe_gap_seconds: z.number().finite().min(0),
   armed: z.enum(["continuous", "retired", "trial"]),
   lease_fence: z.string().nullable(),
 };
@@ -166,6 +168,7 @@ export const hostContract = defineRpcContract({
           resolutions: z.array(RESOLUTION).optional(),
           fence: FENCE_REPORT.fence.optional(),
           drain_monotonic_seconds: FENCE_REPORT.drain_monotonic_seconds.optional(),
+          max_probe_gap_seconds: FENCE_REPORT.max_probe_gap_seconds.optional(),
           armed: FENCE_REPORT.armed.optional(),
           lease_fence: FENCE_REPORT.lease_fence.optional(),
         })

@@ -56,9 +56,9 @@ if (process.argv[2] === "fence" && mode === "probe_bad") {
 } else if (process.argv[2] === "fence") {
   process.stdout.write(JSON.stringify({ namespace: "dyntest-a", canary: "finegrained", mode: "enforcing", mode_entry: "finegrained", scope: "finegrained", armed: true, lease_fence: "true", canary_text: "denied by validate.kyverno.svc-fail-finegrained-agent-lease-fence-canary", mode_text: "pods-need-the-open-lease", extra: 1 }));
 } else if (process.argv[2] === "down" && mode === "claimed_complete") {
-  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, namespace_kept: true, deleted: [], resolutions: [], fence: { lease_id: "lse_test000001", seq: 7, state: "closing" }, drain_monotonic_seconds: 120.5, armed: "continuous", lease_fence: "true", probes: 26 }));
+  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, namespace_kept: true, deleted: [], resolutions: [], fence: { lease_id: "lse_test000001", seq: 7, state: "closing" }, drain_monotonic_seconds: 120.5, max_probe_gap_seconds: 5.5, armed: "continuous", lease_fence: "true", probes: 26 }));
 } else if (process.argv[2] === "down" && mode === "claimed_malformed") {
-  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, resolutions: [], fence: { lease_id: "lse_test000001", seq: "7", state: "closing" }, drain_monotonic_seconds: "120", armed: "always", lease_fence: 1 }));
+  process.stdout.write(JSON.stringify({ namespace: "dyntest-a", lease_id: "lse_test000001", complete: true, resolutions: [], fence: { lease_id: "lse_test000001", seq: "7", state: "closing" }, drain_monotonic_seconds: "120", max_probe_gap_seconds: "5", armed: "always", lease_fence: 1 }));
 } else if (process.argv[2] === "down" && mode === "claimed_disarmed") {
   process.stdout.write(JSON.stringify({ error: "a probe in the drain read disarmed", code: "teardown_incomplete", resolutions: [], fence_disarmed: true, probe: { canary: "disarmed", mode: "absent", scope: "unknown", armed: false, cause: "no fence webhook answered", canary_text: "created (dry run)", mode_text: "created (dry run)", extra: 1 } }));
   process.exit(4);
@@ -270,6 +270,7 @@ test("a claimed down passes the fence report through; malformed fence fields are
     resolutions: [],
     fence: { lease_id: "lse_test000001", seq: 7, state: "closing" },
     drain_monotonic_seconds: 120.5,
+    max_probe_gap_seconds: 5.5,
     armed: "continuous",
     lease_fence: "true",
   });

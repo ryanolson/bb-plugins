@@ -73,17 +73,21 @@ export interface K8sLeasesOptions {
   fenceGate?: (probe: FenceProbe, claim: { trial: boolean }) => boolean;
   /** Tests only: a shorter drain minimum W than the plugin's own `DRAIN_MS`. */
   drainMs?: number;
+  /** Tests only: another probe gap limit than the plugin's own `MAX_PROBE_GAP_MS`. */
+  maxProbeGapMs?: number;
   /** Test-only fault injection: a throw at a phase of the claim transaction models a killed plugin. */
   faults?: { claim?: (phase: "before-commit" | "after-commit") => void };
 }
 
 /**
- * The contract's fence gate. A normal claim needs the policy enforcing through its own fine-grained
- * webhook; a trial claim (the first run on a cluster, while the policy is in Audit) needs Audit through
- * that webhook. Anything else, including a Kyverno that is down, refuses.
+ * The contract's fence gate. Both need the canary refused by its own fine-grained entry, so a canary
+ * policy that is gone, or a Kyverno that is down, refuses. A normal claim also needs the fence armed and
+ * agent-lease-fence enforcing through its own webhook; a trial claim (the first run on a cluster, while
+ * the policy is in Audit) needs Audit through that webhook.
  */
 export function fenceAllows(probe: FenceProbe, claim: { trial: boolean }): boolean {
-  return probe.scope === "finegrained" && probe.mode === (claim.trial ? "audit" : "enforcing");
+  if (probe.canary !== "finegrained" || probe.scope !== "finegrained") return false;
+  return claim.trial ? probe.mode === "audit" : probe.armed && probe.mode === "enforcing";
 }
 
 function message(error: unknown): string {
@@ -177,7 +181,10 @@ export function createK8sLeasesPlugin(options: K8sLeasesOptions = {}) {
 
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
-    const store = createStore(db, now, options.drainMs === undefined ? {} : { drainMs: options.drainMs });
+    const store = createStore(db, now, {
+      ...(options.drainMs === undefined ? {} : { drainMs: options.drainMs }),
+      ...(options.maxProbeGapMs === undefined ? {} : { maxProbeGapMs: options.maxProbeGapMs }),
+    });
     const host = bb.hosts.experimental_client({ contract: hostContract });
 
     // One abort signal for every host call of this plugin load; it fires on unload.
