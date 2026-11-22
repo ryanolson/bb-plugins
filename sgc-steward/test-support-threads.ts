@@ -31,6 +31,10 @@ export interface FakeThread {
   tokens?: number | null;
   /** Epoch ms its first turn started, the `turn/started` event. */
   firstTurnAt?: number;
+  /** Epoch ms of a turn a fork inherited from its source: bb copies it with the source's time, before the fork existed. */
+  inheritedTurnAt?: number;
+  /** How many turns it inherited at `inheritedTurnAt`; 1 by default. */
+  inheritedTurns?: number;
   /** Epoch ms of its first turn request, the `client/turn/requested` event that carries `brief`; START by default. */
   requestedAt?: number;
   offerAt?: string;
@@ -146,10 +150,17 @@ export async function lifecycleSetup(threads: FakeThread[], options: { key?: str
         },
       });
     }
-    if (thread.firstTurnAt !== undefined && wants("turn/started")) {
-      events.push({ id: `evt_${thread.id}_turn`, scope: { kind: "thread" }, threadId: thread.id, seq: 2, createdAt: thread.firstTurnAt, type: "turn/started", data: {} });
+    const inherited = thread.inheritedTurnAt === undefined ? 0 : (thread.inheritedTurns ?? 1);
+    for (let index = 0; index < inherited && wants("turn/started"); index += 1) {
+      events.push({ id: `evt_${thread.id}_inherited_${index}`, scope: { kind: "thread" }, threadId: thread.id, seq: 2 + index, createdAt: thread.inheritedTurnAt, type: "turn/started", data: {} });
     }
-    return events;
+    if (thread.firstTurnAt !== undefined && wants("turn/started")) {
+      events.push({ id: `evt_${thread.id}_turn`, scope: { kind: "thread" }, threadId: thread.id, seq: 2 + inherited, createdAt: thread.firstTurnAt, type: "turn/started", data: {} });
+    }
+    // Pages as bb does: after a sequence number, up to a limit.
+    const { afterSeq, limit } = args as { afterSeq?: string; limit?: string };
+    const after = (events as Array<{ seq: number }>).filter((event) => afterSeq === undefined || event.seq > Number(afterSeq));
+    return limit === undefined ? after : after.slice(0, Number(limit));
   });
   sdk.stub("threads.childSummary", async (args: unknown) => {
     const { threadId } = args as { threadId: string };

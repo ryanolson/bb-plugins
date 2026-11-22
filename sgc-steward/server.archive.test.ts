@@ -489,3 +489,26 @@ test("overlap: the plugin's own archive announced twice is one archive, with no 
   assert.deepEqual([row.record.source, row.record.archiveCount], ["page", 1]);
   assert.doesNotMatch(row.why, /does not say/);
 });
+
+test("a fork's start skips the turns it inherited from its source, which bb copies with the source's times", async () => {
+  const t = await lifecycleSetup([
+    // Forked at 11:57 from a source whose turn started at 11:50; the fork's own first turn started at 11:59.
+    { id: "thr_fork_ran", title: "fork that ran", createdAt: START - 3 * MINUTE, inheritedTurnAt: START - 10 * MINUTE, firstTurnAt: START - MINUTE },
+    // The same fork that never ran a turn of its own.
+    { id: "thr_fork_idle", title: "fork that never ran", createdAt: START - 3 * MINUTE, inheritedTurnAt: START - 10 * MINUTE },
+  ]);
+  await t.emitArchived("thr_fork_ran", START);
+  await t.emitArchived("thr_fork_idle", START);
+  const view = await t.archive();
+  assert.deepEqual([rowOf(view, "thr_fork_ran").record.startedAt, rowOf(view, "thr_fork_ran").record.startedFrom], [START - MINUTE, "first-turn"]);
+  assert.deepEqual([rowOf(view, "thr_fork_idle").record.startedAt, rowOf(view, "thr_fork_idle").record.startedFrom], [START - 3 * MINUTE, "created"]);
+});
+
+test("a fork that inherited more than a page of turns still finds the first turn of its own", async () => {
+  const t = await lifecycleSetup([
+    { id: "thr_long_fork", title: "long fork", createdAt: START - 3 * MINUTE, inheritedTurnAt: START - 10 * MINUTE, inheritedTurns: 150, firstTurnAt: START - MINUTE },
+  ]);
+  await t.emitArchived("thr_long_fork", START);
+  const row = rowOf(await t.archive(), "thr_long_fork");
+  assert.deepEqual([row.record.startedAt, row.record.startedFrom], [START - MINUTE, "first-turn"]);
+});

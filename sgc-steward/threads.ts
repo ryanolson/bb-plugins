@@ -77,6 +77,9 @@ export const ARCHIVE_ROWS = 200;
 const MAX_ARCHIVE_ROWS = 500;
 /** How long a note of the plugin's own archive waits for bb's event before an event no longer counts as that archive. */
 const INTENT_MS = 10 * MINUTE;
+/** Started-turn events read per page, and the most pages read, when an archive looks for the first turn of its own. */
+const TURN_PAGE = 100;
+const TURN_PAGES = 20;
 /** Added to the reason when bb reported two archives during the plugin's request: one was the plugin's, and bb does not say which. */
 const TWO_ARCHIVES = "; another archive and an unarchive also happened while the plugin's request ran, and bb does not say which archive was the plugin's";
 /** Added to the reason when the plugin's archive call failed after an archive: it may have been someone else's. */
@@ -586,7 +589,7 @@ export function createThreads(deps: ThreadsDeps) {
     deps.archiveChanged();
     let filled = false;
     if ((startedFrom.get(thread.id) as { started_from: string } | undefined)?.started_from !== "first-turn") {
-      const first = await firstTurnAt(thread.id);
+      const first = await firstTurnAt(thread.id, thread.createdAt);
       if (first !== null) filled = fillStart.run(first, thread.id).changes > 0 || filled;
     }
     if (facts === outside && seen === undefined) filled = (await fillUsageOf(thread.id, archivedAt)) || filled;
@@ -605,14 +608,24 @@ export function createThreads(deps: ThreadsDeps) {
   }
 
   /**
-   * Epoch ms the thread's first turn started, or null when none did or bb
+   * Epoch ms the thread's own first turn started, or null when none did or bb
    * could not say. A turn request is no start: bb records it when
    * provisioning begins, and a request can be cancelled before any turn runs.
+   * A turn older than the thread is no start either: bb copies a fork's
+   * inherited turns into it with the source's times, so any turn event from
+   * before the thread was created is skipped.
    */
-  async function firstTurnAt(threadId: string): Promise<number | null> {
+  async function firstTurnAt(threadId: string, createdAt: number): Promise<number | null> {
     try {
-      const [first] = await sdk.threads.events.list({ threadId, types: ["turn/started"], order: "asc", limit: "1" });
-      return first === undefined ? null : first.createdAt;
+      let afterSeq: string | undefined;
+      for (let page = 0; page < TURN_PAGES; page += 1) {
+        const batch = await sdk.threads.events.list({ threadId, types: ["turn/started"], order: "asc", limit: String(TURN_PAGE), ...(afterSeq === undefined ? {} : { afterSeq }) });
+        const own = batch.find((event) => event.createdAt >= createdAt);
+        if (own !== undefined) return own.createdAt;
+        if (batch.length < TURN_PAGE) return null;
+        afterSeq = String(batch[batch.length - 1]!.seq);
+      }
+      return null;
     } catch (error) {
       deps.log(`could not read the first turn of archived ${threadId}: ${message(error)}`);
       return null;
