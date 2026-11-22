@@ -24,7 +24,7 @@ import { createHostEntry } from "./host.ts";
 import { createK8sLeasesPlugin } from "./server.ts";
 
 /** The k8s-guard commit this contract was last checked against: ryanolson/dynamo-dotfiles, the claim protocol, the build Jobs and the lease fence (gate, probe, drain). */
-export const GUARD_COMMIT = "70fcc2dfd6d5c7b6b336b6eeb3e59c25d43214ef";
+export const GUARD_COMMIT = "d7cd5745f8d536f949ff4f320034783e694c4011";
 
 const REPO = process.env.K8S_GUARD_REPO;
 const skip = REPO === undefined ? "K8S_GUARD_REPO is not set" : false;
@@ -452,6 +452,9 @@ test("a claimed namespace through the real guard: a write in flight across teard
   assert.deepEqual(complete[0].fence, { lease_id: id, seq: 1, state: "closing" });
   assert.equal(complete[0].armed, "continuous");
   assert.equal(typeof complete[0].drain_monotonic_seconds, "number");
+  // The real guard reports the largest span between its probes, which the plugin checks against its own limit.
+  assert.equal(typeof complete[0].max_probe_gap_seconds, "number");
+  assert.ok(complete[0].max_probe_gap_seconds <= 8, JSON.stringify(complete[0]));
   assert.equal(state().objects[world.premade]!["ConfigMap/wcep-agent-fence"].data.state, "closing");
   assert.equal(ended.open_attempts.length, 0);
   assert.equal(state().objects[world.premade]!["DynamoGraphDeployment/w"], undefined);
