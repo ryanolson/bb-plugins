@@ -15,6 +15,8 @@ bb plugin config k8s-leases set kubeconfig /path/to/the/bot/kubeconfig
 
 The clusters come from the cluster profiles on each host: `~/.config/k8s-clusters/profiles.toml`, read with `k8s-check --list` (schema 1). A profile gives the cluster's kube context, `allowed`, `bot_can_write`, `gpu_type` and `gpus_per_node`. A lease stores the cluster's profile name, and every `k8s-guard` call takes `--context <profile context>`.
 
+Install this version before hosts take the k8s-guard that speaks the claim protocol (it calls `bb k8s lease attempt begin` and `lease latest`; an older plugin answers with usage text, and that guard then refuses every leased write). The older guard works with this plugin.
+
 Cluster names and machine ids are internal. They go only in settings, never in this repository. With no hosts set, `acquire` fails closed.
 
 ## Settings
